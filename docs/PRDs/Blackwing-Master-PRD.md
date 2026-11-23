@@ -387,11 +387,12 @@ Mobile is out of scope, and these keep it possible:
 
 Slices, as a proposal; each gets its own PRD when it starts.
 
-1. **Sound out.** `hifi_platform` on Linux, `hifi_codec` with FLAC, `hifi` with
+1. **Sound out** ([Blackwing-Slice-1-PRD.md](Blackwing-Slice-1-PRD.md)). `hifi_platform` on Linux, `hifi_codec` with FLAC, `hifi` with
    the lead, `blackwing_player` with the transport's events and tables, and the executable playing files named
    on the command line.
    *Done when* a FLAC file's samples, captured at the device boundary, are the decoder's
-   samples exactly, and an hour plays with no underrun while the disk is busy.
+   samples exactly, and ninety seconds play with no underrun while the disk is busy, from
+   the built-in disk and two USB drives. An hour-long run is owed after the gate.
 2. **The recut.** Seek, skip, the queue, volume and `hifi_eq`, all through the recut and
    the join; tracks joined in one stream.
    *Done when* a control is heard within the target on a warm file, a cold file is heard
