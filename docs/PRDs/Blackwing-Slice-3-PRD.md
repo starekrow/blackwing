@@ -303,20 +303,21 @@ close, for whatever a generator would not think of.
 
 ## What the engine gets
 
-- **A listing of one directory**, not a tree: names, kinds, sizes and times, hidden
-  entries on request, usable from a task. The walk has to be a directory at a time for
-  the priority slot to mean anything, and `io_list_files_stat` is the whole tree in
-  one call. Blocks milestone 3.
-- **The directory for a program's own data**, per OS (`~/.local/share/blackwing` here),
-  if the engine does not have one already. The index and the overrides live there.
-- **Whether a path is on a share**, so a root can be polled without being told.
+Written up as KR11 to KR13 in
+[Korvid-Changes-For-Blackwing.md](Korvid-Changes-For-Blackwing.md).
+
+- **KR11, a listing of one directory**, not a tree: names, kinds, sizes and times,
+  usable from a task. The walk has to be a directory at a time for the priority slot
+  to mean anything, and `io_list_files_stat` is the whole tree in one call. Blocks
+  milestone 3.
+- **KR12, whether a path is on a share**, so a root can be polled without being told.
   Wanted; a start-up walk makes it not needed for correctness.
-- **A volume's identity in `IoStat`**, so "the root is a different disk now" can be
-  told from "the root is empty". Wanted; the offline rule above works without it.
+- **KR13, a volume's identity in `IoStat`**, so "the root is a different disk now" can
+  be told from "the root is empty". Wanted; the offline rule above works without it.
 - **KR10, the timed wait**, is still wanted by `hifi`.
 
-These go to [Korvid-Changes-For-Blackwing.md](Korvid-Changes-For-Blackwing.md) as KR11
-to KR14 when this draft is agreed.
+The directory for Blackwing's own data needs nothing: the engine's
+`platform_pref_path` is it. The index and the overrides live there.
 
 Two things need the machine and a go-ahead, not the engine: vendoring sqlite's
 amalgamation and dr_mp3 are downloads, and the MP3 test files want a reference

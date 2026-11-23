@@ -237,6 +237,93 @@ signalled: `pthread_cond_timedwait` on `CLOCK_MONOTONIC`, `SleepConditionVariabl
 
 **Workaround today.** The naps, in `modules/hifi/src/hifi.cc`.
 
+## Found in planning slice 3
+
+Nov 23, 2026. From [Blackwing-Slice-3-PRD.md](Blackwing-Slice-3-PRD.md), the library,
+before any of it is built. Not yet put to Korvid.
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR11 | One directory can be listed, not only a whole tree | `platform` | P0, blocks slice 3 milestone 3 |
+| KR12 | Whether a path is on a network share can be asked | `platform` | P2 |
+| KR13 | A stat says which volume the path is on | `platform` | P2 |
+
+### KR11: listing one directory
+
+**What was run into.** The library's first pass walks a root to list its audio files.
+`io_list_files` and `io_list_files_stat` walk the whole tree under a directory in one
+call, in name order, skipping hidden entries. A caller can stop the walk and cannot
+steer it. The library has to steer: when someone opens a folder that has not been
+walked, that folder is walked next, ahead of the rest. On the built-in disk fifty
+thousand files list in about a second and it would not matter. On a USB 2 drive or a
+share the walk is minutes, and "what you look at is scanned next" is the point of the
+design.
+
+**What is asked.**
+
+1. **A listing of one directory's own entries**, not its descendants: for each, its
+   name, whether it is a file or a directory, and for a file its size and modification
+   time, from the listing itself where the OS gives them (as `io_list_files_stat` does
+   now).
+2. **Usable from a task** on the I/O queue's workers: blocking is fine, the main thread
+   is not where it runs. A request through the queue with a completion would do as
+   well, and is not needed.
+3. **Hidden entries on request.** Skipped by default, as now.
+4. **A link is said to be a link**, as well as what it points at, so a walk can refuse
+   to follow one out of its root or round a loop.
+5. **A name that is not valid UTF-8 is still listed**, in a form that can be handed
+   back to `read_file` and opens the same file. Old music collections have them.
+6. **Failure says why**: not there, not a directory, no permission, an I/O error. The
+   library marks the directory and goes on, and "offline" is decided from this.
+
+**Done when** a caller can walk a tree breadth first, a directory at a time, in an
+order of its own choosing, and a directory of ten thousand entries lists without ten
+thousand stats.
+
+**Workaround today.** None through the engine: the walk's callback can stop it, not
+skip a subtree, so listing one level of a directory means walking everything under it.
+The alternatives are `opendir` in Blackwing, per OS, beside the
+engine's own; or walking the whole root in one call and giving up the priority slot for
+directories not yet reached.
+
+### KR12: is this path on a share
+
+**What was run into.** The library watches each root with `FsWatcher`. On a network
+file system the native backend takes the watch and reports only changes made from this
+machine: a file added from another computer is never heard of. The watcher cannot know;
+it is the OS that is quiet. Such a root wants the polling backend.
+
+**What is asked.** One call: is this path on a file system whose changes the OS may
+not report (NFS, SMB, sshfs and other FUSE mounts on Linux; a remote drive on Windows;
+a network volume on macOS)? Or the same knowledge inside `FsWatcher`, as
+`FsWatchBackend::Auto` choosing to poll such a root.
+
+**Done when** a root on a share is polled without the user saying it is one.
+
+**Workaround today.** Every root is walked once at start-up and again at an interval
+whatever its watcher says, so a missed change is found late, not never. The cost is a
+walk that a trusted local root does not need.
+
+### KR13: which volume a path is on
+
+**What was run into.** A music disk that is unplugged leaves its mount point behind as
+an empty directory. A library that walks it finds nothing and, believing what it sees,
+forgets fifty thousand tracks and their corrections. The library needs to tell "this
+is not the disk I scanned" from "this disk is now empty".
+
+**What is asked.** `IoStat` gains an identity for the volume the path is on, stable
+while it is mounted and different for another volume at the same path: `st_dev` on
+POSIX, the volume serial number on Windows. Comparing two for equality is all it is
+for. A file system's own UUID, which would also survive a reboot, would be better and
+is not asked.
+
+**Done when** the stat of a mount point differs with the disk mounted and without.
+
+**Workaround today.** A root that is empty where it held tracks is treated as offline,
+and files that vanish are marked missing and kept for a month before they are
+forgotten. That is right for an unplugged disk and wrong for someone who really did
+delete everything; they will see a root marked offline until they remove it.
+
 ## Not asked for, and worth knowing
 
 - **`engine_frame` and `platform_pump` were all a custom loop needed.** The comment in
@@ -245,3 +332,7 @@ signalled: `pthread_cond_timedwait` on `CLOCK_MONOTONIC`, `SleepConditionVariabl
   it, on a thread the capture device marks.
 - **`test_deps`, `private_includes`, `licenses` and source-less modules** all did what
   the manual says, first time.
+- **`platform_pref_path` is already the per-user data directory** the library needs for
+  its index and the user's overrides. Slice 3's first draft asked for one; it was there.
+  The index is a cache and would sit better under the OS's cache directory
+  (`$XDG_CACHE_HOME`), which the engine does not name. Not asked for yet.
