@@ -117,7 +117,10 @@ struct Playing {
     HifiSource  src;
     void*       state   = nullptr;
     u8*         memory  = nullptr;
-    DecoderInfo info;
+    DecoderInfo info;            // what its decoder found, with `frames` the music's: the delay and padding trimmed
+    u64         skip    = 0;     // gapless: the decoder's frames before the music (its delay), dropped
+    u64         music_end = ~0ull; // the decoder's frame the music ends at (before its padding); all of it when not said
+    u64         dpos    = 0;     // the decoder's frame its next decode returns
     bool        opening = false; // its decoder's open, or its seek, is waiting for bytes
     ByteRange   wanted;          // the last Want said for it, while it waits
 };
@@ -589,6 +592,14 @@ void prepare_next(Hifi& h) {
                 why = dead;
             } else if (o.state) {
                 p.state = o.state; p.info = o.info;
+                // Gapless: the encoder's delay and padding are not music, and go here (a
+                // lossless decoder says 0 of each). Everything above counts the music's frames.
+                u64 delay = o.info.delay, pad = o.info.padding;
+                if (o.info.frames && delay + pad >= o.info.frames) delay = pad = 0;
+                p.skip = delay;
+                p.music_end = o.info.frames && pad ? o.info.frames - pad : ~0ull;
+                if (o.info.frames) p.info.frames = o.info.frames - delay - pad;
+                p.dpos = 0;
             } else {
                 why = o.reason;
             }
@@ -597,13 +608,15 @@ void prepare_next(Hifi& h) {
                 why = "the file describes a format that cannot be played";
         }
         if (!why[0] && p.state && p.src.start) {
-            SeekResult r = p.src.decoder->seek(p.state, p.src.start);
+            SeekResult r = p.src.decoder->seek(p.state, p.src.start + p.skip);
             if (r.status == SeekStatus::Wait) {
                 const char* dead = starved_reason(h, p.src.id);
                 if (!dead) { want(h, p, r.need); return; } // still seeking
                 why = dead;
             } else if (r.status == SeekStatus::Failed) {
                 why = r.reason;
+            } else {
+                p.dpos = p.src.start + p.skip;
             }
         }
         if (why[0]) { note(h, HifiEventKind::Failed, p.src.id, why); release(h, p); h.have_nxt = false; continue; }
@@ -1157,14 +1170,26 @@ f64 render_step(Hifi& h) {
     if (h.scratch_at == h.scratch_frames && !h.cur_done) {
         DecodeResult r = h.cur.src.decoder->decode(h.cur.state, h.scratch, kChunkFrames);
         h.scratch_frames = r.frames; h.scratch_at = 0;
-        h.cur_frames += r.frames;
+        // Gapless: the decoder's frames before the music and after it are dropped, and the
+        // music's end is the source's end, whatever the decoder has left.
+        Playing& c = h.cur;
+        u64 d0 = c.dpos;
+        c.dpos += r.frames;
+        if (d0 < c.skip) h.scratch_at = (u32)(c.skip - d0 < r.frames ? c.skip - d0 : r.frames);
+        if (c.dpos >= c.music_end) {
+            u64 over = c.dpos - c.music_end;
+            u32 cut = (u32)(over < h.scratch_frames - h.scratch_at ? over : h.scratch_frames - h.scratch_at);
+            h.scratch_frames -= cut;
+            if (r.status == DecodeStatus::Ok || r.status == DecodeStatus::Wait) { r.status = DecodeStatus::End; r.reason = ""; }
+        }
+        h.cur_frames += h.scratch_frames - h.scratch_at;
         if (r.status == DecodeStatus::Wait) {
             if (const char* dead = starved_reason(h, h.cur.src.id)) {
                 r.status = DecodeStatus::Damaged; // the bytes will not come: it ends here
                 r.reason = dead;
             } else {
                 want(h, h.cur, r.need);
-                if (r.frames == 0) return kWantNap; // nothing to put in the lead until they come
+                if (h.scratch_at == h.scratch_frames) return kWantNap; // nothing to put in the lead until they come
             }
         } else {
             h.cur.wanted = ByteRange{};

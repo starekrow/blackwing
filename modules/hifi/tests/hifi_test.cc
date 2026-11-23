@@ -7,6 +7,7 @@
 // decoder gives.
 #include "korvid/hifi/hifi.h"
 #include "korvid/hifi_codec/flac.h"
+#include "korvid/hifi_codec/mp3.h"
 #include "korvid/hifi_platform/capture.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/format.h"
@@ -47,14 +48,13 @@ void drop(File& f) { mem_free(f.data); f = File{}; }
 
 // A file decoded straight through the decoder: what the path must reproduce.
 struct Pcm { i32* s = nullptr; u64 frames = 0; AudioFormat fmt; };
-Pcm decode(const File& f) {
+Pcm decode(const File& f, const DecoderDesc& d = k_flac_decoder) {
     Pcm p;
-    const DecoderDesc& d = k_flac_decoder;
     u8* mem = (u8*)mem_alloc(d.memory_bytes);
     DecoderOpen o = d.open(sparse_whole(f.bytes()), Span<u8>(mem, d.memory_bytes));
     if (o.state) {
         p.fmt = o.info.format;
-        u64 cap = o.info.frames + 16;
+        u64 cap = o.info.frames + 1152 * 4 + 16;
         p.s = (i32*)mem_alloc((usize)cap * p.fmt.channels * 4);
         for (;;) {
             DecodeResult r = d.decode(o.state, p.s + p.frames * p.fmt.channels, (u32)(cap - p.frames));
@@ -1244,4 +1244,46 @@ void test_hifi_marks_across_joins(TestCtx& c) {
     KV_CHECK(c, r.status().underruns == 0);
     r.free();
     drop(fa);
+}
+
+// MP3s, whose decoder says how many of its frames are the encoder's delay and padding:
+// they are dropped at each end, so two in a row join as the music did. Everything counts
+// the music's frames: the length in Started, the frames in Ended, a source's start.
+void test_hifi_gapless(TestCtx& c) {
+    c.begin("hifi gapless");
+    File fa = read_data("mp3/cbr128_44100_2ch.mp3"), fb = read_data("mp3/vbr_44100_2ch.mp3");
+    Pcm a = decode(fa, k_mp3_decoder), b = decode(fb, k_mp3_decoder);
+    u8* mem = (u8*)mem_alloc(k_mp3_decoder.memory_bytes);
+    DecoderInfo ia = k_mp3_decoder.open(sparse_whole(fa.bytes()), Span<u8>(mem, k_mp3_decoder.memory_bytes)).info;
+    DecoderInfo ib = k_mp3_decoder.open(sparse_whole(fb.bytes()), Span<u8>(mem, k_mp3_decoder.memory_bytes)).info;
+    mem_free(mem);
+    KV_CHECK(c, ia.delay > 0 && ia.padding > 0 && a.frames == ia.frames && b.frames == ib.frames);
+    const u64 na = ia.frames - ia.delay - ia.padding, nb = ib.frames - ib.delay - ib.padding;
+    KV_CHECK(c, na == 22050 && nb == 22050); // the samples LAME was given, no more and no fewer
+
+    Rig r; r.make();
+    hifi_add_source(r.h, {1, &k_mp3_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(r.h, {2, &k_mp3_decoder, sparse_whole(fb.bytes())});
+    hifi_add_source(r.h, {3, &k_mp3_decoder, sparse_whole(fa.bytes()), 5000});
+    const u64 total = na + nb + (na - 5000);
+    KV_CHECK(c, r.wait_written(total));
+    u64 pulled = 0;
+    while (pulled < total + 2000) pulled += r.pull(1000);
+    HifiCaptureSegment seg[2];
+    KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 1);
+    const u8* data = hifi_capture_data(r.cap);
+    const HifiDeviceFormat& f = seg[0].format;
+    KV_CHECK(c, same(data, f, 0, a, ia.delay, na));
+    KV_CHECK(c, same(data, f, na, b, ib.delay, nb));                         // straight after: no delay, no padding between
+    KV_CHECK(c, same(data, f, na + nb, a, ia.delay + 5000, na - 5000));      // the start is the music's frame
+    KV_CHECK(c, silent(data, f, total, pulled - total));
+    KV_CHECK(c, r.status().underruns == 0 && r.status().taken == total);
+    const HifiEvent* s1 = r.find(HifiEventKind::Started, 1);
+    const HifiEvent* e1 = r.find(HifiEventKind::Ended, 1);
+    const HifiEvent* e3 = r.find(HifiEventKind::Ended, 3);
+    KV_CHECK(c, s1 && s1->info.frames == na && s1->info.format.bits == 24);
+    KV_CHECK(c, e1 && e1->status == DecodeStatus::End && e1->frames == na);
+    KV_CHECK(c, e3 && e3->status == DecodeStatus::End && e3->frames == na - 5000);
+    r.free();
+    drop(a); drop(b); drop(fa); drop(fb);
 }

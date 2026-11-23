@@ -1,13 +1,14 @@
 // The list of decoders and the search through it.
 #include "korvid/hifi_codec/decoder.h"
 #include "korvid/hifi_codec/flac.h"
+#include "korvid/hifi_codec/mp3.h"
 #include <string.h>
 
 namespace kv {
 
 namespace {
 
-constinit const DecoderDesc* const k_decoders[] = {&k_flac_decoder};
+constinit const DecoderDesc* const k_decoders[] = {&k_flac_decoder, &k_mp3_decoder};
 
 } // namespace
 

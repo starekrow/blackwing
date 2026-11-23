@@ -1,7 +1,7 @@
 # Blackwing
 
-A hi-fi local music player built on the [Korvid](../korvid) engine. It plays FLAC files
-from the command line through PipeWire on Linux, or into a capture device that keeps what
+A hi-fi local music player built on the [Korvid](../korvid) engine. It plays FLAC and MP3
+files from the command line through PipeWire on Linux, or into a capture device that keeps what
 it was given.
 
 - [docs/README.md](docs/README.md): where the documents are.

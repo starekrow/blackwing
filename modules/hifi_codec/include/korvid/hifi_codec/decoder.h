@@ -48,6 +48,7 @@ struct DecoderInfo {
     u64 frames  = 0; // the length the file claims, in frames; 0 when it does not say
     u32 delay   = 0; // gapless: frames at the start of what decode() returns that are not music (an encoder's delay)
     u32 padding = 0; // gapless: frames at the end that are not music. Both 0 for a lossless file
+    bool estimated = false; // `frames` is a guess from the file's size, not the file's word: the decode may end either side of it
 };
 
 // open()'s answer: a state; or a range to wait for (state null, need not empty); or a

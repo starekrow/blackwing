@@ -87,6 +87,15 @@ source ring and the new sources after it, crossfaded in like any recut, and a cu
 tells the caller to void the marks the old render made past the boundary (except the
 `Ended` of `id` itself, which is still true).
 
+**Gapless: delay and padding.** A decoder may say that its first frames are not music
+(an MP3 encoder's delay, with the decoder's own) and nor are its last (the padding to a
+whole frame). The render thread drops them as it decodes: the first `delay` frames, and
+everything from the frame `frames - padding` on, which is the source's end whatever the
+decoder has left. So two MP3s of an album join as they were mastered. Everything outside
+counts the music's frames: `start` is the music's frame (the decoder is sent to it plus
+the delay), the `info` in `Started` has the music's length, and `Ended` counts what was
+heard of it. Lossless decoders say 0 of each, and nothing changes for them.
+
 **A source can start anywhere.** `HifiSource::start` is the frame it begins at (the
 decoder seeks there, waiting for bytes like any other read), and `seek` says it was
 being heard already: its first mark is `Seeked`, not `Started`. The status's `position`
@@ -279,7 +288,9 @@ straight -6 dB render bit for bit (not flat); a change from -6 to -12 dB is the 
 render to the join, the fade's mix of the two renders to the sample, then the -12
 render, with no step larger than the two renders' own and the fade's slope; 200 changes
 dragged over four seconds end at the last value in about twenty recuts, no underrun; a
-change while paused is heard from the resume with no fade. A replacement after the
+change while paused is heard from the resume with no fade. Two MP3s back to back and a third from frame 5000: each the decoder's samples from its
+delay to its padding, joined with nothing between, the third from its music's frame 5000,
+and the events' lengths the music's. A replacement after the
 source playing, before its end is rendered (no recut) and after (a recut at the
 boundary), and with nothing: the source exact, then the new one exact, the old next
 never Started. A jump's marks still placed after a recut joined behind it.

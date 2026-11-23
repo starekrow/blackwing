@@ -10,6 +10,12 @@ void test_sparse_span(kv::TestCtx&);
 void test_flac_pieces(kv::TestCtx&);
 void test_flac_seek(kv::TestCtx&);
 void test_flac_seek_broken(kv::TestCtx&);
+void test_mp3_reference(kv::TestCtx&);
+void test_mp3_tags(kv::TestCtx&);
+void test_mp3_pieces(kv::TestCtx&);
+void test_mp3_seek(kv::TestCtx&);
+void test_mp3_broken(kv::TestCtx&);
+void test_mp3_spoiled(kv::TestCtx&);
 
 int main() {
     kv::TestCtx c;
@@ -22,6 +28,12 @@ int main() {
     test_flac_pieces(c);
     test_flac_seek(c);
     test_flac_seek_broken(c);
+    test_mp3_reference(c);
+    test_mp3_tags(c);
+    test_mp3_pieces(c);
+    test_mp3_seek(c);
+    test_mp3_broken(c);
+    test_mp3_spoiled(c);
     int rc = kv::test_report(c, "hifi_codec_tests");
     kv::mem_shutdown();
     return rc;

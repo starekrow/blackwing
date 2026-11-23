@@ -49,6 +49,8 @@ struct HifiConfig {
 // One thing to play: a decoder and the file it reads. The span's bytes and map must stay
 // where they are until the source's Released event. Pieces may arrive in it meanwhile; a
 // piece may be given back (its byte cleared) only through hifi_read_fence.
+// Its frames are the music's: a decoder's delay and padding (an MP3 encoder's) are
+// dropped at its ends, and `start`, positions and an Ended's count leave them out.
 struct HifiSource {
     u64                id      = 0; // the caller's name for it; comes back in events
     const DecoderDesc* decoder = nullptr;
@@ -58,7 +60,7 @@ struct HifiSource {
 };
 
 enum class HifiEventKind : u8 {
-    Started,  // the source's first frame has been heard. `info` is what its decoder found; `frames` the frame of it that was (its `start`)
+    Started,  // the source's first frame has been heard. `info` is what its decoder found, `frames` in it the music's (delay and padding trimmed); `frames` the frame of it that was (its `start`)
     Seeked,   // as Started, for a source added with `seek`: the frame it was sent to (`frames`) has been heard
     Ended,    // its last frame has been heard. `status` is End or Damaged, `reason` why, `frames` how many it gave
     Failed,   // it could not be played at all: `reason`. Never Started

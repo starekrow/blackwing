@@ -1,6 +1,6 @@
 # hifi_codec
 
-The decoder contract and the decoders behind it. A decoder is handed one audio file as a
+The decoder contract and the decoders behind it: FLAC and MP3. A decoder is handed one audio file as a
 sparse span (its bytes, arriving in pieces) and a block of memory, and returns a format,
 a length, gapless facts and PCM as integers, from the start or from any frame it is sent
 to. It opens no files, takes no memory but that block, calls nothing back and waits by
@@ -55,6 +55,45 @@ its `fLaC`, past any ID3v2 tag the wrapper has already found.
 **Seeking** is dr_flac's: by the seek table when the file has one, by binary search when
 the file says its length, and from the start otherwise. All three land on the sample.
 
+**MP3** (`mp3.h`, `src/mp3.cc`) is dr_mp3's push decoder, vendored, one MPEG frame at a
+time. It is handed a window of the file's bytes (32 KB from where the last frame ended,
+or to the end of the audio) and decodes the frame at its front, after any junk it skips,
+so nothing pulls: before each frame the window must be there, or the call returns `Wait`
+having changed nothing. MPEG 1, 2 and 2.5 Layer III, CBR, VBR and free format, mono and
+stereo. Layer I and II frames are junk.
+
+- **The front and the back.** ID3v2 tags in front are stepped over by their declared
+  sizes, and nothing inside them is asked for. ID3v1 and APEv2 tags at the back are found
+  from the file's last 160 bytes, which `open` asks for, and are not frames.
+- **Depth.** MP3 has none: the decoder says 24 bits, and its samples are dr_mp3's floats
+  rounded to 24 bits and clamped. "The file's samples" for a lossy file means this
+  decoder's.
+- **Length** is the Xing, Info or VBRI header's count of frames. Without one it is an
+  estimate from the audio's size and the first frame's bitrate, and `DecoderInfo::
+  estimated` says so: the decode may end either side of it, and neither is damage.
+- **Delay and padding** are the LAME tag's (an Info or Xing header with an encoder's name
+  after it, as LAME and FFmpeg write), each with the decoder's own 529 frames taken into
+  account: `delay` is LAME's delay and 529, `padding` LAME's padding less 529. `hifi`
+  drops them. Without a LAME tag both are 0, and the music's ends are as the frames are.
+- **The walk.** Which bytes are which frame is dr_mp3's search, from where the last frame
+  ended; it depends on the bytes, where it starts, and two things dr_mp3 remembers (the
+  last header and a free-format frame's size). A place in the walk is those and a count
+  of frames, a *mark*, and the decoder keeps one every 8 frames as it goes (every 16, 32
+  ... once its memory is full: about 40000 marks, over two hours at 44.1 kHz before the
+  first thinning).
+- **Seeking** starts from the decoder's own place if that is not past the target, or else
+  from the last mark at least the bit reservoir's depth before it (a few frames to sixty,
+  by the stream's smallest frame). It walks without decoding (dr_mp3 still keeps its
+  reservoir) to two frames before the target's, decodes those two to fill the filter
+  bank's history, and lands. The samples are the straight decode's, exactly. A seek past
+  where the decoder has been reads forward to it: on a cold file, a wait per stretch of a
+  megabyte at most, the stretch sized from the Xing table where there is one (the table
+  says roughly where a time is, never which frame is there, so it cannot land a seek).
+- **A frame counts by its header.** A frame whose audio cannot be decoded (its bit
+  reservoir is missing, as for the first after junk) is silence, not a gap, so frames keep
+  their numbers. Junk between frames is stepped over and counted; with frames after it,
+  the decode ends `Damaged` and says how much.
+
 ## Using it
 
 **Decode a file you have in memory.**
@@ -102,7 +141,7 @@ Header `korvid/hifi_codec/decoder.h`:
 | name | kind | what |
 |---|---|---|
 | `AudioFormat` | record | `rate`, `channels`, `bits` |
-| `DecoderInfo` | record | `format`, `frames` (0: not said), `delay`, `padding` |
+| `DecoderInfo` | record | `format`, `frames` (0: not said), `delay`, `padding`, `estimated` (`frames` is a guess) |
 | `DecoderOpen` | record | `state` (null on failure or a wait), `reason`, `need` (a wait), `info` |
 | `DecodeStatus` | enum | `Ok`, `End`, `Damaged`, `Wait` |
 | `DecodeResult` | record | `frames`, `status`, `reason`, `need` |
@@ -123,6 +162,8 @@ Header `korvid/hifi_codec/sparse.h`:
 | `sparse_whole(bytes)` | function | a span of bytes already in memory, all there |
 
 Header `korvid/hifi_codec/flac.h`: `k_flac_decoder`, the FLAC decoder's record.
+
+Header `korvid/hifi_codec/mp3.h`: `k_mp3_decoder`, the MP3 decoder's record.
 
 The module registers nothing with the engine: it is a library.
 
@@ -150,6 +191,24 @@ The module registers nothing with the engine: it is a library.
   file has gives every real frame and then `Damaged`.
 - **`delay` and `padding` are 0 for FLAC**, which is sample-exact by itself.
 - **Ogg FLAC is not read.** Native FLAC only, with or without an ID3v2 tag in front.
+- **The decoders are asked in order**: FLAC, then MP3. MP3's probe wants a Layer III
+  header at the front, past ID3v2 tags and up to 64 bytes of zeros. A file with more junk
+  than that before its first frame is decoded by `k_mp3_decoder.open`, but not found by
+  `decoder_for`.
+- **An MP3 decoder's block is 1 MB**: two of dr_mp3's decoders (one is a seek's until it
+  lands), a frame of samples, and the marks. Given less, it keeps fewer marks, down to 16.
+- **An MP3 seek near the target is cheap; far ahead is a read.** Within what has been
+  decoded it walks from a mark; past it, it reads every byte between. `open` asks for the
+  first 32 KB of audio (and the last 160 bytes), so a short file is all there after it.
+- **dr_mp3's sync needs four frames that agree**, where its own default is ten: with ten,
+  junk fewer than ten frames past a good frame cost every frame before it. The frame
+  before junk is lost either way, and the first after it is usually silence (its
+  reservoir was in the junk's place).
+- **A length that lies short is not where an MP3 stops.** The decode goes on to the last
+  frame and ends `End`; `hifi` cuts at the claimed length, less the padding. A length
+  that lies long ends `Damaged` with the count.
+- **Within a bit of libmpg123.** The good files' decodes, rounded to 16 bits and
+  trimmed, are within one of libmpg123 1.33 on every sample, and equal on 99.7% of them.
 - **dr_flac's asserts are off** in every config, so no file can stop the program by
   reaching one, and its integer overflow on damaged input is made to wrap under GCC.
   Clang and MSVC builds have not been through the sanitizers yet.
@@ -173,6 +232,19 @@ was; a seek that waits and is abandoned leaves it where it was. Seeks into a tru
 file, past a lying length, into a spoiled frame, in a file that does not say its length,
 and two hundred spoiled files seeked at random in pieces.
 
+Then MP3 (`tests/mp3_test.cc`), over files LAME made (`tests/data/make_mp3.py`): ten
+good files (CBR and VBR, MPEG 1, 2 and 2.5, mono and stereo, without the Info tag, free
+format, with CRCs), each within a bit of libmpg123's decode at 16 bits, trimmed by its own
+delay and padding to the samples LAME was given; behind 200 KB of art and before APEv2 and
+ID3v1 tags, and behind 4 MB of art in pieces with no piece of the art asked for, the same
+samples; a VBRI header in place of the Info frame. Eight files in the four orders of
+pieces; seeks to forty places in five files, whole and in pieces, in order and shuffled,
+each the straight decode; a seek left waiting; marks thinned by a block too small for
+them. Fourteen broken files (lengths and gapless figures that lie, junk between frames,
+cut short and inside a frame, one frame, the Info frame alone, front tags that lie or are
+all there is, a FLAC and text named `.mp3`, zeros in front), each with what it must do;
+six hundred spoiled ones in pieces with seeks.
+
 `kormake test hifi_codec --heavy -- DIR...` does the MD5 check over real music, which is
 not in the repository, and prints decode speed; then seeks each file to sixteen places
 and compares each with the straight decode, and prints what a seek costs.
@@ -180,8 +252,8 @@ and compares each with the straight decode, and prints what a seek costs.
 ## Not in this module
 
 Reading files (the player does, filling the span). Tags and pictures
-(`blackwing_tags`). Resampling, dither and anything else done to samples (`hifi`).
-MP3 (slice 3) and the other codecs (P1).
+(`blackwing_tags`). Resampling, dither and anything else done to samples, and trimming
+the delay and padding (`hifi`). The other codecs (P1).
 
 ## See also
 
@@ -190,4 +262,5 @@ MP3 (slice 3) and the other codecs (P1).
 - [Slice 1](../../docs/PRDs/Blackwing-Slice-1-PRD.md): the contract as it began.
 - [Slice 2](../../docs/PRDs/Blackwing-Slice-2-PRD.md), "The file in pieces" and "Seeking
   in a decoder": why it waits and seeks.
-- [src/vendor](src/vendor/README.md): where dr_flac came from and how to upgrade it.
+- [Slice 3](../../docs/PRDs/Blackwing-Slice-3-PRD.md), "MP3": what was asked of it.
+- [src/vendor](src/vendor/README.md): where dr_flac and dr_mp3 came from and how to upgrade them.

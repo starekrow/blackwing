@@ -193,7 +193,7 @@ void test_flac_contract(TestCtx& c) {
     File f = read_data("tone_16_2ch_44100.flac");
     Span<const u8> bytes(f.data, f.len);
     const DecoderDesc& d = k_flac_decoder;
-    KV_CHECK(c, strcmp(d.name, "flac") == 0 && decoders().len == 1 && decoders()[0] == &d);
+    KV_CHECK(c, strcmp(d.name, "flac") == 0 && decoders().len == 2 && decoders()[0] == &d); // FLAC first, then MP3
 
     // Two decoders of one file, a call each in turn at different sizes: neither disturbs
     // the other, since each one's state is in its own memory.
