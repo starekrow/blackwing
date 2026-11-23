@@ -100,3 +100,63 @@ underrun count from an unpaced driven run means nothing.
   after a while is the player's or a later slice's call.
 - Opening a device at a wider word up front (so a 16-bit track followed by a 24-bit one
   at the same rate needs no reopen) is not done: each change of depth upward is a gap.
+
+## Milestone 3, the player
+
+Nov 22, 2026. Linux laptop, `linux-dev` and `linux-debug`.
+
+**Built**: `blackwing_player` as an engine module named `player` (the queue as a ktable,
+two resources, ten event types, one system, six commands) and the `blackwing`
+executable with its own loop. 86 checks in a real engine on the driven capture device;
+`hifi`'s tests grew to 226.
+
+**Where the build departed from the plan:**
+
+- **The headless loop is `blackwing`'s own.** The PRD left it between teaching `tool` to
+  pace and carrying a small loop. The loop is forty lines: tick at the clock's rate
+  while playing, four times a second otherwise. Nothing was asked of the engine.
+- **`player.output`, not `hifi.output`.** `hifi` is a library, not an engine module, so
+  it cannot publish a resource. The player publishes what `hifi` reports.
+- **Notifications carry `seq`.** Found by the tests. Korvid's events are a stream per
+  type, and handlers of different types run in the schedule's order. So an Ended and a
+  Started from one tick arrive Started first if that handler is first. `seq` is the
+  order things happened in. The firmer advice is in the module page: read
+  `player.transport` for what is playing.
+- **`PlayerQueueEnded`** is new: the executable needed to know when to exit, and a face
+  will want it too.
+- **The reader's stall is tested at `hifi`, not at the player.** The exit criterion
+  imagined a slow reader under a playing track. Files are read whole before they are
+  lent, so a slow read is a late start or a gap between tracks, never an underrun in a
+  track. The stalling-decoder test in `hifi` is the test of the lead.
+
+**Bugs the tests found:**
+
+- **An item played twice.** `hifi` releases a source's bytes as soon as it is decoded,
+  seconds before it is heard. The player took Released to mean "no longer in hifi" and
+  lent the item again. An item now has two flags, lent and in play, which end at
+  different times.
+- **`cli_run` needs a sink.** Passing none crashes in the engine's CLI. The executable
+  passes a quiet one; worth a null check on the engine's side.
+
+**Checked beyond the tests.** A hundred runs of the player's tests in a row with no
+failure (one race in a test was found on the way and fixed). ThreadSanitizer and
+AddressSanitizer with UndefinedBehaviorSanitizer over the player's tests: clean. The
+executable plays a 24-bit 96 kHz file into the wall-clock capture device and the file
+written by `--capture-to` hashes to FLAC's MD5 after 512 frames of leading silence (one
+period, before the lead was ready). A real track interrupted after six seconds exits
+cleanly with no leak reported.
+
+**Numbers.** Playing a real 16-bit 44.1 kHz track into the capture device for six
+seconds: 0.08 s of CPU, 33 MB resident (the 23 MB file, the lead, a decoder's block).
+
+**Things the engine might want to know:**
+
+- The I/O queue's paths are 255 bytes. Music libraries have longer ones.
+- A project cannot get a sanitizer build from `kormake` (as in milestone 1).
+- `cli_run` with a null sink crashes.
+
+**Not done here, and noted:**
+
+- The player's `stat` before a read blocks the tick; it wants to be a task.
+- The queue is never trimmed; 4096 items and it is full.
+- stdin as a command line is POSIX-only and was not exercised by a test.

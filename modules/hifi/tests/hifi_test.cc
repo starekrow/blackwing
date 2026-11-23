@@ -433,6 +433,32 @@ void test_hifi_flush(TestCtx& c) {
     KV_CHECK(c, silent(hifi_capture_data(q.cap), seg[0].format, 3000 + ramp, 5000 - ramp));
     KV_CHECK(c, q.status().underruns == 0 && !q.has(HifiEventKind::Ended, 1));
     q.free();
+
+    // A flush, a wait with the device pulling silence, a second flush, and only then
+    // something new: it starts clean and is announced, as after one flush.
+    Rig w; w.make();
+    hifi_add_source(w.h, {1, &k_flac_decoder, fa.bytes()});
+    hifi_add_source(w.h, {2, &k_flac_decoder, fq.bytes()});
+    KV_CHECK(c, w.wait_written(a.frames * 2));
+    w.pull(5000);
+    hifi_flush(w.h);
+    hifi_add_source(w.h, {3, &k_flac_decoder, fb.bytes()});
+    KV_CHECK(c, w.wait_flushed() && w.wait_written(a.frames * 3));
+    w.pull(2000);
+    KV_CHECK(c, w.has(HifiEventKind::Started, 3) && w.status().source == 3);
+    hifi_flush(w.h);
+    KV_CHECK(c, w.wait_flushed());
+    w.pull(1000);
+    w.pull(1000);
+    KV_CHECK(c, w.status().source == 0 && w.status().lead_frames == 0);
+    hifi_add_source(w.h, {4, &k_flac_decoder, fb.bytes()});
+    KV_CHECK(c, w.wait_written(a.frames * 4));
+    u64 before = w.status().taken;
+    w.pull(100);
+    KV_CHECK(c, w.status().taken == before + 100);
+    KV_CHECK(c, w.has(HifiEventKind::Started, 4) && w.status().source == 4 && w.status().position == 100);
+    if (!w.has(HifiEventKind::Started, 4)) KV_ERROR("test", "taken %llu heard %llu written %llu before %llu", (unsigned long long)w.status().taken, (unsigned long long)w.status().heard, (unsigned long long)w.status().written, (unsigned long long)before);
+    w.free();
     drop(a); drop(fa); drop(fb); drop(fq);
 }
 

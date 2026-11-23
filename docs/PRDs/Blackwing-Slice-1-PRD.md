@@ -338,3 +338,13 @@ one callback; `Released` is an event of its own. On the capture device the eight
 arrive with FLAC's own MD5, two files join with no frame between them, `Started` and
 `Ended` land on the frame the device's delay says, and pause, flush and underrun ramp
 without a step and lose nothing. Clean under the thread and address sanitizers.
+
+**Milestone 3, the player** (Nov 22, 2026; BS12 to BS16; BS18 and BS19 are built early, and the idle cost is not yet measured).
+Built: `blackwing_player` as the engine module `player`, with `player.queue` a ktable,
+`player.transport` and `player.output` resources, the events, one system and six
+commands; and `blackwing` with a loop of its own that sleeps. Departures: the output
+resource is the player's, since `hifi` is a library; notifications carry `seq`, because
+events of different types have no order within a tick; `PlayerQueueEnded` is new; the
+headless loop needed nothing from the engine, so that item is off the engine's list. The
+exit criteria that do not need a real device hold on the capture device, in a real
+engine, driven by events alone.

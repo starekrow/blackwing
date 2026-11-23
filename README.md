@@ -1,7 +1,7 @@
 # Blackwing
 
-A hi-fi local music player built on the [Korvid](../korvid) engine. Not yet playing
-anything: this is the scaffold.
+A hi-fi local music player built on the [Korvid](../korvid) engine. It plays FLAC files
+from the command line into a capture device; a real output device is next.
 
 - [docs/README.md](docs/README.md): where the documents are.
 - [docs/PRDs/Blackwing-Master-PRD.md](docs/PRDs/Blackwing-Master-PRD.md): what is being
