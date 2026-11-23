@@ -434,7 +434,7 @@ Slices, as a proposal; each gets its own PRD when it starts.
    *Done when* a control is heard within the target on a warm file, a cold file is heard
    late rather than as silence, and no join clicks.
    *Built* Nov 23, 2026, through milestone 7; the slice's PRD has what is still owed.
-3. **The library.** `blackwing_tags` and `blackwing_library`: roots, the three passes, the priority
+3. **The library** ([Blackwing-Slice-3-PRD.md](Blackwing-Slice-3-PRD.md)). `blackwing_tags` and `blackwing_library`: roots, the three passes, the priority
    slot, sidecars, watching, queries; MP3; the broken-file corpus.
    *Done when* a fresh install aimed at fifty thousand tracks is playing a chosen one
    within seconds, and nothing in the corpus stops the scan.
