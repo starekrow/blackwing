@@ -456,5 +456,7 @@ pieces under a 256 MB cap on bytes committed. `hifi` says what a decoder waits f
 steps. Beyond the plan: `hifi` opens the next source as soon as the current one has
 decoded, and holds the current one's last frames back while the next waits for its first
 bytes, so a late head does not break a gapless join. A cap smaller than a decoder's
-window (a few pieces) cannot be played under. The flash drive's numbers follow.
+window (a few pieces) cannot be played under. On the USB 2 flash drive under slice 1's
+load: the first sound at 0.6 s (slice 1: 24 s), and at a skip every 9 seconds all ten
+tracks play, each heard 0.04 to 0.07 s after the skip, with no underrun.
 

@@ -116,3 +116,26 @@ modules clean under ThreadSanitizer, and under AddressSanitizer with UBSan.
 
 **Through PipeWire**, on the built-in disk with no load: the first sound 0.36 s after
 the player starts, and a skip heard 0.05 to 0.06 s after the command (two skips).
+
+### The flash drive
+
+`scripts/stress-play.sh` on the SanDisk Cruzer (USB 2, FAT32), slice 1's disk run: the
+album evicted from the page cache, a 1 GB load file read and rewritten on the same drive
+the whole time (buffered, dropping the cache: no O_DIRECT on FAT32), 90 seconds through
+PipeWire. The script now stamps each line with the seconds since the player started,
+and times each skip from the command to the track's first frame heard.
+
+| run | the drive | first sound | skips | underruns |
+|---|---|---|---|---|
+| straight | 100% busy: 6 MB/s read, 2 MB/s written | 0.58 s | | 0 |
+| a skip every 9 s | 100% busy: 8 MB/s read, 2 MB/s written | 0.66 s | 9 of 9 heard, 0.04 to 0.07 s after the command (0.05 on average) | 0 |
+
+Slice 1 on the same drive under the same load: the first sound 24 seconds late (the
+track read whole first), and at 9-second skips nothing heard at all. Now all ten tracks
+the skipping run lands on play, each within a twentieth of a second, while the drive
+stays saturated: a track starts on its first 256 KB, and the rest arrives well ahead of
+the ear at 176 KB/s of CD audio. The exit criterion (a skip heard within two seconds,
+every track played, no underrun) is met with a margin of forty.
+
+Skips here are still slice 1's (a flush, then the next item added); the jump is
+milestone 3.
