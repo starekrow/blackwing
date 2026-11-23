@@ -328,3 +328,13 @@ eight broken files and six hundred spoiled ones keep to the contract; a real alb
 decodes exact at about 1150 times real time. A sanitizer run found one overflow inside
 dr_flac on damaged input, now defined under GCC. Beyond the plan: a heavy test that
 checks any directory of real FLAC files against their own MD5s.
+
+**Milestone 2, the path into the capture device** (Nov 22, 2026; BS3, BS4, BS6 to BS11,
+and the path's part of BS16). Built, with these departures: the caller and the render
+thread pass messages under a mutex (only the way into the realtime thread is lock-free,
+which is the one that matters); the next source's decoder is opened early, so the
+callback can tell the end of the music from a lead running dry; a flush restarts within
+one callback; `Released` is an event of its own. On the capture device the eight files
+arrive with FLAC's own MD5, two files join with no frame between them, `Started` and
+`Ended` land on the frame the device's delay says, and pause, flush and underrun ramp
+without a step and lose nothing. Clean under the thread and address sanitizers.

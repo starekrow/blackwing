@@ -50,3 +50,53 @@ when those toolchains build this.
   file today; gapless and the clock may want to know the hole's position later.
 - The decoder's 4 MB block is reserved whole for each open decoder. Two are open at
   once at most in slice 1.
+
+## Milestone 2, the path into the capture device
+
+Nov 22, 2026. Linux laptop, `linux-dev` and `linux-debug`.
+
+**Built**: `hifi_platform`'s device interface and the capture device; `hifi`'s render
+thread, lead, marks, clock and callback. 218 checks, all on the capture device with its
+clock driven by the test, so each is to the frame.
+
+**Where the build departed from the plan:**
+
+- **The caller and the render thread share a mutex, not lock-free queues.** The PRD said
+  every arrow was lock-free. The one that must be is the one into the realtime thread,
+  and it is: a ring and atomic counters. Commands and notes between two ordinary threads
+  go under a mutex that neither holds while working, and the render thread sleeps on a
+  condition variable when idle, which is what makes a paused player cost nothing.
+- **The next source's decoder is opened before the current one's last frames go out.**
+  Found by the tests. The callback must know whether the stream goes on past the frames
+  it can see: if it does and they run out, that is an underrun and it ramps; if it does
+  not, the last frame plays at full level. The first build said "it goes on" whenever
+  anything was queued, and so faded the tail of a track that was followed by a change of
+  format. Whether the stream goes on depends on the next source's format, so the next
+  source has to be open to say.
+- **A flush restarts in the same callback.** The first build ramped down and left the
+  rest of that callback silent, a gap of most of a period before the next track. The
+  callback now goes round again and starts what is behind the flush at once.
+- **The ramp multiplies in double and copies at full gain.** A 32-bit sample does not
+  fit a float; the first build's ramp would have rounded every S32 sample it touched.
+- **`Released` is its own event.** Decoding runs ahead, so a source's bytes are free long
+  before it is heard, and the player should not have to hold them until `Ended`.
+- **`flushing` in the status**, so a caller (a test, mostly) can tell when a flush has
+  taken effect.
+
+**Checked beyond the tests.** Forty runs in a row with no failure. ThreadSanitizer and
+AddressSanitizer with UndefinedBehaviorSanitizer, built by hand as in milestone 1: clean.
+The callback runs with its thread marked realtime in every test, and never trips the
+allocator check.
+
+**Found about testing, worth keeping:** a driven clock takes frames as fast as the test
+asks, which is far faster than a decoder makes them. Two tests failed until they paced
+their pulls to the lead. That is the test's fault and not the path's, but it means an
+underrun count from an unpaced driven run means nothing.
+
+**Not done here, and noted:**
+
+- No numbers yet for the callback's worst time; that wants the real device (milestone 4).
+- The stream ends, and the device stays open, playing silence. Closing an idle device
+  after a while is the player's or a later slice's call.
+- Opening a device at a wider word up front (so a 16-bit track followed by a 24-bit one
+  at the same rate needs no reopen) is not done: each change of depth upward is a gap.

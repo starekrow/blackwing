@@ -1,6 +1,7 @@
 # Modules
 
-Blackwing's modules, each a directory with a `module.lua`. All are skeletons today. The
+Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec` and
+`hifi_platform` have code (slice 1); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
