@@ -1,6 +1,8 @@
--- The decoder contract and the decoders: a readable handle in; a format, gapless facts
--- and PCM out. A decoder opens nothing and calls back nothing, so it can move into a
--- sandboxed process later unchanged.
+-- The decoder contract and the decoders: the file's bytes in; a format, gapless facts and
+-- PCM as integers out. A decoder opens nothing, allocates only from memory it is handed and
+-- calls back nothing, so it can move into a sandboxed process later unchanged. FLAC is
+-- dr_flac (public domain or MIT-0), vendored and pinned.
 module "hifi_codec" {
-  deps = { "core" },
+  deps     = { "core" },
+  licenses = { "src/vendor/LICENSE" },
 }

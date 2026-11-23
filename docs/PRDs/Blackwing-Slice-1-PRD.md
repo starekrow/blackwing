@@ -316,3 +316,15 @@ Nov 22, 2026, in review of the first draft.
 - **MD5 in tests**: Korvid's `core` has SHA-256 and no MD5. A small one in the test
   directory is enough.
 - **The three engine items** above, each a conversation with Korvid.
+
+## As built
+
+Numbers and findings are in [docs/design/slice-1-notes.md](../design/slice-1-notes.md).
+
+**Milestone 1, the decoder** (Nov 22, 2026; BS1, BS2, BS17 and the decoder's part of
+BS16). As planned. The contract gained `memory_bytes`, the block each decoder asks for,
+and `probe`. Eight encoder-made files decode to FLAC's own MD5 in three sizes of piece;
+eight broken files and six hundred spoiled ones keep to the contract; a real album
+decodes exact at about 1150 times real time. A sanitizer run found one overflow inside
+dr_flac on damaged input, now defined under GCC. Beyond the plan: a heavy test that
+checks any directory of real FLAC files against their own MD5s.
