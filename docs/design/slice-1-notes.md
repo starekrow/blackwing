@@ -160,3 +160,79 @@ seconds: 0.08 s of CPU, 33 MB resident (the 23 MB file, the lead, a decoder's bl
 - The player's `stat` before a read blocks the tick; it wants to be a task.
 - The queue is never trimmed; 4096 items and it is full.
 - stdin as a command line is POSIX-only and was not exercised by a test.
+
+## Milestone 4, sound
+
+Nov 22, 2026. Linux laptop, `linux-dev`, PipeWire 1.6.2 with WirePlumber 0.5.13, the
+graph at 48 kHz.
+
+**Built**: the PipeWire backend in `hifi_platform` (`src/linux/pipewire.cc`), the device
+named `default` on Linux. A playback stream on the default sink, `RT_PROCESS`, on a
+`pw_thread_loop` of its own, asking for exactly the source's rate, channels and samples.
+22 checks in a new `hifi_platform` test, which plays silence through it.
+
+**From the engine**: KR1 was all it took. The module defines the `pipewire` external
+itself, with `pkg_config`, and nothing in Korvid's tree changed. Without the development
+package, `kormake check` says which module needs it and prints the `apt` line. KR7 was
+not needed: PipeWire's data thread is the callback's, and PipeWire puts it in the
+realtime class on its own.
+
+**Where the build departed from the plan:**
+
+- **One PipeWire connection for the process, not one per device.** Found by
+  LeakSanitizer: the first build made a context per device and lost about 3.7 KB at each
+  close, growing with every open (18 KB over 5 opens, 77 KB over 21). Keeping PipeWire's
+  modules loaded made it vanish, and so did a client config without module-rt: the
+  context's module-rt loads libdbus to ask rtkit for the realtime class, and each unload
+  strands libdbus's static state. The player opens a device at every change of format,
+  so this would have grown for as long as it ran. Now the thread loop, the context and
+  the connection are made at the first open and kept; a device is a stream on them.
+- **The callback's thread is PipeWire's, already realtime, but not at once.** On this
+  machine `RLIMIT_RTPRIO` is 0, so PipeWire asks rtkit, and the thread becomes `SCHED_RR`
+  at priority 20 a few callbacks into the first stream; those first callbacks run at the
+  normal priority. Since the context is kept, so is its data thread, and every later
+  stream starts in the class. The backend looks at the policy at the 1st, 64th and
+  1024th callback.
+- **The delay is a snapshot that ages.** PipeWire's `pw_time` gives the frames queued in
+  the stream, those in its resampler and the graph's delay to the hardware. The backend
+  takes their sum just after each buffer is queued, with the time, and
+  `hifi_device_delay` subtracts the frames played since. Without the ageing, the position
+  would step once a period.
+- **The graph's rate wins.** WirePlumber's default graph here allows 48 kHz only, so a
+  44.1 kHz stream is resampled (periods of 498 frames, not 512) and a 96 kHz one gets
+  periods of up to 1080. The source's rate is asked for with `node.rate`, which is a
+  request and not a grant.
+
+**Checked beyond the tests.** ThreadSanitizer, and AddressSanitizer with
+UndefinedBehaviorSanitizer, over `hifi_platform`, `hifi` and `blackwing_player`, now one
+`kormake --sanitize` command each (Korvid's KR2). Clean, after the fix above.
+
+**Heard.** Two test tones of different formats play in order with a gap between them,
+as a reopen should. The first two tracks of a real album (16-bit, 44.1 kHz) play; Ctrl-C
+after 27 seconds exits 130 with no leak reported. `player status` at 5 and 10 seconds
+says 4.7 and 9.7: the position follows the device's clock, 0.3 s behind the wall because
+of the start. A pause holds the position at 2.7 s for five seconds, and play goes on
+from there. With PipeWire unreachable (`PIPEWIRE_REMOTE` pointed nowhere), each file
+fails with "PipeWire is not running, or would not connect the playback stream".
+
+**Numbers**, from the real album, 27 seconds through PipeWire:
+
+| | |
+|---|---|
+| callbacks | 2439, of up to 498 frames (11.3 ms) |
+| the slowest callback | 23.7 µs, 0.2% of its period |
+| the delay to the ear | up to 16.6 ms; 14 ms typical |
+| CPU | 0.37 s (0.29 user, 0.08 sys): 1.4% of one core |
+| resident | 76 MB at most: both 31 MB tracks read, the lead, two decoders |
+| the thread | `SCHED_RR`, priority 20, through rtkit |
+
+**Not done here, and noted:**
+
+- **Nothing proves the samples reach the speaker unchanged**, and on PipeWire nothing can:
+  the graph resamples and mixes. `player status` says `shared`. ALSA `hw:` is the
+  exclusive route (the PRD's open question, still open).
+- **A stalled data thread is not detected.** If PipeWire stops calling back (a suspended
+  sink, a lost connection), the position stops and the player waits. The backend logs
+  a stream that stops, at WARN, and does nothing else.
+- **The device stays open while paused**, playing silence a period at a time. The cost
+  of that is milestone 5's idle check.

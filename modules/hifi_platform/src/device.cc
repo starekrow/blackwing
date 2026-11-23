@@ -1,5 +1,5 @@
 // The device interface over the backends linked in: the capture device everywhere, and
-// each platform's own (none yet; PipeWire is slice 1's milestone 4).
+// each platform's own: PipeWire on Linux.
 #include "korvid/hifi_platform/device.h"
 #include "korvid/core/memory.h"
 #include "backend.h"
@@ -13,7 +13,12 @@ struct HifiDevice {
 
 namespace {
 
-constinit const HifiBackend* const k_backends[] = {&k_capture_backend};
+constinit const HifiBackend* const k_backends[] = {
+    &k_capture_backend,
+#if defined(__linux__) && !defined(__ANDROID__)
+    &k_pipewire_backend,
+#endif
+};
 
 } // namespace
 

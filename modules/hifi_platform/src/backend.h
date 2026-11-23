@@ -17,5 +17,8 @@ struct HifiBackend {
 };
 
 extern const HifiBackend k_capture_backend;
+#if defined(__linux__) && !defined(__ANDROID__)
+extern const HifiBackend k_pipewire_backend; // src/linux/pipewire.cc
+#endif
 
 } // namespace kv

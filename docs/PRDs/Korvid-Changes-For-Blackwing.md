@@ -12,8 +12,25 @@ asked, and how to tell it is done. The findings themselves are in
 Nothing here was changed in Korvid's tree. Where Blackwing has a workaround today, it is
 named, so the cost of waiting is clear.
 
-One of these blocks the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
+One of these blocked the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
 backend, and a project cannot link PipeWire today without editing the engine.
+
+## Status
+
+Nov 23, 2026. Korvid's slice 10 (`docs/PRDs/Engine-Slice-10-PRD.md` in the engine's
+checkout) took all nine, with these IDs. What Blackwing does with each:
+
+| ID | in Blackwing |
+|---|---|
+| KR1 | used: `hifi_platform` defines the `pipewire` external with `pkg_config` (slice 1, milestone 4) |
+| KR2 | used: every sanitizer run since milestone 3 is `kormake test <module> --sanitize ...` |
+| KR3 | used: `blackwing` passes no sink |
+| KR4 | used: the player's path limit is gone |
+| KR5 | not yet: the player still calls the blocking `io_stat` before a read |
+| KR6 | not yet: wanted by slice 2's seeking |
+| KR7 | not needed so far: PipeWire's data thread arrives in the realtime class on its own. A backend that owns its thread (ALSA `hw:`) will use it |
+| KR8 | used: `hifi_codec` builds `flac.cc` with the `wrapv` profile |
+| KR9 | documented on the engine's side; the player's `seq` stays |
 
 ## Requirements
 

@@ -13,7 +13,7 @@ blackwing help                       the commands the engine knows
 
 | option | what |
 |---|---|
-| `--device NAME` | the output device: `default`, or `capture` (no hardware) |
+| `--device NAME` | the output device: `default` (PipeWire on Linux), or `capture` (no hardware) |
 | `--capture-to FILE` | play into the capture device and write what reached it, as raw PCM, at exit |
 | `--lead SECONDS` | how far ahead of the playhead audio is kept (5) |
 | `--verbose` | the engine's INFO lines |
@@ -36,8 +36,8 @@ so a player left paused costs nothing.
 
 ## Platform notes
 
-- **There is no real output device yet.** `--device default` fails each file in words
-  until PipeWire arrives (slice 1, milestone 4). Until then, `--device capture`.
+- **Linux plays through PipeWire**, which mixes and may resample, so `player status` says
+  `shared`. Where PipeWire is not running, each file fails in words.
 - **stdin is a command line only when it is a terminal**, and only on POSIX so far.
 
 ## See also

@@ -351,3 +351,17 @@ events of different types have no order within a tick; `PlayerQueueEnded` is new
 headless loop needed nothing from the engine, so that item is off the engine's list. The
 exit criteria that do not need a real device hold on the capture device, in a real
 engine, driven by events alone.
+
+**Milestone 4, sound** (Nov 22, 2026; BS5, and the engine's part). Built: the PipeWire
+backend in `hifi_platform`, the device named `default` on Linux, on PipeWire's own
+realtime data thread, reporting its delay from PipeWire's `pw_time`. The engine's part
+was Korvid's KR1, which let the module define the `pipewire` external itself; the
+headless loop was already `blackwing`'s own, and KR7 was not needed, since PipeWire's
+thread arrives realtime (through rtkit, a few callbacks in). Departures: one PipeWire
+connection for the process, since a context per device leaked at each close (found by
+LeakSanitizer, in libdbus under PipeWire's module-rt); the delay is a snapshot taken at
+each callback and aged by the wall clock between them; PipeWire's
+graph rate wins, so a 44.1 kHz file is resampled on this machine. Heard: a real album
+plays, Ctrl-C exits cleanly, the position follows the device's clock, and pause holds it.
+The slowest callback took 24 µs of an 11 ms period.
+
