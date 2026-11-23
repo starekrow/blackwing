@@ -69,6 +69,7 @@ struct HifiStatus {
     bool             shared      = false;
     bool             exact       = false; // every sample reaching the device is the source's own: the format carries its bits, unshared
     bool             paused      = false;
+    bool             held        = false; // the device is held: nothing to play, and what it had was heard
     bool             flushing    = false; // a hifi_flush has not reached the render thread yet
     u64              written     = 0; // stream frames the render thread has put in the lead, ever
     u64              taken       = 0; // stream frames the device has taken (or skipped past, after a flush)

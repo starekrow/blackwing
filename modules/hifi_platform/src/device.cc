@@ -53,6 +53,7 @@ HifiDeviceOpened hifi_device_open(const HifiDeviceDesc& desc) {
 
 void hifi_device_start(HifiDevice* d) { if (d) d->backend->start(d->impl); }
 u32  hifi_device_delay(HifiDevice* d) { return d ? d->backend->delay(d->impl) : 0; }
+void hifi_device_hold(HifiDevice* d, bool hold) { if (d && d->backend->hold) d->backend->hold(d->impl, hold); }
 void hifi_device_close(HifiDevice* d) {
     if (!d) return;
     d->backend->close(d->impl);

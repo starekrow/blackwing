@@ -10,6 +10,8 @@
 //   ... o.format is what was granted, which may not be what was asked
 //   hifi_device_start(o.device);
 //   ... fill(me, out, frames) is called on the backend's realtime thread
+//   hifi_device_hold(o.device, true);                // nothing to play: it may stop calling back
+//   hifi_device_hold(o.device, false);               // and go on
 //   hifi_device_close(o.device);                     // no callback runs after this returns
 //
 // The callback runs on a thread marked realtime (korvid/core/thread.h): it must not
@@ -76,6 +78,11 @@ void hifi_device_start(HifiDevice* d);
 // Frames between the callback and the listener's ear, as of now: a frame written in the
 // next callback is heard this many frames of the device's clock later. Any thread.
 u32  hifi_device_delay(HifiDevice* d);
+// Holds the device (true) or lets it go on (false). A held device may stop calling back,
+// so a stream with nothing to play costs nothing; it is for when the frames already given
+// have been heard. A backend that cannot stop goes on calling back. Not for a realtime
+// thread; any other.
+void hifi_device_hold(HifiDevice* d, bool hold);
 // Stops the callbacks, waits for one that is running, and closes the device.
 void hifi_device_close(HifiDevice* d);
 

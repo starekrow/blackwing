@@ -17,6 +17,7 @@ blackwing help                       the commands the engine knows
 | `--capture-to FILE` | play into the capture device and write what reached it, as raw PCM, at exit |
 | `--lead SECONDS` | how far ahead of the playhead audio is kept (5) |
 | `--verbose` | the engine's INFO lines |
+| `--trace-events` | every event as it is delivered, with who emitted it (dev builds) |
 
 With a terminal on stdin, the engine's command line is live while it plays: `player
 pause`, `player play`, `player next`, `player stop`, `player status`, `quit`. Ctrl-C
@@ -31,8 +32,9 @@ handlers on the player's notifications: four print a line, and `PlayerQueueEnded
 the engine to quit.
 
 The loop is this executable's own, not `tool_main`'s. It runs the engine's ticks at the
-clock's rate while something is playing or about to, and four times a second otherwise,
-so a player left paused costs nothing.
+clock's rate while something is playing or about to, and four times a second otherwise.
+With `hifi` holding the device, a player left paused wakes four times a second and does
+nothing else: 0.03% of a core on the Linux laptop.
 
 ## Platform notes
 

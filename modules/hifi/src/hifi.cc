@@ -10,6 +10,9 @@
 //                       not an underrun), `skip_to` (drop everything before this frame).
 //   callback -> render  `read`, `silent_run`, `underruns`.
 //   caller  -> callback `want_pause`.
+//   caller <-> render   `held`, under `lock`: the device is held. The render thread holds
+//                       it when there is nothing to play and the device has played out
+//                       what it was given; play, or something to play, lets it go.
 //
 // Stream frames are counted from zero and never reset: `write` and `read` are positions
 // in one endless stream, the ring holds the frames between them, and a mark (a source
@@ -103,6 +106,7 @@ struct Hifi {
     // ---- caller -> callback, render ----
     u32 want_pause   = 0;              // atomic
     u32 flushes_done = 0;              // atomic: the last flush the render thread has carried out
+    bool held        = false;          // under `lock`: the device is held (hifi_device_hold)
 
     // ---- the callback's alone ----
     bool running = false;              // taking from the lead
@@ -120,6 +124,7 @@ struct Hifi {
     char         cur_reason[96] = "";
     bool         cur_marked = false;   // its Started mark is out
     bool         draining   = false;   // waiting for the lead to play out before the device changes
+    u32          playout_waits = 0;    // looks, since there was work, for the device to have played out
     u32          render_epoch = 0;
     i32*         scratch = nullptr;    // kChunkFrames * 8 decoded samples
     u32          scratch_frames = 0, scratch_at = 0;
@@ -290,6 +295,7 @@ void close_device(Hifi& h) {
     os_mutex_lock(&h.lock);
     HifiDevice* d = h.device;
     h.device = nullptr;
+    h.held   = false;
     os_mutex_unlock(&h.lock);
     if (d) hifi_device_close(d); // no callback runs after this
     h.running = false;           // the callback's, and it is gone
@@ -344,6 +350,7 @@ bool open_device(Hifi& h, const char** reason) {
     atomic_store(&h.silent_run, (u64)0, MO_RELEASE);
     os_mutex_lock(&h.lock);
     h.device = o.device;
+    h.held   = false;
     h.format = o.format;
     h.shared = o.shared;
     h.device_bits = f.bits;
@@ -407,6 +414,43 @@ bool take_commands(Hifi& h) {
     }
 }
 
+bool has_commands(Hifi& h) {
+    os_mutex_lock(&h.lock);
+    bool any = h.cmds.count != 0;
+    os_mutex_unlock(&h.lock);
+    return any;
+}
+
+// Lets a held device go on, unless it is held for a pause.
+void release_hold(Hifi& h) {
+    os_mutex_lock(&h.lock);
+    if (h.held && !atomic_load(&h.want_pause, MO_RELAXED)) {
+        hifi_device_hold(h.device, false);
+        h.held = false;
+    }
+    os_mutex_unlock(&h.lock);
+}
+
+// With nothing to do: holds the device once it has played out what it was given (all of
+// it, or up to the pause), followed by its delay's worth of silence. True when it is held,
+// or there is no device: the render thread may then wait for a command.
+bool try_hold(Hifi& h) {
+    os_mutex_lock(&h.lock);
+    bool done = !h.device || h.held;
+    if (!done) {
+        u32 delay = hifi_device_delay(h.device);
+        bool paused = atomic_load(&h.want_pause, MO_RELAXED) != 0;
+        bool empty  = atomic_load(&h.read, MO_ACQUIRE) == atomic_load(&h.write, MO_RELAXED);
+        if ((paused || empty) && atomic_load(&h.silent_run, MO_ACQUIRE) >= (delay ? delay : 1)) {
+            hifi_device_hold(h.device, true);
+            h.held = true;
+            done = true;
+        }
+    }
+    os_mutex_unlock(&h.lock);
+    return done;
+}
+
 // One step of work. Returns how long to sleep before the next: 0 to go straight on, a
 // negative number to wait for a command.
 f64 render_step(Hifi& h) {
@@ -439,6 +483,7 @@ f64 render_step(Hifi& h) {
         const char* why = "";
         if (!open_device(h, &why)) { fail_cur(h, why); return 0.0; }
     }
+    release_hold(h); // there is something to play
 
     if (h.scratch_at == h.scratch_frames && !h.cur_done) {
         DecodeResult r = h.cur.src.decoder->decode(h.cur.state, h.scratch, kChunkFrames);
@@ -490,11 +535,24 @@ void render_thread(void* arg) {
         if (!take_commands(h)) break;
         f64 wait = render_step(h);
         if (wait < -1.5) break;
+        if (wait >= 0.0) h.playout_waits = 0;
         if (wait > 0.0) { time_sleep(wait); continue; }
         if (wait < 0.0) {
-            // Nothing to do until the caller says something.
+            // Nothing to do until the caller says something, once the device is held.
+            if (!try_hold(h)) {
+                // Still playing out: look again shortly, sooner if a command comes. Korvid
+                // has no timed wait on a condition, so this is short sleeps for as long
+                // as the play-out lasts (at most the lead). Past six seconds the device
+                // has stopped calling back on its own (a daemon gone), and the naps grow.
+                f64 nap = ++h.playout_waits < 300 ? 0.002 : 0.05;
+                for (u32 i = 0; i < 10 && !has_commands(h); ++i) time_sleep(nap);
+                continue;
+            }
             os_mutex_lock(&h.lock);
-            while (h.cmds.count == 0 && (!h.have_cur || atomic_load(&h.want_pause, MO_RELAXED))) os_cond_wait(&h.wake, &h.lock);
+            // Play lets a held device go and wakes this thread: it may have more to play
+            // out before it can be held again.
+            while (h.cmds.count == 0 && (!h.have_cur || atomic_load(&h.want_pause, MO_RELAXED)) && (h.held || !h.device))
+                os_cond_wait(&h.wake, &h.lock);
             os_mutex_unlock(&h.lock);
         }
     }
@@ -549,6 +607,7 @@ void hifi_pause(Hifi* h) { atomic_store(&h->want_pause, 1u, MO_RELEASE); }
 void hifi_play(Hifi* h) {
     os_mutex_lock(&h->lock);
     atomic_store(&h->want_pause, 0u, MO_RELEASE);
+    if (h->held) { hifi_device_hold(h->device, false); h->held = false; } // at once, not when the render thread wakes
     os_cond_signal(&h->wake); // the render thread may be waiting on a full lead
     os_mutex_unlock(&h->lock);
 }
@@ -613,6 +672,7 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     s.format = h->format;
     s.shared = h->shared;
     s.exact  = s.device_open && !s.shared && h->device_bits <= hifi_sample_bits(h->format.sample);
+    s.held   = h->held;
     os_mutex_unlock(&h->lock);
     s.flushing = atomic_load(&h->flushes_done, MO_ACQUIRE) != h->epoch;
     s.paused  = atomic_load(&h->want_pause, MO_RELAXED) != 0;

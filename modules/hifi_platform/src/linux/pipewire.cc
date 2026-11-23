@@ -367,6 +367,15 @@ void pw_start(void* impl) {
     pw_thread_loop_unlock(g_pw.loop);
 }
 
+// Held, the stream is inactive: the graph stops calling `process`, and the data thread
+// sleeps. What PipeWire had queued of it has been heard by then (hifi holds only after).
+void pw_hold(void* impl, bool hold) {
+    PwDevice& d = *(PwDevice*)impl;
+    pw_thread_loop_lock(g_pw.loop);
+    pw_stream_set_active(d.stream, !hold);
+    pw_thread_loop_unlock(g_pw.loop);
+}
+
 u32 pw_delay(void* impl) {
     PwDevice& d = *(PwDevice*)impl;
     u32 delay, s;
@@ -415,7 +424,8 @@ void pw_close(void* impl) {
 } // namespace
 
 constinit const HifiBackend k_pipewire_backend = {
-    .name = "pipewire", .has = pw_has, .open = pw_open, .start = pw_start, .delay = pw_delay, .close = pw_close,
+    .name = "pipewire", .has = pw_has, .open = pw_open, .start = pw_start, .delay = pw_delay, .hold = pw_hold,
+    .close = pw_close,
 };
 
 } // namespace kv

@@ -23,6 +23,8 @@ struct HifiCapture {
     HifiCaptureSegment segments[64];
     u32             nsegments = 0;
     u32             opens     = 0;
+    u32             holds     = 0;
+    bool            held      = false;
     u8*             spill     = nullptr; // where frames go when data is full, and thrown away
     usize           spill_bytes = 0;
 
@@ -112,6 +114,14 @@ void capture_start(void* impl) {
 
 u32 capture_delay(void* impl) { return ((HifiCapture*)impl)->desc.delay_frames; }
 
+void capture_hold(void* impl, bool hold) {
+    HifiCapture& c = *(HifiCapture*)impl;
+    os_mutex_lock(&c.lock);
+    if (hold && !c.held) ++c.holds;
+    c.held = hold;
+    os_mutex_unlock(&c.lock);
+}
+
 void capture_close(void* impl) {
     HifiCapture& c = *(HifiCapture*)impl;
     if (c.thread.handle) {
@@ -120,6 +130,7 @@ void capture_close(void* impl) {
     }
     os_mutex_lock(&c.lock); // a pull in progress finishes first
     c.open = c.started = false;
+    c.held = false;
     c.callback = nullptr;
     os_mutex_unlock(&c.lock);
 }
@@ -127,7 +138,8 @@ void capture_close(void* impl) {
 } // namespace
 
 constinit const HifiBackend k_capture_backend = {
-    .name = "capture", .has = capture_has, .open = capture_open, .start = capture_start, .delay = capture_delay, .close = capture_close,
+    .name = "capture", .has = capture_has, .open = capture_open, .start = capture_start, .delay = capture_delay,
+    .hold = capture_hold, .close = capture_close,
 };
 
 HifiCapture* hifi_capture_create(const HifiCaptureDesc& desc) {
@@ -178,6 +190,20 @@ u64 hifi_capture_dropped(HifiCapture* c) {
     u64 d = c->dropped;
     os_mutex_unlock(&c->lock);
     return d;
+}
+
+bool hifi_capture_held(HifiCapture* c) {
+    os_mutex_lock(&c->lock);
+    bool h = c->held;
+    os_mutex_unlock(&c->lock);
+    return h;
+}
+
+u32 hifi_capture_holds(HifiCapture* c) {
+    os_mutex_lock(&c->lock);
+    u32 n = c->holds;
+    os_mutex_unlock(&c->lock);
+    return n;
 }
 
 u32 hifi_capture_opens(HifiCapture* c) {

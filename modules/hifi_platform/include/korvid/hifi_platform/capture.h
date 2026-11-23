@@ -50,5 +50,9 @@ const u8* hifi_capture_data(HifiCapture* c);
 u64       hifi_capture_dropped(HifiCapture* c);
 // Devices opened on it so far.
 u32       hifi_capture_opens(HifiCapture* c);
+// Whether the device open on it is held (hifi_device_hold), and how many times one has
+// been. A held capture device keeps its clock: it records the hold, so a test can see it.
+bool      hifi_capture_held(HifiCapture* c);
+u32       hifi_capture_holds(HifiCapture* c);
 
 } // namespace kv

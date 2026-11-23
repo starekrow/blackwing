@@ -100,6 +100,19 @@ void test_pipewire(TestCtx& c) {
     KV_CHECK(c, (f64)taken > expect - 4096.0 && (f64)taken < expect + 4096.0); // within a few periods of the wall
     KV_CHECK(c, delay > 0 && delay < 48000);                                     // something, and under a second
     KV_CHECK(c, atomic_load(&n.not_rt, MO_RELAXED) == 0);
+
+    // Held, it stops calling back; let go, it starts again within a few periods.
+    hifi_device_hold(o.device, true);
+    time_sleep(0.1);                                  // what was in flight
+    u32 before = atomic_load(&n.calls, MO_RELAXED);
+    time_sleep(0.3);
+    KV_CHECK(c, atomic_load(&n.calls, MO_RELAXED) == before);
+    f64 let_go = time_now();
+    hifi_device_hold(o.device, false);
+    while (atomic_load(&n.calls, MO_RELAXED) == before && time_now() - let_go < 1.0) time_sleep(0.0002);
+    f64 resumed = time_now() - let_go;
+    KV_CHECK(c, atomic_load(&n.calls, MO_RELAXED) > before && resumed < 0.1);
+    KV_INFO("test", "pipewire: held for 0.3 s with no callback; the first after letting go came in %.1f ms", resumed * 1000.0);
     hifi_device_close(o.device);
     u32 calls = atomic_load(&n.calls, MO_RELAXED);
     time_sleep(0.05);

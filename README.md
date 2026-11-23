@@ -33,3 +33,11 @@ And to play something:
 ```bash
 build/linux-dev/bin/blackwing play a.flac b.flac
 ```
+
+[scripts/stress-play.sh](scripts/stress-play.sh) is slice 1's disk check: it plays a
+directory of FLAC files through the default device while other processes hammer the
+disk they are on, and reports the underruns.
+
+```bash
+scripts/stress-play.sh /media/usb/album --seconds 90
+```

@@ -10,7 +10,8 @@ is PipeWire's default sink.
 
 **The device interface** (`device.h`): `hifi_device_open` takes a name, a wanted format
 and a callback, and answers with the format granted and whether the device is shared.
-`hifi_device_delay` is the frames between the callback and the ear. `hifi_device_close`
+`hifi_device_delay` is the frames between the callback and the ear. `hifi_device_hold`
+lets a device with nothing to play stop calling back, and go on again. `hifi_device_close`
 returns only when no callback is running. Sample formats are `S16`, `S24` (in an `i32`),
 `S32` and `F32`.
 
@@ -39,7 +40,7 @@ Header `korvid/hifi_platform/device.h`:
 | `HifiDeviceFormat` | record | `rate`, `channels`, `sample` |
 | `HifiDeviceDesc` | record | `name`, `want`, `callback`, `user`, `backend` |
 | `HifiDeviceOpened` | record | `device`, `format`, `shared`, `reason` |
-| `hifi_device_open(desc)`, `hifi_device_start(d)`, `hifi_device_delay(d)`, `hifi_device_close(d)` | functions | a device's life |
+| `hifi_device_open(desc)`, `hifi_device_start(d)`, `hifi_device_delay(d)`, `hifi_device_hold(d, hold)`, `hifi_device_close(d)` | functions | a device's life |
 | `hifi_sample_bytes(f)`, `hifi_sample_bits(f)`, `hifi_frame_bytes(f)`, `hifi_sample_format_name(f)` | functions | sizes and names |
 
 Header `korvid/hifi_platform/capture.h`:
@@ -51,13 +52,15 @@ Header `korvid/hifi_platform/capture.h`:
 | `hifi_capture_create(desc)`, `hifi_capture_destroy(c)` | functions | the place captured frames go |
 | `hifi_capture_pull(c, frames)` | function | driven clock: take this many frames now |
 | `hifi_capture_segments(c, out, cap)`, `hifi_capture_data(c)`, `hifi_capture_dropped(c)`, `hifi_capture_opens(c)` | functions | what was captured |
+| `hifi_capture_held(c)`, `hifi_capture_holds(c)` | functions | whether the device is held, and how often it has been; a held capture device keeps its clock |
 
 ## Tests
 
 `kormake test hifi_platform` checks the device names and, where PipeWire is running, the
 backend: each sample format is granted as asked and shared; half a second of silence (so
 no sound) is taken at the wall's pace, on a thread marked realtime, with a delay under a
-second; no callback runs after close. Without PipeWire those checks are skipped with a
+second; held, it makes no callback, and let go it calls back within 100 ms (6 ms on the
+Linux laptop); no callback runs after close. Without PipeWire those checks are skipped with a
 line in the log. The capture device is tested through `hifi`.
 
 ## Building
@@ -84,6 +87,9 @@ installs it when it is missing.
   largest period, the slowest callback and the largest delay.
 - **The graph's rate wins.** At a rate the graph does not allow, PipeWire resamples:
   44.1 kHz into a 48 kHz graph arrives as periods of 498 frames rather than 512.
+- **Held, the PipeWire stream is inactive** (`pw_stream_set_active`): the graph stops
+  calling it and its data thread sleeps. Let go, the first callback comes within a
+  period.
 - **Opening waits up to five seconds** for PipeWire to take the format, and fails in words
   if it does not.
 - **The callback's thread is marked realtime** for as long as it is in the callback, so a

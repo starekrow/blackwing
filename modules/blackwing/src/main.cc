@@ -7,6 +7,7 @@
 //   --capture-to FILE    with the capture device: what reached it, as raw PCM, written at exit
 //   --lead SECONDS       how far ahead of the playhead audio is kept (5)
 //   --verbose            the engine's INFO lines
+//   --trace-events       every event as it is delivered (dev builds), with who emitted it
 //
 // `play` is sugar for the player's own commands (player add, player play), which are also
 // what a terminal on stdin may type while it plays: player pause, player play, player next,
@@ -91,7 +92,7 @@ KV_MODULE_DEFINE(blackwing_module) = {
 namespace {
 
 void usage() {
-    fputs("usage: blackwing [--device NAME] [--capture-to FILE] [--lead SECONDS] [--verbose] play FILE...\n"
+    fputs("usage: blackwing [--device NAME] [--capture-to FILE] [--lead SECONDS] [--verbose] [--trace-events] play FILE...\n"
           "       blackwing help\n", stderr);
 }
 
@@ -116,13 +117,14 @@ int run(int argc, char** argv) {
     const char* device = "default";
     const char* capture_to = nullptr;
     f64 lead = 5.0;
-    bool verbose = false;
+    bool verbose = false, trace = false;
     int first = 1;
     for (; first < argc && strncmp(argv[first], "--", 2) == 0; ++first) {
         if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) device = argv[++first];
         else if (strcmp(argv[first], "--capture-to") == 0 && first + 1 < argc) capture_to = argv[++first];
         else if (strcmp(argv[first], "--lead") == 0 && first + 1 < argc) lead = atof(argv[++first]);
         else if (strcmp(argv[first], "--verbose") == 0) verbose = true;
+        else if (strcmp(argv[first], "--trace-events") == 0) trace = true;
         else { fprintf(stderr, "blackwing: unknown option %s\n", argv[first]); usage(); return 2; }
     }
     if (first >= argc) { usage(); return 2; }
@@ -162,10 +164,14 @@ int run(int argc, char** argv) {
 
     int code = 0;
     Engine e;
+    e.trace.print = trace;
+    if (trace && !KV_DEV) KV_WARN("blackwing", "--trace-events: the event trace exists in dev builds only");
     if (!engine_init(e, kv_module_list())) {
         code = 1;
     } else {
         bool failed = false;
+        // The trace is INFO lines. Turned on after the engine is up, they come almost alone.
+        if (trace && log_level() > LogLevel::Info) log_set_level(LogLevel::Info);
         if (help) {
             cli_run(e, "help", print_line, nullptr);
         } else {
@@ -194,6 +200,7 @@ int run(int argc, char** argv) {
             const PlayerOutput* o = player_output(e);
             if (o && o->underruns) printf("%u underruns\n", o->underruns);
         }
+        if (trace && !verbose) log_set_level(LogLevel::Warn); // the trace is over; shutdown's lines are not wanted
         engine_shutdown(e); // the player closes its device here, so the capture is whole
     }
     if (capture) {

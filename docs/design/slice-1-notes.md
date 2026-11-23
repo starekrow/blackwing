@@ -236,3 +236,112 @@ fails with "PipeWire is not running, or would not connect the playback stream".
   a stream that stops, at WARN, and does nothing else.
 - **The device stays open while paused**, playing silence a period at a time. The cost
   of that is milestone 5's idle check.
+
+## Milestone 5, close
+
+Nov 23, 2026. Linux laptop, `linux-dev`, PipeWire 1.6.2 at 48 kHz. The music is a real
+album (ten tracks, 16-bit stereo 44.1 kHz, 31 MB a track on average).
+
+**Built**: the device hold (`hifi_device_hold`, held by `hifi` when there is nothing to
+play), `--trace-events` on the executable, and `scripts/stress-play.sh`, the disk check.
+
+### The disks
+
+`scripts/stress-play.sh` plays the album through PipeWire for 90 seconds while three
+readers and a writer loop over a load file on the same disk, after evicting the album
+from the page cache. Each disk ran twice: straight through (one track read under the
+load, at the start), and skipping to the next track every 9 seconds (all ten read under
+the load).
+
+| disk | link | filesystem | the load | disk busy | straight | skipping |
+|---|---|---|---|---|---|---|
+| WD_BLACK SN850X, the built-in NVMe | PCIe | ext4 | O_DIRECT, 2.6 GB/s read, 1.8 GB/s written | 77% | 0 underruns | 0 underruns, 10 read |
+| Seagate Backup Plus Ultra Touch, 2 TB disk | USB 3, 5 Gb/s | exFAT | buffered, dropping the cache: 90 MB/s read, 13 MB/s written | 96% | 0 underruns | 0 underruns, 10 read |
+| SimpleTech SimpleDrive (Hitachi HTS545032B9, 320 GB disk) | USB 2, 480 Mb/s, behind two hubs | NTFS | | | not run | not run |
+
+The USB 2 drive dropped off the bus two minutes into writing the 2 GB load file, before
+the player started: the kernel logged "Cannot enable. Maybe the USB cable is bad?", and
+the drive did not enumerate again. It is a bus-powered laptop disk behind a hub chain,
+and a sustained write is the likeliest thing to brown it out. Its run is owed.
+
+On the USB 3 disk under the load, the first track was heard 1.5 seconds late (88.5 of 90
+seconds played): reading 31 MB from a disk 96% busy. A slow read is a late start, never
+an underrun, because a track is read whole before it is lent (milestone 3).
+
+The built-in disk also ran before the hold was built (Nov 22, 23:59), with the same
+result: 0 underruns both ways at 78% busy.
+
+### Idle
+
+Measured from `/proc` over 30 seconds, after five seconds of play:
+
+| | CPU | wakeups | who wakes |
+|---|---|---|---|
+| playing | 1.8% of a core | 350 a second | the main loop and the render thread 255, PipeWire's data thread 95 |
+| paused, before the hold | 0.83% of a core | 99 a second | PipeWire's data thread 95, writing silence; the main loop 4 |
+| paused, with the hold | 0.03% of a core | 4 a second | the main loop, four times a second |
+
+**Where the build departed from the plan: the device is held when there is nothing to
+play.** Found by the measurement above. Paused, the player woke nobody, but the device
+went on calling back a period at a time, and the callback wrote silence. Now `hifi`'s
+render thread holds the device once it has played out what it was given (up to the
+pause, or all of the lead) and its delay's worth of silence after. PipeWire's stream goes
+inactive, and its data thread sleeps. `hifi_play` lets it go on the caller's thread, and
+the first callback comes 6.4 ms later on PipeWire: within one 11 ms period, so pause and
+resume still take effect within a period. Something new to play lets it go too.
+
+Until the device can be held, the render thread looks every 2 ms, and wakes for a
+command. Korvid has no timed wait on a condition, so that is naps (now KR10 on the
+engine's list). It lasts only as long as the device plays out: a few milliseconds after
+a pause, up to the lead's length at the end of a queue. Past six seconds, which only a
+device that stopped calling back on its own would reach, the naps grow to 50 ms.
+
+The first build of the hold had a bug the tests found: after a play let the device go,
+the render thread went back to waiting for a command (it had nothing to decode) and
+never looked to hold again. The wait now also ends when the device is no longer held.
+
+### The numbers the exit criteria asked for
+
+| | |
+|---|---|
+| decode speed | 1165 times real time over the album, the slowest track 1144 times (one core) |
+| the callback's worst time | 23.7 µs of an 11.3 ms period, through PipeWire (milestone 4) |
+| memory held | 76 MB playing (the track, the next one read ahead, the lead, two decoders); 104 MB at most while skipping |
+| CPU | 1.8% of a core playing, 0.03% paused |
+| delay to the ear | up to 16.6 ms through PipeWire |
+
+### The exit criteria
+
+| criterion | where it stands |
+|---|---|
+| `blackwing play a.flac b.flac` through PipeWire, in order, exits; Ctrl-C clean | held (milestone 4) |
+| capture MD5 is FLAC's own, 16 and 24 bits, mono and stereo, 44.1 to 192 kHz | held (`hifi`'s and the player's tests) |
+| two files of one format arrive as one stream | held (the same) |
+| 90 s, no underrun, disk hammered: built-in, two USB drives | built-in and USB 3 held; USB 2 owed (the drive dropped out) |
+| a reader stalled inside the lead: no underrun; past it: one, reported, resumes | held, at a tenth of a second's scale (`hifi`'s stalling-decoder test) |
+| `PlayerTrackStarted` at the frame heard; the position follows the device's clock | held on the capture device to the frame; through PipeWire, 5.0 s of position in 5 s |
+| pause and resume within a period, without a click | held: the ramp, tested for steps; resume from a hold in 6.4 ms |
+| the device thread realtime, no allocator, lock or log | held: every test's callback runs marked; PipeWire's thread is SCHED_RR |
+| a missing, non-FLAC or cut-short file fails its own row, and the next plays | held (the player's tests) |
+| all driven by events; `--trace-events` shows them | held: the trace is new in this milestone |
+| paused, no CPU to speak of | held: 0.03% of a core, with the hold |
+| the numbers in the notes | above |
+
+**Checked beyond the tests.** ThreadSanitizer, and AddressSanitizer with
+UndefinedBehaviorSanitizer, over `hifi_platform`, `hifi` and `blackwing_player`: clean.
+Twenty runs in a row of `hifi`'s and the player's tests with no failure.
+
+**Found about testing, worth keeping:**
+
+- **exFAT takes an O_DIRECT write and refuses the read** (EINVAL). The first exFAT run's
+  load was all errors and was thrown away. The script now tries both, and on such a
+  filesystem reads with `dd`'s `nocache`, which drops the pages behind it.
+- **The trace prints `{..}` for the player's events**: they do not describe their fields
+  to the engine. The names, ticks and emitters are there; the fields are a small job for
+  the player.
+
+**Not done here, and noted:**
+
+- The USB 2 run, and the hour on each of the three disks.
+- The player's blocking `stat` before a read (Korvid's KR5 now offers one through the
+  queue).

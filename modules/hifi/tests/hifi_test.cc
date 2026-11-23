@@ -104,6 +104,12 @@ struct Rig {
         while (status().flushing) { if (time_now() > until) return false; time_sleep(0.0005); }
         return true;
     }
+    // Waits for the device to be held (or let go), as the render thread decides.
+    bool wait_held(bool held) {
+        f64 until = time_now() + 2.0;
+        while (status().held != held) { if (time_now() > until) return false; time_sleep(0.0005); }
+        return true;
+    }
     bool wait_event(HifiEventKind kind, u64 source) {
         f64 until = time_now() + 2.0;
         for (;;) {
@@ -357,10 +363,20 @@ void test_hifi_pause(TestCtx& c) {
     KV_CHECK(c, held > 4000 && held <= 4000 + ramp && r.status().paused);
     r.pull(3000);
     KV_CHECK(c, r.status().taken == held);          // nothing taken while paused
+    // Played out to the pause: the device is held, so a paused player costs nothing.
+    KV_CHECK(c, r.wait_held(true) && hifi_capture_held(r.cap) && hifi_capture_holds(r.cap) == 1);
     hifi_play(r.h);
+    KV_CHECK(c, !r.status().held && !hifi_capture_held(r.cap)); // let go at once, not when the render thread wakes
     u64 pulled = 8000;
     while (pulled < a.frames + 12000) pulled += r.pull(512);
     KV_CHECK(c, r.status().taken == a.frames && r.has(HifiEventKind::Ended, 1) && r.status().underruns == 0);
+    // Nothing left to play, and all of it heard: held again.
+    KV_CHECK(c, r.wait_held(true) && hifi_capture_holds(r.cap) == 2);
+    // Something to play lets it go.
+    File fb = read_data("tone_16_2ch_44100.flac");
+    hifi_add_source(r.h, {2, &k_flac_decoder, fb.bytes()});
+    KV_CHECK(c, r.wait_held(false) && !hifi_capture_held(r.cap));
+    KV_CHECK(c, r.wait_written(a.frames + 1000));
 
     HifiCaptureSegment seg[2];
     hifi_capture_segments(r.cap, seg, 2);
@@ -380,7 +396,7 @@ void test_hifi_pause(TestCtx& c) {
     }
     KV_CHECK(c, quieter);
     r.free();
-    drop(a); drop(fa);
+    drop(a); drop(fa); drop(fb);
 }
 
 // Flush drops what is playing (with the ramp) and what is queued; what is added next

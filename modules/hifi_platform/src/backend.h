@@ -13,6 +13,7 @@ struct HifiBackend {
     void* (*open)(const HifiDeviceDesc& desc, HifiDeviceOpened& out);
     void  (*start)(void* impl);
     u32   (*delay)(void* impl);
+    void  (*hold)(void* impl, bool hold); // may be null: the device goes on calling back
     void  (*close)(void* impl);
 };
 

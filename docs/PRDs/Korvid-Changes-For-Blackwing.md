@@ -218,6 +218,25 @@ instead. The second is enough.
 **Workaround today.** The player's notifications carry a `seq` that counts across types,
 and its page tells consumers to read the transport resource for what is playing.
 
+## Found in milestone 5
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR10 | A wait on a condition variable with a timeout | `core` | P2 |
+
+**KR10. What was run into.** `hifi`'s render thread, with nothing to play, holds the
+device once the device has played out what it was given. Until then it must look again
+shortly, and also wake at once for a command. `os_cond_wait` has no timeout, so it naps
+2 ms at a time, checking for commands: up to 500 wakeups a second for as long as a lead
+plays out (up to five seconds at the end of a queue).
+
+**What is asked.** `os_cond_timed_wait(c, m, seconds)`, returning whether it was
+signalled: `pthread_cond_timedwait` on `CLOCK_MONOTONIC`, `SleepConditionVariableSRW`.
+
+**Done when** a thread can wait for a signal or a deadline, whichever comes first.
+
+**Workaround today.** The naps, in `modules/hifi/src/hifi.cc`.
+
 ## Not asked for, and worth knowing
 
 - **`engine_frame` and `platform_pump` were all a custom loop needed.** The comment in

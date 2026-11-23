@@ -1,6 +1,6 @@
 # Blackwing — Master PRD
 
-Nov 22, 2026 · draft, first review folded in
+Nov 22, 2026 · draft, first review folded in · corrected Nov 23 where slice 1 proved it wrong
 
 ## What it is
 
@@ -25,8 +25,11 @@ putting it in order. Three phases:
 - **P2, the infill.** The rest of the library formats, the optional DSPs, the headphone
   profile picker, the cooker.
 
-Today there is nothing but the scaffold: [the module directories](../../modules/README.md),
-each with a `module.lua` and a page saying what it will hold.
+Slice 1 has built the audio path's spine: `hifi_codec` with FLAC, `hifi_platform` with
+PipeWire and a capture device, `hifi`, `blackwing_player`, and a headless `blackwing`
+that plays files named on its command line. The other modules are scaffolds:
+[the module directories](../../modules/README.md), each with a `module.lua` and a page
+saying what it will hold.
 
 ## Goals
 
@@ -135,20 +138,28 @@ A sketch, to show the shape. The first slice's PRD settles the names and fields.
 |---|---|---|
 | `player.transport` | resource | stopped, playing, paused or starting; the track; the position at the DAC; the lead |
 | `player.queue` | ktable | a row per queued item: what it is, where it comes from, ready, failed and why |
-| `hifi.output` | resource | the device, its format and mode, its latency, the bit-perfect state |
+| `player.output` | resource | the device, its format and mode, its latency, the bit-perfect state |
 | `hifi.devices` | ktable | the output devices there are, and what each can do |
 | `hifi.chain` | ktable | a row per pipeline stage: its parameters, whether it passes audio unchanged now |
 | `hifi.meter` | resource | levels and spectrum, timed to the DAC, for the visualizer |
 | `PlayerPlay`, `PlayerPause`, `PlayerStop`, `PlayerSeek`, `PlayerNext`, `PlayerPrevious` | events in | the transport |
 | `PlayerEnqueue`, `PlayerQueueEdit` | events in | the queue |
 | `PlayerSetParam`, `PlayerSelectDevice` | events in | a stage's parameter (volume is one); the output |
-| `PlayerTrackStarted`, `PlayerTrackEnded` | events out | stamped with the DAC time they became true |
+| `PlayerTrackStarted`, `PlayerTrackEnded` | events out | emitted in the tick after the DAC reached them |
 | `PlayerTrackFailed`, `HifiDeviceChanged`, `HifiUnderrun` | events out | what went wrong, with the reason in words |
+| `PlayerQueueEnded` | event out | everything queued is done or failed, and nothing sounds |
 
-The `player.*` names are the player's; the `hifi.*` ones are published by the audio path
-and read by anyone. Between the player and `hifi` the interface is `hifi`'s own: ordinary
-calls on the control side, with nothing blocking behind them. The first slice settles
-whether that too should be events.
+Every notification carries `seq`, a count across all of them: Korvid keeps the order of
+events within a type, not across types, so a `TrackEnded` and the next `TrackStarted`
+from one tick reach their handlers in the schedule's order. What is playing is read from
+`player.transport`, not kept from events.
+
+The `player.*` names are the player's. The `hifi.*` ones are the audio path's, and the
+player publishes them: `hifi` is a library, not an engine module, so it has no busses of
+its own (slice 1 found this, and published the output as `player.output`). Between the
+player and `hifi` the interface is `hifi`'s own: ordinary calls that queue a message and
+return, and a poll. Slice 1 settled that this is not events: `hifi` has one caller, below
+the level a face or a script reaches.
 
 The library is the same shape: `LibraryAddRoot`, `LibraryQuery` (with an id, so a newer
 one cancels it), `LibraryPrioritize` in; `library.roots`, `library.scan`, result pages
@@ -161,9 +172,11 @@ works across a process boundary in P1 without a second design.
 
 ### Loading through codecs
 
-A decoder is given a readable handle and returns a format, a length, gapless facts (delay
-and padding where the container has them) and blocks of PCM, with seeking. It does not
-open files, name paths or call back into the player. In P0 decoders are linked in; the
+A decoder is given the file's bytes and memory to work in, and returns a format, a length,
+gapless facts (delay and padding where the container has them) and blocks of PCM, as
+integers at the file's depth. It does not open files, name paths, allocate or call back
+into the player. In slice 1 the bytes are the whole file, read by the player within a cap;
+seeking, and a window over a file too large to hold, join the contract in slice 2. In P0 decoders are linked in; the
 contract is written so that one can move into a sandboxed process in P1 unchanged.
 
 P0 decodes FLAC and MP3. P1 gains the usual suspects (WAV, AIFF, Ogg Vorbis, Opus, ALAC,
@@ -207,9 +220,16 @@ short lead, the fade lengths, the target from control to ear).
 ### The output
 
 `hifi_platform` opens a device at a format and pulls from a callback on a realtime thread
-of the OS's audio class. P0 asks each device for the track's sample rate and gets out of
-the way when it can (the device switches rate, exclusive where the OS has it); when it
-cannot, `hifi` resamples and dithers and says so. A device that goes away pauses playback
+of the OS's audio class: the backend's own where it has one (PipeWire's data thread on
+Linux, which PipeWire puts in the class itself), or one `hifi_platform` makes and asks for
+the class (Korvid's `os_thread_enter_audio_class`). P0 asks each device for the track's
+sample rate and gets out of the way when it can (the device switches rate, exclusive
+where the OS has it); when it cannot, `hifi` resamples and dithers and says so.
+
+A shared device can take any rate and resample it itself, out of sight. PipeWire does
+this: it accepts the track's rate and converts to its graph's, which on a stock desktop
+allows 48 kHz only. Such a device reports itself as shared, and the indicator reads
+*modified*, whatever `hifi` did. A device that goes away pauses playback
 and names itself; one that comes back, or a default that changes, is an event, not a
 restart of the program.
 
@@ -221,9 +241,10 @@ after it cannot be seen from here until the loopback in P1.
 ### Gapless
 
 P0 provides for it: consecutive tracks are joined in one output stream without reopening
-the device, and the decoder contract carries delay and padding. Lossless files at one
-rate join sample-exactly. P0 does not promise every MP3 and every container, and a change
-of sample rate between tracks reopens the device with a gap. P1 nails it everywhere and
+the device, and the decoder contract carries delay and padding. Lossless files of one
+format join sample-exactly. P0 does not promise every MP3 and every container, and a
+change between tracks that the open device cannot carry (the rate, the channel count, or
+a depth wider than its word) reopens it with a gap. P1 nails it everywhere and
 makes rate-change behaviour a setting.
 
 ### Tags
@@ -334,12 +355,12 @@ Mobile is out of scope, and these keep it possible:
 | B5 | The pipeline holds a lead of seconds; the next track's bytes are read ahead within a memory cap | P0 |
 | B6 | A control that changes what is heard recuts the mix near the playhead and crossfades into it; the old render plays until the new one is ready | P0 |
 | B7 | Seek and skip start from a small chunk at the target, then refill | P0 |
-| B8 | Decoders take a handle, return PCM and gapless facts, open nothing and call back nothing | P0 |
+| B8 | Decoders take bytes and memory, return PCM and gapless facts, open nothing, allocate nothing and call back nothing | P0 |
 | B9 | FLAC and MP3 decode, including the files in the broken-file corpus that can be decoded | P0 |
 | B10 | A native output backend on Linux, Windows and macOS, on the OS's realtime audio thread class | P0 |
 | B11 | The device is asked for the track's rate; otherwise the pipeline resamples and dithers (TPDF) | P0 |
 | B12 | A device unplugged, plugged or changed as the default is survived and reported | P0 |
-| B13 | The bit-perfect indicator, two states, computed from what the stages declare | P0 |
+| B13 | The bit-perfect indicator, two states, computed from what the stages declare and whether the device is shared | P0 |
 | B14 | Volume and a parametric EQ with presets, pre-attenuated so a preset cannot clip | P0 |
 | B15 | Consecutive tracks join in one stream; lossless at one rate joins sample-exactly | P0 |
 | B16 | Adding a directory is the whole of setting up a library | P0 |
@@ -393,6 +414,7 @@ Slices, as a proposal; each gets its own PRD when it starts.
    *Done when* a FLAC file's samples, captured at the device boundary, are the decoder's
    samples exactly, and ninety seconds play with no underrun while the disk is busy, from
    the built-in disk and two USB drives. An hour-long run is owed after the gate.
+   *Built* Nov 23, 2026, through milestone 5; the slice's PRD has what is still owed.
 2. **The recut.** Seek, skip, the queue, volume and `hifi_eq`, all through the recut and
    the join; tracks joined in one stream.
    *Done when* a control is heard within the target on a warm file, a cold file is heard
@@ -474,6 +496,13 @@ Nov 22, 2026, in review of the first draft.
 - **Disc images are read, not ripped**: music inside an `.iso` plays in place (P1; the
   phase is this draft's guess). Audio CD images follow in P2.
 - **Everything unphased is future work.**
+
+Nov 23, 2026, by slice 1.
+
+- **`hifi` is called, not sent events**, and the player publishes what it reports.
+- **Notifications carry `seq`**; order across event types is not something to rely on.
+- **The lead is in the device's own format**, so with no stage the path is integers end
+  to end. Where the change to floats sits is slice 2's question.
 
 ## Open
 

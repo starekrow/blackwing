@@ -34,6 +34,15 @@ device's sample format, and writes them until the ring is full: `lead_seconds` o
 at the stream's rate. Then it sleeps a few milliseconds at a time, or until spoken to if
 playback is paused.
 
+**The hold.** With nothing to play (paused, stopped, or at the end of the queue), the
+render thread holds the device (`hifi_device_hold`) once the device has played out what
+it was given: everything up to the pause, or all of the lead, followed by the device's
+delay's worth of silence. A held device stops calling back, so a paused player wakes no
+thread of its own. `hifi_play` lets it go at once, on the caller's thread; something to
+play lets it go on the render thread. Until it can hold, the render thread looks every
+2 ms (Korvid has no timed wait on a condition), and every 50 ms after six seconds, for a
+device that has stopped calling back on its own.
+
 **The callback** copies frames from the ring to the device. That is all it does in normal
 playback: the bytes are not touched. Otherwise:
 
@@ -103,7 +112,7 @@ Header `korvid/hifi/hifi.h`:
 | `HifiSource` | record | `id`, `decoder`, `bytes` |
 | `HifiEventKind` | enum | `Started`, `Ended`, `Failed`, `Released`, `Underrun` |
 | `HifiEvent` | record | `kind`, `source`, `info`, `status`, `frames`, `reason` |
-| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `flushing`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
+| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
 | `hifi_create(config)`, `hifi_destroy(h)` | functions | the path and its render thread |
 | `hifi_add_source(h, source)` | function | queue a source |
 | `hifi_pause(h)`, `hifi_play(h)`, `hifi_flush(h)` | functions | hold, let go, drop everything |
@@ -140,7 +149,9 @@ and publish what it says.
 driven by the test, so every check is to the frame: the eight good files hash to FLAC's
 own MD5 at the device; two files join with nothing between them; events arrive at the
 frame the device's delay says; a change of format leaves each side exact; pause, flush
-and underrun ramp without a step and lose no frame; failures fail alone. One test runs
+and underrun ramp without a step and lose no frame; a pause and the end of the stream
+hold the device once it has played out, and play or a new source lets it go; failures
+fail alone. One test runs
 the capture device on the wall clock.
 
 ## Not in this module
