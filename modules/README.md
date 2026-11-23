@@ -1,0 +1,37 @@
+# Modules
+
+Blackwing's modules, each a directory with a `module.lua`. All are skeletons today. The
+[master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
+
+| module | what |
+|---|---|
+| [hifi](hifi/README.md) | the hard-realtime audio path and its interfaces |
+| [hifi_codec](hifi_codec/README.md) | the decoder contract and the decoders |
+| [hifi_eq](hifi_eq/README.md) | the equalizer, a stage on hifi's interface |
+| [hifi_platform](hifi_platform/README.md) | the output device, per OS |
+| [media_platform](media_platform/README.md) | media keys, now-playing, keep-awake, per OS |
+| [blackwing_player](blackwing_player/README.md) | the player: queue, transport, and an API of events and tables |
+| [blackwing_tags](blackwing_tags/README.md) | tags from ranked sources, read-only, with sidecar overrides |
+| [blackwing_library](blackwing_library/README.md) | roots, the scanner, the index, queries |
+| [ui_dev](ui_dev/README.md) | the development face |
+| [ui_wsz](ui_wsz/README.md) | the classic face: Winamp `.wsz` skins |
+| [ui_clean](ui_clean/README.md) | the clean face |
+| [ui_compact](ui_compact/README.md) | the clean face, compact |
+| [blackwing](blackwing/README.md) | the application: the executable around the player, the library and a face |
+
+```
+ui_dev  ui_wsz  ui_clean  ui_compact            media_platform
+    \      |       |        /                         |
+     events and tables on Korvid's busses ------------+
+        /                        \
+blackwing_player            blackwing_library
+        |                          |
+      hifi --- hifi_eq        blackwing_tags
+      /   \
+hifi_codec  hifi_platform
+```
+
+Three layers. `hifi*` is the audio path and knows nothing of music collections or
+players. `blackwing_player` is a player with no face and no library, which another
+project could link. `blackwing`, the library and the faces are the application around
+it. The faces depend on the player and the library for their declarations only.
