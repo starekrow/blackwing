@@ -6,6 +6,10 @@ void test_flac_good(kv::TestCtx&);
 void test_flac_contract(kv::TestCtx&);
 void test_flac_broken(kv::TestCtx&);
 void test_flac_spoiled(kv::TestCtx&);
+void test_sparse_span(kv::TestCtx&);
+void test_flac_pieces(kv::TestCtx&);
+void test_flac_seek(kv::TestCtx&);
+void test_flac_seek_broken(kv::TestCtx&);
 
 int main() {
     kv::TestCtx c;
@@ -14,6 +18,10 @@ int main() {
     test_flac_contract(c);
     test_flac_broken(c);
     test_flac_spoiled(c);
+    test_sparse_span(c);
+    test_flac_pieces(c);
+    test_flac_seek(c);
+    test_flac_seek_broken(c);
     int rc = kv::test_report(c, "hifi_codec_tests");
     kv::mem_shutdown();
     return rc;

@@ -11,4 +11,5 @@ plans in `PRDs/`, dated design records in `design/`, a page per module beside it
 | [PRDs/Korvid-Changes-For-Blackwing.md](PRDs/Korvid-Changes-For-Blackwing.md) | what slice 1 found it needs from the engine, as quick requirements |
 | [design/design-notes-2026-11-22.md](design/design-notes-2026-11-22.md) | the design discussion the plan was drawn from, as it stood that day |
 | [design/slice-1-notes.md](design/slice-1-notes.md) | what building slice 1 found, with the numbers |
+| [design/slice-2-notes.md](design/slice-2-notes.md) | what building slice 2 found, with the numbers |
 | [../modules/README.md](../modules/README.md) | the modules and how they depend on each other |

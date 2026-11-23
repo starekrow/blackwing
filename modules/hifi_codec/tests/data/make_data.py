@@ -9,6 +9,10 @@ checked here against the MD5 of the PCM it was made from, so the tests' oracle (
 MD5) is itself checked once against something that is not a FLAC decoder.
 
 Broken files (broken/): made from the good ones by cutting and patching bytes.
+
+A file with a seek table (GStreamer's flacenc writes none, so seeking in the good files is
+searching): one good file with a SEEKTABLE block put in, a point at every frame. Made
+from the committed file by itself: `make_data.py --seektable` needs no encoder.
 """
 import hashlib, math, os, struct, subprocess, sys, tempfile
 
@@ -51,6 +55,66 @@ def streaminfo(data):
     return dict(rate=packed >> 44, channels=((packed >> 41) & 7) + 1, bits=((packed >> 36) & 31) + 1,
                 total=packed & ((1 << 36) - 1), md5=si[18:34])
 
+def crc8(data):
+    c = 0
+    for b in data:
+        c ^= b
+        for _ in range(8):
+            c = ((c << 1) ^ 0x07) & 0xFF if c & 0x80 else (c << 1) & 0xFF
+    return c
+
+def audio_start(data):
+    o = 4
+    while True:
+        last, n = data[o] & 0x80, int.from_bytes(data[o + 1:o + 4], "big")
+        o += 4 + n
+        if last:
+            return o
+
+def frames(data, block):
+    """(offset, first sample) of every frame of a fixed-block-size stream, found by its
+    sync code, its CRC-8 and its frame number counting up from 0."""
+    out, o, want = [], audio_start(data), 0
+    while o + 16 <= len(data):
+        if data[o] != 0xFF or data[o + 1] != 0xF8:
+            o += 1
+            continue
+        bs, rate = data[o + 2] >> 4, data[o + 2] & 15
+        k = o + 4
+        lead = data[k]
+        extra = 0 if lead < 0x80 else (7 - (lead ^ 0xFF).bit_length())
+        num = lead & (0x7F >> extra) if extra else lead
+        for j in range(extra):
+            num = (num << 6) | (data[k + 1 + j] & 0x3F)
+        k += 1 + extra
+        k += {6: 1, 7: 2}.get(bs, 0) + {12: 1, 13: 2, 14: 2}.get(rate, 0)
+        if num == want and crc8(data[o:k]) == data[k]:
+            out.append((o, num * block))
+            want += 1
+            o = k
+        else:
+            o += 1
+    return out
+
+def with_seektable(data):
+    si = streaminfo(data)
+    block = int.from_bytes(data[8:10], "big")
+    points = b""
+    found = frames(data, block)
+    for i, (off, sample) in enumerate(found):
+        n = (found[i + 1][1] if i + 1 < len(found) else si["total"]) - sample
+        points += sample.to_bytes(8, "big") + (off - audio_start(data)).to_bytes(8, "big") + n.to_bytes(2, "big")
+    assert found and found[-1][1] < si["total"] <= found[-1][1] + block
+    table = bytes([3]) + len(points).to_bytes(3, "big") + points   # SEEKTABLE, not the last block
+    return data[:42] + table + data[42:], len(found)
+
+def seektable():
+    src = "tone_24_2ch_192000.flac"
+    out, n = with_seektable(open(src, "rb").read())
+    name = "tone_24_2ch_192000_seektable.flac"
+    open(name, "wb").write(out)
+    print("%-28s %7d bytes, %d seek points" % (name, len(out), n))
+
 def main():
     names = []
     for bits, channels, rate, seconds in GOOD:
@@ -88,7 +152,8 @@ def main():
     packed |= (7 << 41) | (31 << 36)
     wild[18:26] = packed.to_bytes(8, "big")
     put("lying_format.flac", bytes(wild))
+    seektable()
 
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    main()
+    seektable() if sys.argv[1:] == ["--seektable"] else main()

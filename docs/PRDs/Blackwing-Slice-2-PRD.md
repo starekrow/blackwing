@@ -435,3 +435,16 @@ Nov 23, 2026, in review of the first draft.
   third-party codecs will meet this.
 - **Whether the join's fade should be equal-power for a jump.** The two sides do not
   overlap, so it does not arise; it would if the fades were made to.
+
+## As built
+
+Numbers and findings are in [docs/design/slice-2-notes.md](../design/slice-2-notes.md).
+
+**Milestone 1, seeking and the file in pieces** (Nov 23, 2026; BR1 to BR3, BR20). As
+planned. `SparseSpan` keeps a byte per piece, not a bit. `decode` may return good frames
+with its `Wait`; `seek` is a call that may itself wait. dr_flac is kept from reading a
+missing piece by checking, before each FLAC frame, the bytes it can need; where that
+cannot be known, a refused read and a seek back to the last frame returned. The nine
+test files decode to their MD5 in four piece sizes and four orders of delivery, over
+address space committed only as pieces arrive; 3600 seeks and 160 on a real album land
+exact.

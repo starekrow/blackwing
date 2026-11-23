@@ -49,7 +49,7 @@ Pcm decode(const File& f) {
     Pcm p;
     const DecoderDesc& d = k_flac_decoder;
     u8* mem = (u8*)mem_alloc(d.memory_bytes);
-    DecoderOpen o = d.open(f.bytes(), Span<u8>(mem, d.memory_bytes));
+    DecoderOpen o = d.open(sparse_whole(f.bytes()), Span<u8>(mem, d.memory_bytes));
     if (o.state) {
         p.fmt = o.info.format;
         u64 cap = o.info.frames + 16;

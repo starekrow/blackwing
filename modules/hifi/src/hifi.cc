@@ -278,7 +278,7 @@ void prepare_next(Hifi& h) {
         if (!s.decoder) why = "no decoder takes this kind of file";
         else {
             p.memory = (u8*)mem_alloc(s.decoder->memory_bytes);
-            DecoderOpen o = s.decoder->open(s.bytes, Span<u8>(p.memory, s.decoder->memory_bytes));
+            DecoderOpen o = s.decoder->open(sparse_whole(s.bytes), Span<u8>(p.memory, s.decoder->memory_bytes));
             if (o.state) { p.state = o.state; p.info = o.info; }
             else why = o.reason;
             const AudioFormat& f = o.info.format;
@@ -489,6 +489,10 @@ f64 render_step(Hifi& h) {
         DecodeResult r = h.cur.src.decoder->decode(h.cur.state, h.scratch, kChunkFrames);
         h.scratch_frames = r.frames; h.scratch_at = 0;
         h.cur_frames += r.frames;
+        if (r.status == DecodeStatus::Wait) { // the whole file is there, so this is a decoder's mistake
+            r.status = DecodeStatus::Damaged;
+            r.reason = "the decoder waited for bytes it was already given";
+        }
         if (r.status != DecodeStatus::Ok) {
             h.cur_done = true; h.cur_status = r.status;
             format(h.cur_reason, sizeof h.cur_reason, "%s", r.reason);

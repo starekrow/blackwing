@@ -12,9 +12,9 @@ constinit const DecoderDesc* const k_decoders[] = {&k_flac_decoder};
 
 Span<const DecoderDesc* const> decoders() { return k_decoders; }
 
-const DecoderDesc* decoder_for(Span<const u8> bytes) {
+const DecoderDesc* decoder_for(Span<const u8> head) {
     for (const DecoderDesc* d : k_decoders)
-        if (d->probe(bytes)) return d;
+        if (d->probe(head)) return d;
     return nullptr;
 }
 
@@ -23,6 +23,7 @@ const char* decode_status_name(DecodeStatus s) {
     case DecodeStatus::Ok:      return "ok";
     case DecodeStatus::End:     return "end";
     case DecodeStatus::Damaged: return "damaged";
+    case DecodeStatus::Wait:    return "wait";
     case DecodeStatus::Count:   break;
     }
     return "?";

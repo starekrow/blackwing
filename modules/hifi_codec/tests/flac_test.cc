@@ -14,6 +14,7 @@
 #include "korvid/core/memory.h"
 #include "korvid/core/random.h"
 #include "korvid/core/test.h"
+#include "data.h"
 #include "md5.h"
 #include <initializer_list>
 #include <stdio.h>
@@ -26,26 +27,9 @@ namespace {
 constexpr u32 kGuard = 0xC0FFEE11u;
 constexpr u32 kGuardWords = 64;
 
-struct File { u8* data = nullptr; u32 len = 0; };
-
-// tests/data/<name>, beside this source file.
-File read_data(const char* name) {
-    char path[1024];
-    const char* here = __FILE__;
-    const char* slash = strrchr(here, '/');
-    format(path, sizeof path, "%.*s/data/%s", slash ? (int)(slash - here) : 0, here, name);
-    File f;
-    FILE* fp = fopen(path, "rb");
-    if (!fp) { KV_ERROR("test", "cannot open %s", path); return f; }
-    fseek(fp, 0, SEEK_END);
-    long n = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    f.data = (u8*)mem_alloc((usize)n + 1);
-    f.len  = (u32)fread(f.data, 1, (usize)n, fp);
-    fclose(fp);
-    return f;
-}
-void drop(File& f) { mem_free(f.data); f = File{}; }
+using kvtest::File;
+using kvtest::read_data;
+using kvtest::drop;
 
 // A decoder's memory and an output buffer, each with guard words after it.
 struct Rig {
@@ -92,7 +76,7 @@ Decoded decode_all(Span<const u8> bytes, u32 chunk, u64 keep, u32 mem_bytes = 0)
     Decoded r;
     Rig rig;
     rig.make(mem_bytes ? mem_bytes : d.memory_bytes, chunk, 8);
-    DecoderOpen o = d.open(bytes, Span<u8>(rig.memory, rig.memory_len));
+    DecoderOpen o = d.open(sparse_whole(bytes), Span<u8>(rig.memory, rig.memory_len));
     r.open_reason = o.reason;
     r.behaved = rig.intact();
     if (o.state) {
@@ -216,8 +200,8 @@ void test_flac_contract(TestCtx& c) {
     Rig a, b;
     a.make(d.memory_bytes, 700, 2);
     b.make(d.memory_bytes, 300, 2);
-    DecoderOpen oa = d.open(bytes, Span<u8>(a.memory, a.memory_len));
-    DecoderOpen ob = d.open(bytes, Span<u8>(b.memory, b.memory_len));
+    DecoderOpen oa = d.open(sparse_whole(bytes), Span<u8>(a.memory, a.memory_len));
+    DecoderOpen ob = d.open(sparse_whole(bytes), Span<u8>(b.memory, b.memory_len));
     KV_CHECK(c, oa.state && ob.state && oa.state != ob.state);
     KV_CHECK(c, (u8*)oa.state >= a.memory && (u8*)oa.state < a.memory + a.memory_len); // the state is in the memory given
     Decoded whole = decode_all(bytes, 4096, 30000);
@@ -241,7 +225,7 @@ void test_flac_contract(TestCtx& c) {
     // fails in words and writes nowhere it should not.
     {
         Rig r; r.make(d.memory_bytes + 16, 512, 2);
-        DecoderOpen o = d.open(bytes, Span<u8>(r.memory + 3, d.memory_bytes));
+        DecoderOpen o = d.open(sparse_whole(bytes), Span<u8>(r.memory + 3, d.memory_bytes));
         KV_CHECK(c, o.state != nullptr);
         if (o.state) { DecodeResult x = d.decode(o.state, r.out, 512); KV_CHECK(c, x.frames == 512 && memcmp(r.out, whole.samples, 512 * 8) == 0); d.close(o.state); }
         KV_CHECK(c, r.intact());
@@ -253,7 +237,7 @@ void test_flac_contract(TestCtx& c) {
         drop(r);
     }
     {
-        DecoderOpen o = d.open(bytes, Span<u8>());
+        DecoderOpen o = d.open(sparse_whole(bytes), Span<u8>());
         KV_CHECK(c, !o.state && o.reason[0] != 0);
     }
 
