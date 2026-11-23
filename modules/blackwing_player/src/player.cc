@@ -133,6 +133,11 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         if (p.cursor < p.count) {
             Item& it = p.items[p.cursor];
             set_state(queue, it, PlayerItemState::Done); // skipped: done, with nothing said of how it ended
+            // A read still out for it is cancelled. Left to run, it would hold the disk
+            // while the next item's read waited behind it: on slow media, each skip added
+            // a read, and none finished. Its completion is freed when it comes (from_io).
+            if (!it.read.is_null())
+                if (IoQueue* io = platform_io(*ctx.engine)) io->cancel(it.read);
             it.in_play = false;
             if (!it.lent) free_data(it);
             flush(p, queue);

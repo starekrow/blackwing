@@ -366,18 +366,18 @@ plays, Ctrl-C exits cleanly, the position follows the device's clock, and pause 
 The slowest callback took 24 µs of an 11 ms period.
 
 **Milestone 5, close** (Nov 23, 2026; BS18 to BS20). The ninety-second runs: 0 underruns
-from the built-in NVMe and from a USB 3 disk, each straight through and skipping every
-nine seconds, with the disk 77% and 96% busy. The USB 2 disk dropped off the bus while
-its load file was written, before it could play, and its run is owed. Departures: the
-idle check found the device still calling back while paused (0.8% of a core, 95 wakeups
-a second), so `hifi` now holds the device when there is nothing to play, and a paused
-player costs 0.03% of a core; `--trace-events` was missing from the executable and is
-added. The master PRD is corrected where this slice proved it wrong. The criteria, one
+from the built-in NVMe, a USB 3 disk and a USB 2 flash drive, with each disk between 77%
+and 100% busy. The flash drive reads a track in about 24 seconds under the load, so a
+track there starts late, and skipping faster than that plays nothing; neither is an
+underrun. A first USB 2 drive dropped off the bus and was replaced. Departures: the idle
+check found the device still calling back while paused (0.8% of a core, 95 wakeups a
+second), so `hifi` now holds the device when there is nothing to play, and a paused
+player costs 0.03% of a core; the skipping runs found that a skip left its item's read
+running, and it is now cancelled; `--trace-events` was missing from the executable and
+is added. The master PRD is corrected where this slice proved it wrong. The criteria, one
 by one, and the numbers are in the notes.
 
 ## Owed, as of the close
 
-- **The USB 2 run**: `scripts/stress-play.sh DIR` on a USB 2 drive, which this slice's
-  drive could not finish (it dropped off the bus under the load).
-- **The hour**, on each of the three disks (above).
-
+- **The hour**, on each of the three disks (above). `scripts/stress-play.sh DIR --seconds
+  3600` runs it; the album is on the USB drives under `blackwing-stress/`.

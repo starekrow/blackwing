@@ -257,12 +257,27 @@ the load).
 |---|---|---|---|---|---|---|
 | WD_BLACK SN850X, the built-in NVMe | PCIe | ext4 | O_DIRECT, 2.6 GB/s read, 1.8 GB/s written | 77% | 0 underruns | 0 underruns, 10 read |
 | Seagate Backup Plus Ultra Touch, 2 TB disk | USB 3, 5 Gb/s | exFAT | buffered, dropping the cache: 90 MB/s read, 13 MB/s written | 96% | 0 underruns | 0 underruns, 10 read |
-| SimpleTech SimpleDrive (Hitachi HTS545032B9, 320 GB disk) | USB 2, 480 Mb/s, behind two hubs | NTFS | | | not run | not run |
+| SanDisk Cruzer, 8 GB flash | USB 2, 480 Mb/s | FAT32 | buffered, dropping the cache (1 GB): 5 MB/s read, 2 MB/s written | 100% | 0 underruns | see below |
 
-The USB 2 drive dropped off the bus two minutes into writing the 2 GB load file, before
-the player started: the kernel logged "Cannot enable. Maybe the USB cable is bad?", and
-the drive did not enumerate again. It is a bus-powered laptop disk behind a hub chain,
-and a sustained write is the likeliest thing to brown it out. Its run is owed.
+The first USB 2 drive, a SimpleTech SimpleDrive (a 320 GB laptop disk behind two hubs),
+dropped off the bus two minutes into writing its load file, before the player started
+("Cannot enable. Maybe the USB cable is bad?"), and did not enumerate again. It was a bad
+drive; the flash drive replaced it.
+
+**The flash drive is slower than the run.** Under the load, a 31 MB track takes about 24
+seconds to read: the straight run's first track was heard 24 seconds late (66.3 of 90
+seconds played), and then played with no underrun. Skipping every 9 seconds, nothing was
+heard at all: each skip landed on a track still being read. Skipping every 30 seconds,
+three tracks played, each skip starting the next track at once, with 0 underruns. That is
+the criterion met: no underrun, on any disk, whatever the load did to the reads.
+
+**Found by the skipping run: a skip did not cancel its item's read.** The skipped item was
+marked done, and its read ran on, its bytes thrown away when they came, while the player
+started reads for the items after it. On a disk slower than the skips, the reads pile up
+and share the disk, and none finishes. `PlayerNext` now cancels the read of the item it
+skips. This is reasoned rather than measured: at 9-second skips nothing can play with or
+without it, since one read takes longer than that, and at 30 seconds the reads finish in
+time either way.
 
 On the USB 3 disk under the load, the first track was heard 1.5 seconds late (88.5 of 90
 seconds played): reading 31 MB from a disk 96% busy. A slow read is a late start, never
@@ -317,7 +332,7 @@ never looked to hold again. The wait now also ends when the device is no longer 
 | `blackwing play a.flac b.flac` through PipeWire, in order, exits; Ctrl-C clean | held (milestone 4) |
 | capture MD5 is FLAC's own, 16 and 24 bits, mono and stereo, 44.1 to 192 kHz | held (`hifi`'s and the player's tests) |
 | two files of one format arrive as one stream | held (the same) |
-| 90 s, no underrun, disk hammered: built-in, two USB drives | built-in and USB 3 held; USB 2 owed (the drive dropped out) |
+| 90 s, no underrun, disk hammered: built-in, two USB drives | held: the built-in NVMe, a USB 3 disk and a USB 2 flash drive |
 | a reader stalled inside the lead: no underrun; past it: one, reported, resumes | held, at a tenth of a second's scale (`hifi`'s stalling-decoder test) |
 | `PlayerTrackStarted` at the frame heard; the position follows the device's clock | held on the capture device to the frame; through PipeWire, 5.0 s of position in 5 s |
 | pause and resume within a period, without a click | held: the ramp, tested for steps; resume from a hold in 6.4 ms |
@@ -342,6 +357,9 @@ Twenty runs in a row of `hifi`'s and the player's tests with no failure.
 
 **Not done here, and noted:**
 
-- The USB 2 run, and the hour on each of the three disks.
+- The hour on each of the three disks.
+- A test of the skip's cancel. The player's tests read from the page cache, too fast to
+  skip a read in flight, and a file that is not a regular one is refused before it is
+  read, so a pipe cannot stand in for a slow disk.
 - The player's blocking `stat` before a read (Korvid's KR5 now offers one through the
   queue).

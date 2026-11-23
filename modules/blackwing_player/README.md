@@ -101,6 +101,8 @@ What the module registers with the engine, as module `player`:
 - **The whole file is read into memory**, at most two at once, each under
   `read_ahead_bytes` (256 MB). A larger file fails its item.
 - **Paths over 255 bytes fail**: that is the engine's I/O queue's limit today.
+- **A skip cancels the skipped item's read**, if it is still being read. A slow drive
+  still costs a late start: the item after it is read whole before it plays.
 - **The file is checked with a blocking `stat`** before it is read. On a sleeping
   network share that will stall a tick.
 - **`player.output` is the player's, not `hifi`'s**: `hifi` is not an engine module, so
