@@ -215,6 +215,9 @@ there is a face.
 
 ## What the engine gets
 
+Superseded by [Korvid-Changes-For-Blackwing.md](Korvid-Changes-For-Blackwing.md), written after
+milestone 3: the first item below became KR1 there, and the other two were not needed.
+
 Three things this slice needs from Korvid, each small, each to be agreed before it is
 built:
 
