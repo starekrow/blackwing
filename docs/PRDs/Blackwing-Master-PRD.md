@@ -172,12 +172,16 @@ works across a process boundary in P1 without a second design.
 
 ### Loading through codecs
 
-A decoder is given the file's bytes and memory to work in, and returns a format, a length,
+A decoder is given the file as a sparse span (its address range, and a map of which
+pieces of it have arrived) and memory to work in, and returns a format, a length,
 gapless facts (delay and padding where the container has them) and blocks of PCM, as
-integers at the file's depth. It does not open files, name paths, allocate or call back
-into the player. In slice 1 the bytes are the whole file, read by the player within a cap;
-seeking, and a window over a file too large to hold, join the contract in slice 2. In P0 decoders are linked in; the
-contract is written so that one can move into a sandboxed process in P1 unchanged.
+integers at the file's depth, from the start or from any frame it is sent to. It does
+not open files, name paths, allocate or call back into the player, and it waits by
+returning: "I need these bytes". The player reads the file in pieces, the piece a decoder
+waits for first, within a cap on bytes held, so a track starts on its first piece. In
+P0 decoders are linked in; the contract is written so that one can move into a
+sandboxed process in P1 unchanged. (Slice 1 read the whole file first; slice 2 made it
+pieces.)
 
 P0 decodes FLAC and MP3. P1 gains the usual suspects (WAV, AIFF, Ogg Vorbis, Opus, ALAC,
 AAC and their kin) and the ability to run someone else's native codec, as a sandboxed
@@ -213,9 +217,19 @@ the crossfade also hides the step in the parameter. For a seek or a skip the old
 fades out at once and the new fades in when it arrives.
 
 What this costs: the stretch being crossfaded is modified audio, and the indicator says
-so for as long as it lasts. What is open: whether the join's arithmetic runs in the
-output callback or on a feeder thread just behind it, and the numbers (the lead, the
-short lead, the fade lengths, the target from control to ear).
+so for as long as it lasts.
+
+**As built in slice 2.** The join runs in the output callback, as two gains over two
+rings. The pipeline keeps the decoder's own samples from half a second behind the
+playhead to the front of the lead, always, so a parameter change never seeks or decodes:
+it runs the chain again over samples in memory and is heard within a callback or two
+(2 to 13 ms through PipeWire, counted from the change reaching the path; the tick
+before and the device after are the platform's). A seek or a skip fades out over 10 ms
+and fades in over 10 ms once the new render has 50 ms. The lead is five seconds, the
+aligned crossfade 10 ms and linear. One thing slice 2 found: "no step at the join
+larger than either render's own" cannot hold at a change of level, since a fade's step
+at a waveform's peak is at least the level change spread over the fade; that slope is
+part of the bound.
 
 ### The output
 
@@ -419,6 +433,7 @@ Slices, as a proposal; each gets its own PRD when it starts.
    the join; tracks joined in one stream.
    *Done when* a control is heard within the target on a warm file, a cold file is heard
    late rather than as silence, and no join clicks.
+   *Built* Nov 23, 2026, through milestone 7; the slice's PRD has what is still owed.
 3. **The library.** `blackwing_tags` and `blackwing_library`: roots, the three passes, the priority
    slot, sidecars, watching, queries; MP3; the broken-file corpus.
    *Done when* a fresh install aimed at fifty thousand tracks is playing a chosen one
@@ -516,8 +531,8 @@ Nov 23, 2026, by slice 1.
 - **Where sidecars live**: beside the music (portable, visible to other machines) or in
   Blackwing's own data (works on read-only media), or beside with a fallback. And their
   format and what they key on before B43.
-- **The recut's numbers and where the join runs** (see The lead and the recut). Volume
-  alone could be a ramp at the output, with no recut at all.
+- ~~The recut's numbers and where the join runs~~: settled by slice 2 (see The lead and
+  the recut).
 - **AAC on Linux.** libopus and Apple's ALAC are permissively licensed. AAC has no
   comparable decoder; the OS's own cover Windows and macOS but not Linux.
 - **SACD images.** Data `.iso` (P1) and audio-CD images (P2) are settled. An SACD image

@@ -357,3 +357,101 @@ remove the row playing; clear. ThreadSanitizer and AddressSanitizer clean.
 **Through PipeWire and the capture device**, on the real album: seek to 251 s of the
 first track, remove the second (already in the lead): a recut 6 to 8 ms after the edit
 reached the path, and the third track follows the first.
+
+## Milestone 7, close
+
+Nov 23, 2026. Linux laptop, `linux-dev`, PipeWire at a 48 kHz quantum of 512 frames, the
+album (ten tracks, 16-bit stereo 44.1 kHz) as in slice 1.
+
+**Built:** `hifi_status` (and `player.output`, `player status`) gained the last jump's
+time from reaching the path to its first frame out, and the last recut's cost to render
+the whole lead again. Every player event describes its fields, so `--trace-events` prints
+them (BR25). A test seeks back and forward in a file larger than the cap.
+
+**Found by that test:**
+
+- A seek under memory pressure failed its track ("no decoder takes this kind of file"):
+  the player asked `decoder_for` again of the file's first piece, which had been given
+  back. It now keeps the decoder found the first time; the decoder waits for the piece
+  like any other read.
+- With a cap of ten pieces a forward seek never landed. Urgent room was made by giving
+  back the farthest pieces ahead, which are what a forward seek's search probes, and
+  dr_flac starts its search again after every wait. Pieces now go least recently used
+  first (when last read or asked for). Even so a seek needs its search's pieces and a
+  frame's window held at once: about a dozen pieces. At 4 KB pieces, 48 KB (two thirds
+  of the 74 KB file) is enough; 40 KB is not. At 256 KB pieces and a 256 MB cap it is a
+  thousand times over.
+
+### The disks
+
+`scripts/stress-play.sh`, 90 seconds each, the album evicted from the page cache and the
+load running on the same disk as in slice 1 (2 GB load file on the built-in and USB 3
+disks, 1 GB on the flash drive), with the close's binary.
+
+| disk | busy | straight: first sound | skipping every 9 s: first sound | skips heard after the command | underruns |
+|---|---|---|---|---|---|
+| WD_BLACK SN850X, built-in NVMe, ext4 | 75% (2.5 GB/s read, 1.7 to 2.4 GB/s written) | 0.37 s | 0.37 s | 9 of 9, 0.05 s | 0, 0 |
+| Seagate Backup Plus Ultra Touch, USB 3, exFAT | 96% (86 to 89 MB/s read) | 0.68 s | 1.12 s | 9 of 9, 0.04 to 0.05 s | 0, 0 |
+| SanDisk Cruzer, USB 2 flash, FAT32 | 99% (6 MB/s read) | 0.58 s (milestone 2) | 0.79 s | 9 of 9, 0.04 to 0.05 s | 0 |
+
+Slice 1 on the flash drive: the first sound 24 s late, and at 9-second skips nothing heard.
+
+### Control to ear
+
+Counted from the change reaching `hifi` to the join's first frame leaving the callback,
+through PipeWire. Platform latency is reported beside it, not in it: the tick before (a
+command is acted on in the tick after it is emitted; the loop ticks at the clock's rate
+while playing, so up to about 17 ms) and the device after (PipeWire's delay, 14 ms here,
+as slice 1 measured).
+
+| control | heard after reaching the path | target |
+|---|---|---|
+| volume (20 changes) | 2.2 to 12.9 ms, 8.6 on average | 20 ms |
+| equalizer preset (seven) | 2.7 to 11.5 ms | 20 ms |
+| seek, by distance: +2 s, +10 s, +60 s, -30 s, to 200 s, to 3 s, +4 s | 7.6, 11.1, 13.6, 15.9, 8.5, 11.6, 11.2 ms | 100 ms, warm |
+| next; jump to a row | 15.3 ms; 7.2 ms | 100 ms, warm |
+| previous, to a row whose file had been let go | 60.5 to 63.1 ms (read again) | 100 ms |
+| removing the next row, in the lead | 6 to 8 ms (a recut) | |
+
+What is in those numbers is the render thread's nap when the lead is full (5 ms at most,
+for want of a timed wait, KR10) and the wait for the callback (a period, 10.7 to 11.6 ms
+here). A jump also waits out the 10 ms fade of the old audio and 50 ms of new lead, which
+on a warm file is decoded in well under a millisecond.
+
+### The other numbers
+
+- **Seek time by distance, in the decoder**: 215 us on average and 4 ms at worst over 160
+  random seeks in the real album (milestone 1); through the path, above. Distance does not
+  show: these files have seek tables, and the file is in memory once read.
+- **Memory held**: two tracks of the album read whole, 59.5 MB of the 256 MB cap; the
+  source ring and two rings, 5 s each at 44.1 kHz stereo, about 6 MB more.
+- **The cost of a recut**: the whole five-second lead rendered again through the gain and
+  the equalizer in 14 ms on the render thread, the join asked for after its first two
+  chunks.
+
+### The exit criteria
+
+| criterion | result |
+|---|---|
+| A recut that changes nothing changes nothing | Met: thirteen recuts, flat, the file's MD5; a dozen at -6 dB, a straight render bit for bit. With the equalizer, within a bit (23 samples in 48 000): a filter never forgets |
+| A seek lands on the frame | Met: exact from the target after the 10 ms fade in, `Seeked`, the position from the target (`hifi` and the player) |
+| A change of volume is the two renders and the fade between them | Met: to the sample, against two straight renders |
+| No join clicks | Met, with the bound corrected: no step larger than the two renders' own and the fade's slope (the criterion as worded cannot hold at a change of level) |
+| A control is heard within the target | Met: under 13 ms for volume and the equalizer, every change (always ready, so the first as fast as the rest); seeks and skips 7 to 16 ms warm, 63 ms when the file must be read again. The tick and the device reported beside |
+| A cold file is late, not silent | Met: always ready, a volume or EQ change never reads the file; a jump to a file whose pieces are slow fades the old out at once, says *starting*, and starts on its first pieces (`hifi jump`) |
+| A track starts from a piece of the file | Met: on the USB 2 flash drive under load, skips heard 0.04 to 0.07 s after the command, all ten tracks played at 9-second skips, no underrun |
+| A control that is dragged does not pile up | Met: 200 changes, about twenty recuts, the last value, no underrun; one recut in flight by construction |
+| With every stage flat, the path is slice 1's | Met: the file's MD5, `exact`; not exact with a stage not flat or a join under way |
+| The equalizer does what its numbers say | Met: within 0.03 dB of the design; no preset raises a full-scale sine past full scale |
+| A file larger than the memory cap plays, seeks and ends | Met, under a cap of at least about a dozen pieces (above) |
+| Queue edits behave | Met: remove, move, insert, clear, previous, jump to a row; an edit in the lead heard as the edit |
+| Slice 1's tests pass and its ninety-second runs show no underrun | Met: every test, and the three disks straight and skipping |
+| Numbers in the notes | Above |
+
+**Not done, and owed:**
+
+- BR22, the device opened at its widest word, and BR23, delay and padding trimmed (both
+  P1). FLAC has neither delay nor padding, and every test file is one depth.
+- The hour-long run, owed since slice 1, is better run now that the path is this one.
+- KR10, the timed wait: the render thread's 2 ms and 5 ms naps are the largest thing left
+  in a control's latency that is Blackwing's own.

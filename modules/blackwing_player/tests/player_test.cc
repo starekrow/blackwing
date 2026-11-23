@@ -19,6 +19,7 @@
 #include "korvid/hifi_codec/flac.h"
 #include <initializer_list>
 #include <unistd.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -672,6 +673,49 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, r.o().bytes_held == 0 && r.item(1).bytes_read == 0); // both done: nothing held
         KV_INFO("test", "player in pieces: at most %llu bytes held, under a cap of %llu", (unsigned long long)most, (unsigned long long)cap);
         r.stop();
+    }
+
+    // And seeks in a file larger than the cap: back to near its start (pieces given back,
+    // read again), forward near its end, and on to its end, never past the cap, the audio
+    // from each target the file's own.
+    c.begin("player seek under the cap");
+    {
+        const char* L = "tone_16_2ch_8000_long.flac"; // 74 KB, four seconds
+        Pcm16 pcm = decode16(data(L));
+        // 48 KB: twelve pieces, two thirds of the file. A seek needs what its search looks at
+        // and a frame's window held at once (dr_flac starts the search again after a wait):
+        // at ten pieces it never lands.
+        const usize cap = 48u << 10;
+        Rig r;
+        KV_CHECK(c, r.start(0, 4096, cap, 0.05));
+        r.add(data(L));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(300));
+        u32 still = 0;
+        u64 most = 0;
+        f64 until = time_now() + 5.0;
+        while (r.t().position < 20000 && time_now() < until) { r.pace(&still); if (r.o().bytes_held > most) most = r.o().bytes_held; }
+        u64 targets[2] = {1000, 28000};
+        bool exact = true;
+        for (u32 k = 0; k < 2; ++k) {
+            HifiDeviceFormat f; u64 before = 0;
+            r.seg_data(0, &f, &before);
+            r.say(PlayerSeek{0, targets[k]});
+            until = time_now() + 3.0;
+            while (count_of('K', 1) < k + 1 && time_now() < until) { r.pace(&still); if (r.o().bytes_held > most) most = r.o().bytes_held; }
+            for (u32 i = 0; i < 30; ++i) { r.pace(&still); if (r.o().bytes_held > most) most = r.o().bytes_held; }
+            u64 frames = 0;
+            const u8* d = r.seg_data(0, &f, &frames);
+            u64 at = d ? find_run16(d, before, frames, pcm, targets[k] + 80) : ~0ull; // after the 10 ms fade in
+            exact = exact && at != ~0ull;
+        }
+        until = time_now() + 5.0;
+        while (!heard('Q', 0) && time_now() < until) { r.pace(&still); if (r.o().bytes_held > most) most = r.o().bytes_held; }
+        KV_CHECK(c, count_of('K', 1) == 2 && heard('E', 1) && heard('Q', 0) && exact);
+        KV_CHECK(c, most <= cap && r.o().underruns == 0);
+        KV_INFO("test", "player seek under the cap: at most %llu bytes held of a 74 KB file under a %llu-byte cap", (unsigned long long)most, (unsigned long long)cap);
+        r.stop();
+        mem_free(pcm.s);
     }
 
     // A file cut short on the disk while it is being read: what was read plays, and the

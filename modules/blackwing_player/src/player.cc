@@ -69,9 +69,11 @@ struct Item {
     usize  reserved = 0;
     u8*    have    = nullptr; // the span's map
     Piece* piece   = nullptr;
+    u32*   touched = nullptr; // the tick each piece was last read or asked for: the least recent goes first
     u32    pieces  = 0;
     u64    bytes_there = 0;   // committed and read
     u64    head    = 0;       // bytes from the start decoder_for needs; 0 until the first piece has said
+    const DecoderDesc* decoder = nullptr; // what decoder_for said of the head, once: the head may be given back later
     u32    front   = 0;       // where read-ahead looks next; nothing before it from the floor is Absent
     u32    want_lo = kNone, want_hi = 0; // the pieces hifi last said a decoder waits for
     char   broken[96] = "";   // why a piece could not be read
@@ -104,6 +106,7 @@ struct Player {
     u32    shift = 18;        // a piece is 1 << shift bytes
     u64    committed = 0;     // bytes of pieces committed, across every item: there, being read, or being given back
     u64    returning = 0;     // of those, being given back: gone once hifi's fence has passed
+    u32    tick = 0;          // pump ticks, for when a piece was last used
     PieceRead reads[kMaxReads];
     u32    nreads = 0;
     Return*   returns = nullptr; // kMaxReturns
@@ -178,6 +181,8 @@ bool make_span(Player& p, Item& it) {
     if (!it.base) return false;
     it.have  = (u8*)mem_alloc(it.pieces);
     it.piece = (Piece*)mem_alloc(it.pieces * sizeof(Piece));
+    it.touched = (u32*)mem_alloc(it.pieces * sizeof(u32));
+    memset(it.touched, 0, it.pieces * sizeof(u32));
     memset(it.have, 0, it.pieces);
     for (u32 i = 0; i < it.pieces; ++i) it.piece[i] = Piece::Absent;
     it.front = 0;
@@ -257,8 +262,9 @@ void drop_span(Player& p, IoQueue* io, Item& it) {
     os_release(it.base, it.reserved);
     mem_free(it.have);
     mem_free(it.piece);
-    it.base = nullptr; it.have = nullptr; it.piece = nullptr;
-    it.reserved = 0; it.pieces = 0; it.bytes_there = 0; it.head = 0;
+    mem_free(it.touched);
+    it.base = nullptr; it.have = nullptr; it.piece = nullptr; it.touched = nullptr;
+    it.reserved = 0; it.pieces = 0; it.bytes_there = 0; it.head = 0; it.decoder = nullptr;
     it.want_lo = kNone;
     it.sized = false; // if it comes back (previous, a jump), it is looked at again
 }
@@ -285,7 +291,7 @@ HifiSource source_of(const Player& p, const Item& it) {
     HifiSource s;
     s.id = it.id;
     s.file = span_of(p, it);
-    s.decoder = decoder_for(Span<const u8>(it.base, (u32)it.head));
+    s.decoder = it.decoder;
     s.start = it.start;
     s.seek = it.seek;
     return s;
@@ -683,8 +689,10 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
                 u64 last = e.need.at + e.need.len - 1;
                 it->want_lo = (u32)(e.need.at >> p.shift);
                 it->want_hi = (u32)((last < it->size ? last : it->size - 1) >> p.shift);
-                for (u32 k = it->want_lo; k <= it->want_hi && k < it->pieces; ++k)
+                for (u32 k = it->want_lo; k <= it->want_hi && k < it->pieces; ++k) {
+                    it->touched[k] = p.tick;
                     if (it->piece[k] == Piece::Broken) { hifi_starve(p.hifi, it->id, it->broken); break; }
+                }
             } break;
             default: break;
             }
@@ -741,6 +749,7 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
             memcpy(it.base + ((usize)r.piece << p.shift), done.data, (usize)len);
             atomic_store(&it.have[r.piece], (u8)1, MO_RELEASE);
             it.piece[r.piece] = Piece::There;
+            it.touched[r.piece] = p.tick;
             it.bytes_there += len;
         } else if (done.status == IoStatus::Cancelled) {
             it.piece[r.piece] = Piece::Absent;
@@ -794,16 +803,22 @@ bool make_room(Player& p, KTable* queue, u64 need, bool urgent) {
         u32 floor = heard_floor(p, it, queue);
         for (u32 i = 0; i < floor && over(); ++i) give_back(p, it, i);
     }
-    if (over() && urgent) {
-        // Read ahead, the farthest first, but never what is wanted.
-        for (u32 k = p.count; k-- > p.cursor && over();) {
+    // A decoder waits: what has gone longest unused, read ahead or behind, but never what
+    // is wanted. Least recent first, so a seek's search keeps what it has just looked at.
+    while (over() && urgent) {
+        Item* best = nullptr;
+        u32 bi = 0, bt = ~0u;
+        for (u32 k = p.cursor; k < p.count; ++k) {
             Item& it = at(p, k);
             if (!it.lends || !it.base) continue;
-            for (u32 i = it.pieces; i-- > 0 && over();) {
+            for (u32 i = 0; i < it.pieces; ++i) {
+                if (it.piece[i] != Piece::There) continue;
                 if (it.want_lo != kNone && i >= it.want_lo && i <= it.want_hi) continue;
-                if (give_back(p, it, i) && i < it.front) it.front = i;
+                if (it.touched[i] < bt) { bt = it.touched[i]; best = &it; bi = i; }
             }
         }
+        if (!best || !give_back(p, *best, bi)) break;
+        if (bi < best->front) best->front = bi;
     }
     return p.committed + need <= cap;
 }
@@ -889,7 +904,8 @@ void advance(TickContext& ctx, Player& p, KTable* queue) {
             // The head: as much as decoder_for needs to say, which the first piece tells.
             if (!it.head) it.head = decoder_head_bytes(Span<const u8>(it.base, (u32)piece_len(p, it, 0)), it.size);
             if (sparse_has(span_of(p, it), 0, it.head)) {
-                if (it.head > 0xFFFFFFFFull || !decoder_for(Span<const u8>(it.base, (u32)it.head))) {
+                if (it.head <= 0xFFFFFFFFull) it.decoder = decoder_for(Span<const u8>(it.base, (u32)it.head));
+                if (!it.decoder) {
                     fail(ctx, p, queue, it, "not a kind of audio file this build plays");
                     continue;
                 }
@@ -944,6 +960,8 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     o.bytes_held = p.committed;
     o.joining = s.joining;
     o.recut_seconds = s.recut_seconds;
+    o.recut_render_seconds = s.recut_render_seconds;
+    o.jump_seconds = s.jump_seconds;
     o.recuts = s.recuts;
 }
 
@@ -951,6 +969,7 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
 void player_pump(TickContext& ctx) {
     Player& p = ctx.state_as<Player>();
     KTable* queue = ctx.write_ktable(g_queue_ktable);
+    ++p.tick;
     commands(ctx, p, queue);
     from_io(ctx, p, queue);
     from_hifi(ctx, p, queue);
@@ -1163,7 +1182,8 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
                           o.rate ? (f64)o.lead_frames / o.rate : 0.0, o.underruns);
     else        ctx.print("device: none open");
     ctx.print("files: %.1f MB held of %.1f", (f64)o.bytes_held / (1 << 20), (f64)g_config.memory_bytes / (1 << 20));
-    if (o.recuts) ctx.print("recuts: %u; the last %.1f ms from the change reaching the path to the join", o.recuts, o.recut_seconds * 1e3);
+    if (o.recuts) ctx.print("recuts: %u; the last %.1f ms from the change reaching the path to the join, the lead rendered again in %.1f ms", o.recuts, o.recut_seconds * 1e3, o.recut_render_seconds * 1e3);
+    if (o.jump_seconds > 0.0) ctx.print("jumps: the last %.1f ms from reaching the path to its first frame out", o.jump_seconds * 1e3);
     for (u32 i = 0; i < kStages; ++i) {
         char line[256];
         usize len = (usize)format(line, sizeof line, "chain %u %s:", i, k_chain[i]->name);
@@ -1213,11 +1233,44 @@ constinit const KTableDesc k_ktables[] = {
     {.name = ".queue", .components = "PlayerItem", .capacity = kMaxItems, .id = &g_queue_ktable, .cosmetic = true},
     {.name = ".chain", .components = "PlayerStage", .capacity = kHifiMaxStages, .id = &g_chain_ktable, .cosmetic = true},
 };
+// Each event describes its fields, so --trace-events (and describe) print them.
+constinit const FieldDesc k_f_PlayerEnqueue[] = {KV_FIELDS(PlayerEnqueue, path, before)};
+constinit const FieldDesc k_f_PlayerPlay[] = {KV_FIELDS(PlayerPlay, unused)};
+constinit const FieldDesc k_f_PlayerPause[] = {KV_FIELDS(PlayerPause, unused)};
+constinit const FieldDesc k_f_PlayerStop[] = {KV_FIELDS(PlayerStop, unused)};
+constinit const FieldDesc k_f_PlayerNext[] = {KV_FIELDS(PlayerNext, unused)};
+constinit const FieldDesc k_f_PlayerPrevious[] = {KV_FIELDS(PlayerPrevious, unused)};
+constinit const FieldDesc k_f_PlayerJump[] = {KV_FIELDS(PlayerJump, item)};
+constinit const FieldDesc k_f_PlayerSeek[] = {KV_FIELDS(PlayerSeek, item, frame)};
+constinit const FieldDesc k_f_PlayerSeekBy[] = {KV_FIELDS(PlayerSeekBy, seconds)};
+constinit const FieldDesc k_f_PlayerSeeked[] = {KV_FIELDS(PlayerSeeked, item, frame, seq)};
+constinit const FieldDesc k_f_PlayerSetParam[] = {KV_FIELDS(PlayerSetParam, stage, param, value)};
+constinit const FieldDesc k_f_PlayerParamChanged[] = {KV_FIELDS(PlayerParamChanged, stage, param, value, seq)};
+constinit const FieldDesc k_f_PlayerQueueEdit[] = {KV_FIELDS(PlayerQueueEdit, op, item, before)};
+constinit const FieldDesc k_f_PlayerTrackStarted[] = {KV_FIELDS(PlayerTrackStarted, item, rate, channels, bits, frames, seq)};
+constinit const FieldDesc k_f_PlayerTrackEnded[] = {KV_FIELDS(PlayerTrackEnded, item, frames, seq, damaged, reason)};
+constinit const FieldDesc k_f_PlayerTrackFailed[] = {KV_FIELDS(PlayerTrackFailed, item, seq, reason)};
+constinit const FieldDesc k_f_PlayerQueueEnded[] = {KV_FIELDS(PlayerQueueEnded, seq)};
+constinit const FieldDesc k_f_HifiUnderrun[] = {KV_FIELDS(HifiUnderrun, count, seq)};
 constinit const EventTypeDesc k_events[] = {
-    KV_EVENT(PlayerEnqueue), KV_EVENT(PlayerPlay), KV_EVENT(PlayerPause), KV_EVENT(PlayerStop), KV_EVENT(PlayerNext),
-    KV_EVENT(PlayerPrevious), KV_EVENT(PlayerJump), KV_EVENT(PlayerSeek), KV_EVENT(PlayerSeekBy), KV_EVENT(PlayerSeeked),
-    KV_EVENT(PlayerSetParam), KV_EVENT(PlayerParamChanged), KV_EVENT(PlayerQueueEdit),
-    KV_EVENT(PlayerTrackStarted), KV_EVENT(PlayerTrackEnded), KV_EVENT(PlayerTrackFailed), KV_EVENT(PlayerQueueEnded), KV_EVENT(HifiUnderrun),
+    KV_EVENT_EX(PlayerEnqueue, k_f_PlayerEnqueue, 0),
+    KV_EVENT_EX(PlayerPlay, k_f_PlayerPlay, 0),
+    KV_EVENT_EX(PlayerPause, k_f_PlayerPause, 0),
+    KV_EVENT_EX(PlayerStop, k_f_PlayerStop, 0),
+    KV_EVENT_EX(PlayerNext, k_f_PlayerNext, 0),
+    KV_EVENT_EX(PlayerPrevious, k_f_PlayerPrevious, 0),
+    KV_EVENT_EX(PlayerJump, k_f_PlayerJump, 0),
+    KV_EVENT_EX(PlayerSeek, k_f_PlayerSeek, 0),
+    KV_EVENT_EX(PlayerSeekBy, k_f_PlayerSeekBy, 0),
+    KV_EVENT_EX(PlayerSeeked, k_f_PlayerSeeked, 0),
+    KV_EVENT_EX(PlayerSetParam, k_f_PlayerSetParam, 0),
+    KV_EVENT_EX(PlayerParamChanged, k_f_PlayerParamChanged, 0),
+    KV_EVENT_EX(PlayerQueueEdit, k_f_PlayerQueueEdit, 0),
+    KV_EVENT_EX(PlayerTrackStarted, k_f_PlayerTrackStarted, 0),
+    KV_EVENT_EX(PlayerTrackEnded, k_f_PlayerTrackEnded, 0),
+    KV_EVENT_EX(PlayerTrackFailed, k_f_PlayerTrackFailed, 0),
+    KV_EVENT_EX(PlayerQueueEnded, k_f_PlayerQueueEnded, 0),
+    KV_EVENT_EX(HifiUnderrun, k_f_HifiUnderrun, 0),
 };
 constinit const ResourceDesc k_resources[] = {{".transport"}, {".output"}};
 constinit const SystemDesc k_systems[] = {

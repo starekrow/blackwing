@@ -184,6 +184,9 @@ struct Hifi {
     u64  req_sent_ns  = 0;             // atomic: when the newest change in the request was sent
     u64  join_ns      = 0;             // atomic: when the callback began the last aligned join
     u64  joined_sent_ns = 0;           // atomic: req_sent_ns of that join
+    u64  jump_ns      = 0;             // atomic: when the callback joined the last jump (its first frame), and
+    u64  jump_sent_ns = 0;             // atomic: when that jump was asked for
+    u64  recut_render_ns = 0;          // atomic: the last recut's rendering of the lead, all of it
 
     // ---- callback -> anyone ----
     u64 read         = 0;              // atomic: stream frames taken
@@ -201,6 +204,7 @@ struct Hifi {
     bool fresh    = true;              // the next start is a clean one: full gain from its first frame
     bool by_join  = false;             // the next start is a joined jump's: at once, fading in
     bool fading   = false;             // the ramp under way is a jump's fade
+    bool jump_timing = false;          // a jump was joined: its first frame out is timed
     bool xf       = false;             // crossfading from slot xf_from to the other
     u32  xf_from  = 0, xf_pos = 0, xf_id = 0;
     f32  gain     = 1.0f;
@@ -286,6 +290,7 @@ bool try_join(Hifi& h, u32 epoch, u64 stream) {
     atomic_store(&h.jump_base, stream, MO_RELAXED);
     atomic_store(&h.jump_joined, epoch, MO_RELEASE);
     atomic_store(&h.joined, epoch, MO_RELEASE);
+    if (fade) { atomic_store(&h.jump_sent_ns, atomic_load(&h.req_sent_ns, MO_RELAXED), MO_RELAXED); h.jump_timing = true; }
     h.by_join = fade != 0;
     h.fresh   = fade == 0;
     return true;
@@ -404,6 +409,7 @@ void hifi_callback(void* user, void* out_v, u32 frames) {
             u64 ready = w - r;
             u64 need  = h.by_join ? h.join_frames : h.start_frames;
             if (pause || pend || ready == 0 || (ready < need && w != endf)) break;
+            if (h.jump_timing) { atomic_store(&h.jump_ns, time_ns(), MO_RELAXED); h.jump_timing = false; } // the jump's first frame goes out now
             h.running = true;
             h.fading  = h.by_join;
             h.gain    = h.fresh ? 1.0f : 0.0f;
@@ -846,7 +852,7 @@ void fail_cur(Hifi& h, const char* why) {
 // slot the callback is not reading. With a device open, the callback is asked to join
 // it; a request still waiting from an earlier jump is taken back first, and its slot
 // used again. With none open, there is nothing to join: the new render is the heard one.
-void start_render(Hifi& h, u32 epoch, bool fade) {
+void start_render(Hifi& h, u32 epoch, bool fade, u64 sent_ns) {
     release_cur(h);
     release_nxt(h);
     HifiSource s;
@@ -886,7 +892,7 @@ void start_render(Hifi& h, u32 epoch, bool fade) {
         atomic_store(&h.join_slot, b, MO_RELAXED);
         atomic_store(&h.join_fade, fade ? 1u : 0u, MO_RELAXED);
         atomic_store(&h.join_kind, 0u, MO_RELAXED);
-        atomic_store(&h.req_sent_ns, h.desired_sent_ns, MO_RELAXED);
+        atomic_store(&h.req_sent_ns, sent_ns, MO_RELAXED);
         h.wslot = b;
         h.pending_epoch = epoch;
         h.req_id = epoch;
@@ -903,6 +909,7 @@ void start_render(Hifi& h, u32 epoch, bool fade) {
 // flight at a time; a change that comes meanwhile waits for it, and then the newest
 // parameters are the next one's.
 void start_recut(Hifi& h) {
+    const u64 t0 = time_ns();
     const u32 a = h.wslot, b = a ^ 1u;
     Slot& sa = h.slot[a];
     Slot& sb = h.slot[b];
@@ -945,6 +952,7 @@ void start_recut(Hifi& h) {
         if (done == total) atomic_store(&sb.end, eb, MO_RELEASE);
         atomic_store(&sb.write, done, MO_RELEASE);
     }
+    atomic_store(&h.recut_render_ns, time_ns() - t0, MO_RELAXED);
 }
 
 bool wants_recut(const Hifi& h) {
@@ -1060,7 +1068,7 @@ bool take_commands(Hifi& h) {
                 ++h.nstarved;
             }
         } else { // Flush or Jump: everything this render has goes, and a new one starts
-            start_render(h, c.epoch, c.kind == CmdKind::Jump);
+            start_render(h, c.epoch, c.kind == CmdKind::Jump, c.sent_ns);
         }
     }
 }
@@ -1319,7 +1327,7 @@ void begin_render(Hifi* h, CmdKind kind, const HifiSource* sources, u32 n) {
     h->pending.count = 0;
     h->cur_source = 0;
     os_mutex_lock(&h->lock);
-    Cmd c; c.kind = kind; c.epoch = h->epoch;
+    Cmd c; c.kind = kind; c.epoch = h->epoch; c.sent_ns = time_ns();
     bool ok = h->cmds.push(c);
     for (u32 i = 0; i < n && ok; ++i) { Cmd a; a.kind = CmdKind::Add; a.source = sources[i]; ok = h->cmds.push(a); }
     if (!ok) KV_ERROR("hifi", "the command list is full: a command is lost");
@@ -1463,6 +1471,9 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     s.recuts = atomic_load(&h->recuts, MO_RELAXED);
     u64 jn = atomic_load(&h->join_ns, MO_RELAXED), sn = atomic_load(&h->joined_sent_ns, MO_RELAXED);
     s.recut_seconds = jn > sn && sn ? (f64)(jn - sn) * 1e-9 : 0.0;
+    u64 jj = atomic_load(&h->jump_ns, MO_RELAXED), js = atomic_load(&h->jump_sent_ns, MO_RELAXED);
+    s.jump_seconds = jj > js && js ? (f64)(jj - js) * 1e-9 : 0.0;
+    s.recut_render_seconds = (f64)atomic_load(&h->recut_render_ns, MO_RELAXED) * 1e-9;
     s.exact = s.exact && s.flat && !s.joining;
     s.heard    = h->heard;
     s.source   = h->cur_source;

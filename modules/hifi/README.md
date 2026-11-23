@@ -197,7 +197,7 @@ Header `korvid/hifi/hifi.h`:
 | `HifiSource` | record | `id`, `decoder`, `file` (a `SparseSpan`), `start`, `seek` |
 | `HifiEventKind` | enum | `Started`, `Seeked`, `Ended`, `Failed`, `Released`, `Underrun`, `Want`, `ParamsHeard` |
 | `HifiEvent` | record | `kind`, `source`, `info`, `status`, `frames`, `need`, `reason` |
-| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `flat`, `params_heard`, `recuts`, `recut_seconds`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
+| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `flat`, `params_heard`, `recuts`, `recut_seconds`, `recut_render_seconds`, `jump_seconds`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
 | `hifi_create(config)`, `hifi_destroy(h)` | functions | the path and its render thread |
 | `hifi_add_source(h, source)` | function | queue a source |
 | `hifi_pause(h)`, `hifi_play(h)`, `hifi_flush(h)` | functions | hold, let go, drop everything |

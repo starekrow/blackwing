@@ -92,6 +92,8 @@ struct HifiStatus {
     u32              params_heard = 0;    // the generation of the parameters heard
     u32              recuts      = 0;     // aligned joins done, ever
     f64              recut_seconds = 0.0; // the last one: from its newest change reaching hifi to the join's first frame in the callback
+    f64              recut_render_seconds = 0.0; // the last one's rendering of the whole lead, on the render thread (the join is asked for after its first chunk)
+    f64              jump_seconds = 0.0;  // the last jump: from hifi_jump to its first frame leaving the callback
     u64              written     = 0; // stream frames the render thread has put in the lead being heard, ever (a jump's count once it is joined)
     u64              taken       = 0; // stream frames the device has taken (or skipped past, after a flush)
     u64              heard       = 0; // stream frames the listener has heard

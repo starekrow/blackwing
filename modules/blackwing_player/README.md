@@ -106,7 +106,7 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerItem` | component | `id`, `pos`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
 | `PlayerItemState`, `PlayerState` | enum | an item's state; the transport's |
 | `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `place_pos`, `seek_item`, `seek_frame` |
-| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts` |
+| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts`, `recut_render_seconds`, `jump_seconds` |
 | `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
 | `player_item_state_name(s)`, `player_state_name(s)` | functions | "waiting", "playing"...; "stopped", "paused"... |
@@ -127,6 +127,8 @@ What the module registers with the engine, as module `player`:
 ## Behaviour worth knowing
 
 - **A command acts in the tick after it was emitted**, when the pump reads it.
+- **Every event describes its fields**, so `--trace-events` prints them
+  (`PlayerTrackStarted{item=1, rate=44100, ...}`).
 - **Events of different types have no order within a tick.** An Ended and a Started
   emitted together reach their handlers in the handlers' order. Each notification
   carries `seq`, which counts up across all of them. For "what is playing now", read

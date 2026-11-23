@@ -512,3 +512,22 @@ follows the place's row, free before that row's end is rendered and a recut of t
 after. Found on the way: a milestone 4 bug where a recut joined after a jump left the
 jump's later marks unplaced, blocking every mark behind them; fixed, with a test.
 
+**Milestone 7, close** (Nov 23, 2026; BR19 to BR21, BR25 to BR27). Every exit criterion is
+met, with two qualified: the step at a join is bounded by the two renders' steps *and the
+fade's slope*, since the criterion as worded cannot hold at a change of level; and a file
+larger than the cap seeks only under a cap of about a dozen pieces or more (dr_flac starts
+its search again after each wait). Through PipeWire, volume and EQ changes are heard 2 to
+13 ms after reaching the path, seeks and skips 7 to 16 ms, 63 ms when the file must be
+read again. Slice 1's disk runs, straight and skipping, show no underrun on any of the
+three disks, and a skip is heard within 0.05 s on all of them. Found at the close: a seek
+under memory pressure failed its track (fixed), and forward seeks under a tiny cap
+thrashed (pieces now go least recently used first). The numbers and the criteria are in
+the notes.
+
+## Owed, as of the close
+
+- BR22 (the device at its widest word) and BR23 (delay and padding trimmed), both P1.
+- The hour-long run, owed since slice 1, now on this path.
+- KR10, the timed wait: the render thread's naps are most of what is left of a control's
+  latency that is Blackwing's own.
+

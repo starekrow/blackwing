@@ -169,7 +169,9 @@ struct PlayerOutput {
     u64  bytes_held = 0;
     f64  recut_seconds = 0.0; // the last recut: from the change reaching hifi to the join's first frame leaving the callback
     u32  recuts    = 0;   // ever
-    u32  pad4      = 0;  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
+    u32  pad4      = 0;
+    f64  recut_render_seconds = 0.0; // the last recut's rendering of the whole lead
+    f64  jump_seconds = 0.0;         // the last seek or skip: from reaching hifi to its first frame leaving the callback  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
 };
 
 // ---- setting up ----------------------------------------------------------------------------
