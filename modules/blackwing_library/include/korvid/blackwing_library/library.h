@@ -27,6 +27,21 @@ struct LibraryAddRoot    { char path[512]; };
 // stay where they are.
 struct LibraryRemoveRoot { u32 root; };
 
+// Names what someone is looking at, so it is scanned next: a directory of it not yet listed
+// is listed before the rest of the walk, and its tracks' tags are read before the rest's,
+// at the I/O queue's normal priority instead of the scan's. There is one slot: a newer
+// call takes the place of the last. When the slot's work is done the scan goes back to
+// where it was. One of: `path`, a file or a directory by the OS's path (what the player
+// plays); `dir`, a directory's id (a Folders row's); `query`, an open window's tracks; or
+// up to 32 `tracks` by id.
+struct LibraryPrioritize {
+    char path[512] = "";
+    u64  dir = 0;
+    u32  query = 0;
+    u32  count = 0;
+    u64  tracks[32] = {};
+};
+
 // What a window looks at.
 enum class LibraryView : u8 {
     Folders, // a directory's directories, then its tracks; `parent` is the directory (0: the roots)
@@ -57,7 +72,8 @@ struct LibraryResult { u32 id; u32 total; u32 first; u32 count; u64 generation; 
 // Something a query might show has changed: the index's generation is now this. At most a
 // few times a second while a scan runs.
 struct LibraryChanged { u64 generation; };
-// A root's walk is over: every file under it is a row.
+// A root's scan is over: every file under it is a row (its walk took `seconds`), and every
+// one's tags have been read.
 struct LibraryScanFinished { u32 root; u32 tracks; f64 seconds; };
 
 // ---- state: what anyone may read ---------------------------------------------------------------
@@ -80,6 +96,7 @@ struct LibraryRoot {
     u32  dirs;         // directories listed
     u32  tracks;       // tracks in the index under it
     u32  failed;       // directories that could not be listed
+    u32  unread;       // tracks whose tags are still to be read
     char path[512];
     char reason[96];   // why it is offline
 };
@@ -121,7 +138,12 @@ struct LibraryScan {
     u64  tracks      = 0;  // in the index, across every root
     u64  dirs_listed = 0;  // directories listed since start-up
     u64  files_found = 0;  // audio files found by the walk since start-up
+    u64  tags_read   = 0;  // tracks whose tags have been read since start-up
+    u64  unread      = 0;  // tracks whose tags are still to be read, across every root
     f64  names_per_second = 0.0; // files the walk found, a second, over the last second
+    f64  tags_per_second  = 0.0; // tracks read, a second, over the last second
+    u8   slot        = 0;  // something is in the priority slot
+    u8   pad2[7]     = {};
     char dir[256]    = ""; // the directory being listed (within its root), cut to fit
 };
 

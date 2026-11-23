@@ -47,6 +47,7 @@ namespace {
 constinit u32 g_interrupted = 0; // atomic: set by SIGINT
 constinit bool g_keep = false;    // the library is kept: the end of the queue is not the end of the run
 constexpr u32 kFindWindow = 0xB1AC0001; // the window `library find` fills
+constinit bool g_find_said = true;       // the last find's answer has been printed: refills of its window are not
 
 void on_sigint(int) { atomic_store(&g_interrupted, 1u, MO_RELAXED); }
 
@@ -95,10 +96,20 @@ void on_scan_finished(TickContext&, Span<const LibraryScanFinished> events) {
     for (const LibraryScanFinished& e : events) printf("walked root %u: %u tracks in %.1f s\n", e.root, e.tracks, e.seconds);
     fflush(stdout);
 }
+// Playing a file prioritizes it: its tags are read next, if they have not been. The player
+// and the library do not know each other; this is where one hears the other.
+void on_enqueue(TickContext& ctx, Span<const PlayerEnqueue> events) {
+    for (const PlayerEnqueue& e : events) {
+        LibraryPrioritize p;
+        memcpy(p.path, e.path, sizeof p.path);
+        ctx.emit(p);
+    }
+}
 // `library find`'s answer, when it comes: a numbered list `library play` takes a number from.
 void on_result(TickContext& ctx, Span<const LibraryResult> events) {
     for (const LibraryResult& e : events) {
-        if (e.id != kFindWindow) continue;
+        if (e.id != kFindWindow || g_find_said) continue;
+        g_find_said = true;
         const KTable* t = ctx.read_ktable("library.rows");
         printf("%u found%s\n", e.total, e.total > e.count ? " (the first shown)" : "");
         if (!t) continue;
@@ -120,6 +131,7 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".underrun",    KV_ON(HifiUnderrun, on_underrun),        .phase = Phase::PostSim},
     {.name = ".queue_ended", KV_ON(PlayerQueueEnded, on_queue_ended), .phase = Phase::PostSim},
     {.name = ".scanned",     KV_ON(LibraryScanFinished, on_scan_finished), .phase = Phase::PostSim},
+    {.name = ".enqueued",    KV_ON(PlayerEnqueue, on_enqueue),        .phase = Phase::PreSim, .emits = "LibraryPrioritize"},
     {.name = ".found",       KV_ON(LibraryResult, on_result),         .phase = Phase::PostSim, .reads = "library.rows"},
 };
 
@@ -132,6 +144,7 @@ void cmd_find(CliContext& ctx, Span<const char* const> args) {
     usize n = 0;
     for (const char* a : args) n += (usize)format(q.text + n, sizeof q.text - n, "%s%s", n ? " " : "", a);
     ctx.engine->events.emit(q);
+    g_find_said = false;
 }
 
 // Plays the n-th track `library find` listed: the player is told its path, and to play it now.

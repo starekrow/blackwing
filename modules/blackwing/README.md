@@ -40,7 +40,9 @@ handlers on the player's notifications: five print a line ("at 71.5 s of 1" for 
 seek), and `PlayerQueueEnded` asks the engine to quit (not in `library` mode). Two more
 print the library's walks as they finish and `library find`'s answer; `library play`
 reads the find's row from `library.rows` and emits `PlayerEnqueue` and `PlayerPlay`. The
-player and the library do not know each other: this is the glue.
+player and the library do not know each other: this is the glue. So is one more handler:
+`PlayerEnqueue`, heard as the player hears it, becomes `LibraryPrioritize` for its path, so
+playing a file has its tags read next.
 
 The loop is this executable's own, not `tool_main`'s. It runs the engine's ticks at the
 clock's rate while something is playing or about to, or the library is walking, and four

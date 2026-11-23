@@ -5,7 +5,6 @@
 #pragma once
 #include "korvid/core/format.h"
 #include "korvid/core/memory.h"
-#include "korvid/core/random.h"
 #include "korvid/platform/io.h"
 #include <string.h>
 
@@ -82,36 +81,45 @@ constexpr u32 kNWords = sizeof kWords / sizeof kWords[0];
 
 struct Made { u64 files = 0, bytes = 0, dirs = 0; };
 
+inline u32 mix(u32 x) { x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; x ^= x >> 16; return x; }
+
+// Album a's artist, title, year and directory, as make_library makes them.
+struct Album { char artist[160]; char title[200]; u32 year; u32 layout; char dir[2048]; };
+inline void album(const char* root, u32 a, u64 seed, Album* out) {
+    u32 ar = a / 9; // nine albums to an artist
+    format(out->artist, sizeof out->artist, "%s %s %u", kWords[ar % kNWords], kWords[(ar / kNWords + 3) % kNWords], ar);
+    u32 w1 = mix(a * 2 + (u32)seed) % kNWords, w2 = mix(a * 2 + 1 + (u32)seed * 7919) % kNWords;
+    format(out->title, sizeof out->title, "%s %s", kWords[w1], kWords[w2]);
+    out->year = 1960 + a % 60;
+    out->layout = a % 4;
+    if (out->layout == 0)      format(out->dir, sizeof out->dir, "%s/%s/%s", root, out->artist, out->title);
+    else if (out->layout == 1) format(out->dir, sizeof out->dir, "%s/%s - %s", root, out->artist, out->title);
+    else if (out->layout == 2) format(out->dir, sizeof out->dir, "%s/%s/%s (%u)/CD1", root, out->artist, out->title, out->year);
+    else                       format(out->dir, sizeof out->dir, "%s/Compilations/%s %u", root, out->title, a);
+}
+
 // Makes `n` files under `root` (which exists), `per_album` to an album, in a few layouts.
 // The i-th file's title has the word "Track" and its number, so one can be found by name:
 // "Zq<number>" is in exactly one title.
 inline Made make_library(const char* root, u32 n, u32 per_album = 12, u64 seed = 1) {
     Made m;
-    Rng rng = Rng::seeded(seed, 7);
     Bytes f;
-    char dir[2048], path[2600], artist[160], album[200], title[200];
+    char path[2600], title[200];
     u32 albums = (n + per_album - 1) / per_album;
     for (u32 a = 0; a < albums; ++a) {
-        u32 ar = a / 9; // nine albums to an artist
-        format(artist, sizeof artist, "%s %s %u", kWords[ar % kNWords], kWords[(ar / kNWords + 3) % kNWords], ar);
-        format(album, sizeof album, "%s %s", kWords[rng.next() % kNWords], kWords[rng.next() % kNWords]);
-        u32 year = 1960 + a % 60;
-        u32 layout = a % 4;
-        if (layout == 0)      format(dir, sizeof dir, "%s/%s/%s", root, artist, album);
-        else if (layout == 1) format(dir, sizeof dir, "%s/%s - %s", root, artist, album);
-        else if (layout == 2) format(dir, sizeof dir, "%s/%s/%s (%u)/CD1", root, artist, album, year);
-        else                  format(dir, sizeof dir, "%s/Compilations/%s %u", root, album, a);
-        io_make_dirs(dir);
+        Album al;
+        album(root, a, seed, &al);
+        io_make_dirs(al.dir);
         ++m.dirs;
         for (u32 t = 0; t < per_album && (u64)a * per_album + t < n; ++t) {
             u32 i = a * per_album + t;
             format(title, sizeof title, "%s Track Zq%u", kWords[(i * 7) % kNWords], i);
             char yr[8];
-            format(yr, sizeof yr, "%u", year);
-            Tags tg{title, artist, album, t + 1, per_album, 1, yr, "Electronic"};
+            format(yr, sizeof yr, "%u", al.year);
+            Tags tg{title, al.artist, al.title, t + 1, per_album, 1, yr, "Electronic"};
             flac_file(f, tg);
-            if (layout == 3) format(path, sizeof path, "%s/%02u - %s - %s.flac", dir, t + 1, artist, title);
-            else             format(path, sizeof path, "%s/%02u - %s.flac", dir, t + 1, title);
+            if (al.layout == 3) format(path, sizeof path, "%s/%02u - %s - %s.flac", al.dir, t + 1, al.artist, title);
+            else                format(path, sizeof path, "%s/%02u - %s.flac", al.dir, t + 1, title);
             io_write_now(path, f.b, f.n);
             ++m.files;
             m.bytes += f.n;

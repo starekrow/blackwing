@@ -10,7 +10,7 @@ struct sqlite3_stmt;
 
 namespace kv::lib {
 
-constexpr u32 kSchema = 1; // a file with another version is deleted and made again
+constexpr u32 kSchema = 2; // a file with another version is deleted and made again
 
 // What the walk found of one directory, and of one file in it, as the writer takes them.
 struct DirRec {
@@ -59,9 +59,32 @@ struct Index {
     // A directory's id by its path within its root; 0 when it has none.
     u64  find_dir(u32 root, const char* path);
     // The track's id: a new row, or the old one with its size and time brought up to date.
-    // *fresh says which; *changed whether its size or time differ from the last look.
-    u64  put_track(const TrackRec& t, u64 dir, bool* fresh, bool* changed);
+    // *fresh says which; *changed whether its size or time differ from the last look;
+    // *unread whether its tags want reading (new, changed, or never read at this size and time).
+    u64  put_track(const TrackRec& t, u64 dir, bool* fresh, bool* changed, bool* unread);
+    // What a read of a track's tags found: every source's values, the merge, the audio.
+    struct Tags {
+        u64 track = 0, size = 0; i64 mtime = 0;
+        u32 rate = 0; u16 channels = 0, bits = 0; u64 frames = 0; bool estimated = false;
+        const char* reason = "";
+        const char* title = ""; const char* artist = ""; const char* album = ""; const char* albumartist = "";
+        const char* date = ""; const char* genre = ""; u32 trackno = 0, discno = 0;
+        const char* shown = "";  // the path within its root as UTF-8, searched beside the merge
+        u32 nvals = 0;
+        const u8* fields = nullptr; const u8* sources = nullptr; const char* const* texts = nullptr;
+    };
+    bool put_tags(const Tags& t);
     u32  count_tracks(u32 root);
+    u32  count_unread(u32 root);
+    // For the slot: a directory's root and path; the tracks of a directory, or of a root
+    // and path, that want reading (id, path within the root, size, time), by callback.
+    bool dir_of(u64 dir, u32* root, char* path, u32 cap);
+    u8   dir_state(u64 dir); // 0 not listed yet, 1 listed, 2 could not be
+    u64  track_at(u32 root, const char* path);
+    void unread_in(u64 dir, void (*fn)(void*, u64 id, u32 root, const char* rel, u64 size, i64 mtime), void* user);
+    void unread_track(u64 id, void (*fn)(void*, u64 id, u32 root, const char* rel, u64 size, i64 mtime), void* user);
+    // Every track that wants reading, for the start-up pass over what an earlier run left.
+    void unread_all(void (*fn)(void*, u64 id, u32 root, const char* rel, u64 size, i64 mtime), void* user);
     u32  count_dirs(u32 root, u32* failed);
     u64  count_all();
 
@@ -78,7 +101,8 @@ private:
     sqlite3_stmt* st_root = nullptr, *st_unroot_t = nullptr, *st_unroot_d = nullptr, *st_unroot_s = nullptr, *st_unroot_r = nullptr;
     sqlite3_stmt* st_dir_find = nullptr, *st_dir_put = nullptr, *st_dir_state = nullptr;
     sqlite3_stmt* st_track_find = nullptr, *st_track_put = nullptr, *st_track_seen = nullptr, *st_search_put = nullptr;
-    sqlite3_stmt* st_count_t = nullptr, *st_count_d = nullptr, *st_count_all = nullptr;
+    sqlite3_stmt* st_count_t = nullptr, *st_count_d = nullptr, *st_count_all = nullptr, *st_count_unread = nullptr;
+    sqlite3_stmt* st_vals_del = nullptr, *st_vals_put = nullptr, *st_tags_put = nullptr, *st_search_del = nullptr;
 };
 
 // The FTS5 expression for words typed: each word a prefix, all of them wanted.

@@ -6,28 +6,33 @@ in an index as soon as its directory is listed, playable, with a title, artist a
 guessed from its path. Queries are windows kept open over the index, answered off the main
 thread. Its API is events and tables, as the player's is.
 
-**Status:** slice 3, milestone 3: roots, the names pass, the index, windows by folder, of
-every track and by search. The tags pass, the priority slot, overrides and watching are
-the milestones after it.
+**Status:** slice 3, milestone 4: roots, the names pass, the tags pass, the priority slot,
+the index, windows by folder, of every track and by search. More views and sorting,
+overrides and watching are the milestones after it.
 
 ## How it works
 
-**Four threads.**
+**Five threads.**
 
 ```
-main thread (library.pump, PreSim)   scan thread             writer thread           reader thread
-  commands in, tables and events out   walks, a directory      the index's one         a read-only connection:
-        |                              at a time               writing connection      windows, newest first
-        +-- roots to walk ------------>|                             |                       |
-        +-- roots added and removed ---------------------------------> |                       |
-        |                              +-- batches of rows ---------->| commits, 4 a second    |
-        |<----------------------------------------- counts, walks done, generation -----------+
-        +-- windows asked ------------------------------------------------------------------>|
-        |<------------------------------------------------------------- rows ---------------+
+main thread (library.pump)      scan thread        tagger thread          writer thread         reader thread
+  commands in; tables, events     walks, a dir       reads tags and         the index's one       read-only: windows,
+  out; the tagger's I/O           at a time          audio, sparse spans    writing connection    newest first
+     +-- roots, slot dirs ------->|                       |                      |                     |
+     +-- roots, the slot ------------------------------------------------------>|                     |
+     |                            +-- rows ---------------------------------->| commits, 4 a second |
+     |                            |                       |<-- tracks to read --+                     |
+     |<-- ranges to read -------------------------------- +                      |                     |
+     +-- bytes ------------------------------------------>|-- what was found -->|                     |
+     |<--------------------------------------------- counts, generation --------+                     |
+     +-- windows asked ------------------------------------------------------------------------------>|
+     |<-------------------------------------------------------------------------------- rows --------+
 ```
 
 They speak through inboxes under one mutex, each with its own condition variable; nobody
-holds the mutex while it works. The main thread never touches the index or the disk.
+holds the mutex while it works (the writer counts before it takes the lock to say so). The
+main thread never touches the index, and touches the disk only by putting the tagger's
+reads into the engine's I/O queue and taking them out.
 
 **Roots and paths.** A root is a directory, named by an id that lasts for its life,
 across runs. A file is named by its root and its path within it, never by an absolute
@@ -44,9 +49,36 @@ itself. Hidden entries are skipped, and links to directories are not followed, s
 cannot loop or leave its root. A directory that cannot be listed is marked, with the reason
 in words, and the walk goes on; a root that cannot be listed is offline.
 
+**The tags pass.** The writer knows which tracks want reading: a new row, one whose size
+or time differ from the last look, or one never read at its size and time (an earlier run
+stopped first). It hands them to the tagger in the order the walk found them, after the
+commit that made them rows. The tagger keeps up to 24 tracks under way. Each is a sparse
+span (the decoders' kind) of 64 KB pieces: its head and tail are asked for at once, then
+whatever range a reader needs. The main thread puts the reads into the I/O queue at
+`Low`, below the player's, at most 48 at once, within the queue's own budget, so a
+playing track's pieces go first and a read under way is not stopped. `blackwing_tags`
+reads every tag; the decoder that would play the file reads its rate, channels, depth and
+length from the same pieces (its probe is shown the bytes past any ID3v2 tag, so a tag of
+megabytes of art is not read for it). After eight waits beyond its first reads, a track
+is what could be read of it. What is found goes to the writer every tenth of a second:
+every source's values (the guess from the path among them) into `tagvals`, the merge into
+the track's own columns and the search table, the audio, and a reason when something
+could not be read. The walk's rows go in a commit of their own before the tags', so a file
+is findable by name as soon as it can be.
+
+**The priority slot.** `LibraryPrioritize` names what someone is looking at: a file or
+directory by its OS path, a directory by id, an open window, or tracks by id. There is
+one slot, and a newer call replaces it. The writer resolves it: the tracks that want
+reading go to the tagger as the slot's, ahead of the rest, with their reads at `Normal`; a
+directory the walk has not listed is listed by the scan thread now, ahead of the walk
+(which steps over it when it comes to it), and its tracks join the slot's as they become
+rows. When the slot's work is done, the tagger goes back to where it was. Playing a file
+prioritizes it: `blackwing` hears `PlayerEnqueue` and says so to the library.
+
 **The index** is sqlite (vendored, built as C), in WAL mode, at `<data>/index.sqlite`,
-with tables for the roots, the directories and the tracks, and an FTS5 table over the
-tracks' title, artist, album and path. Paths are kept as bytes (a name that is not UTF-8
+with tables for the roots, the directories, the tracks (with the merge of their tags and
+their audio), every source's values (`tagvals`), and an FTS5 table over the tracks' title,
+artist, album and path. Paths are kept as bytes (a name that is not UTF-8
 still opens the file); names are kept as UTF-8 with U+FFFD for what is not. The writer
 takes the batches as they come, waits up to a quarter of a second for more so a commit
 carries several, and each commit is a new generation. A file of another schema version,
@@ -96,14 +128,15 @@ Header `korvid/blackwing_library/library.h`:
 | `LibraryAddRoot { path }`, `LibraryRemoveRoot { root }` | events in | a directory in, a root out |
 | `LibraryQuery { id, view, parent, text, first, count }` | event in | opens or changes window `id` |
 | `LibraryClose { id }` | event in | its rows leave the table |
+| `LibraryPrioritize { path, dir, query, count, tracks }` | event in | the slot: scanned next |
 | `LibraryResult { id, total, first, count, generation }` | event out | the window's rows are in `library.rows` |
 | `LibraryChanged { generation }` | event out | the index has moved on |
-| `LibraryScanFinished { root, tracks, seconds }` | event out | a root's walk is over and in the index |
+| `LibraryScanFinished { root, tracks, seconds }` | event out | a root's scan is over: walked (in `seconds`) and every track read |
 | `LibraryView` | enum | `Folders`, `Tracks`, `Search` |
-| `LibraryRoot` | component | a row of `library.roots`: `id`, `state`, `dirs`, `tracks`, `failed`, `path`, `reason` |
+| `LibraryRoot` | component | a row of `library.roots`: `id`, `state`, `dirs`, `tracks`, `failed`, `unread`, `path`, `reason` |
 | `LibraryRootState` | enum | `Walking`, `Reading`, `Idle`, `Offline` |
 | `LibraryRow` | component | a row of `library.rows`: `query`, `index`, `id`, `kind`, names, numbers, `path`, `reason` |
-| `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `names_per_second`, `dir` |
+| `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `names_per_second`, `tags_per_second`, `slot`, `dir` |
 | `kLibraryMaxWindow`, `kLibraryMaxRows` | constants | 512 rows a window, 4096 in all |
 | `LibraryConfig`, `library_configure` | record, function | `data_dir`, before `engine_init` |
 | `library_scan(e)` | function | the resource, for code outside the schedule |
@@ -114,9 +147,15 @@ Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the reco
 
 - **What comes back arrives in a later tick.** A window is answered on the reader's thread;
   `LibraryResult` comes in the tick after the answer.
-- **The walk is fast and the index follows it.** On the built-in disk fifty thousand files
-  are listed in about 0.6 s; their rows are all committed within about 1.2 s. A track is
-  findable once its batch is committed.
+- **The walk is fast, and the index follows it.** On the built-in disk fifty thousand files
+  are listed in about 0.5 s and are rows within about 1.8 s; their tags are read at about
+  5,500 files a second with the cache warm, and in 16 s for all of them with it cold. A
+  track is findable once its batch is committed.
+- **A root is walking, then reading, then idle**, and `LibraryScanFinished` comes when it is
+  idle: walked and every track read. A track that could not be read is read, with its
+  reason.
+- **A file whose size and time are unchanged is not read again**, at the next start or the
+  next walk.
 - **Every root is walked at start-up**, since things change while the program is not
   running. A file whose size and time are unchanged keeps its row and its id.
 - **Links to directories are not followed**; links to files are listed, as their targets.
@@ -134,19 +173,26 @@ a link back to the root, and a directory that may not be read. The walk lists ev
 file (and not the rest), marks the locked directory, and does not follow the link; the
 roots, a root's directories and a directory's rows come back in order; a title is found by
 a word in it, by a word in Cyrillic, and by "cafe" for "Café"; a window of every track
-from row 10; a closed window's rows go. The next start finds the roots, walks them again
+from row 10; a closed window's rows go. Every track's tags are read: the title is the
+Vorbis comment's, the rate and length the decoder's; a one-byte `.MP3` is a row with "too
+short to be audio". The next start finds the roots, walks them again, reads no file again,
 and keeps every id; a second root, a root added twice, a root removed; the index replaced
-by text is made again from the roots; a root that is not there is offline. Clean under
-ASan, UBSan and TSan.
+by text is made again from the roots; a root that is not there is offline. Then the slot: eight thousand files, and the
+directory of an album the walk comes to near its end prioritized by its path as the scan
+starts; its track is seen read with more than 2,000 still to read (about 5,500, typically).
+Clean under ASan, UBSan and TSan.
 
 `kormake test blackwing_library --heavy [-- DIR]` makes fifty thousand files (once, under
 `build/library-heavy` unless a directory is given) and measures, from `LibraryAddRoot` on
-an empty index, when two chosen tracks are found by name and heard through the player; the
-walk; the index's size; and the second start.
+an empty index, when two chosen tracks are found by name and heard through the player; a
+folder of twenty prioritized as the tags pass starts, and how soon its tags are in; the
+walk and the tags pass; the index's size; the second start; and the disk run: the files
+out of the page cache and a long track played from the same disk through a whole scan,
+with no underrun.
 
 ## Not in this module
 
-Tags read from the files (milestone 4, with `blackwing_tags`). The player (`blackwing`
+The readers themselves (`blackwing_tags`). The player (`blackwing`
 glues them: `library play`). Any face.
 
 ## See also

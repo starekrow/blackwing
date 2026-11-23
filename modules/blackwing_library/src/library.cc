@@ -36,6 +36,7 @@ namespace kv {
 namespace lib {
 
 constexpr f64 kCommitSeconds = 0.25; // the writer commits at most this often while batches come
+constexpr u32 kMaxReads      = 48;   // the tagger's reads in the I/O queue at once
 constexpr f64 kRefillSeconds = 0.25; // open windows are asked again at most this often
 
 // ---- the writer ------------------------------------------------------------------------------
@@ -72,6 +73,78 @@ bool open_index(Shared& sh, Index& ix) {
     return false;
 }
 
+// Tracks that want reading, gathered by a commit for the tagger.
+struct Jobs {
+    TagJobs* b = nullptr;
+    void add(u64 id, u32 root, const char* rel, u64 size, i64 mtime) {
+        if (!b) { b = (TagJobs*)mem_alloc(sizeof(TagJobs)); new (b) TagJobs{}; }
+        b->jobs.push(TagJob{id, root, b->s.add(rel), size, mtime});
+    }
+    static void cb(void* user, u64 id, u32 root, const char* rel, u64 size, i64 mtime) { ((Jobs*)user)->add(id, root, rel, size, mtime); }
+};
+
+// The slot, as the writer keeps it: a directory, by id or (not yet listed) by its path.
+struct Slot {
+    u64  dir = 0;
+    u32  root = 0;
+    char rel[kPathMax] = "";
+    bool on = false;
+};
+
+// Which root an OS path is under, and its path within it.
+bool under_root(Shared& sh, const char* path, u32* root, char* rel, u32 cap) {
+    bool found = false;
+    os_mutex_lock(&sh.lock);
+    for (const Shared::RootLine& r : sh.root_lines) {
+        usize n = strlen(r.path);
+        if (strncmp(path, r.path, n) == 0 && (path[n] == 0 || path[n] == '/')) {
+            *root = r.id;
+            format(rel, cap, "%s", path[n] ? path + n + 1 : "");
+            found = true;
+            break;
+        }
+    }
+    os_mutex_unlock(&sh.lock);
+    return found;
+}
+
+// Fills the slot: the tracks that want reading, first; a directory not listed, listed next.
+void resolve_slot(Shared& sh, Index& ix, const SlotMsg& m, Slot& slot) {
+    Jobs jobs;
+    slot = Slot{};
+    u32 root = 0;
+    char rel[kPathMax] = "";
+    bool is_dir = false;
+    if (m.kind == SlotKind::Path && under_root(sh, m.path, &root, rel, sizeof rel)) {
+        if (u64 t = ix.track_at(root, rel)) ix.unread_track(t, Jobs::cb, &jobs);
+        else is_dir = true;
+    } else if (m.kind == SlotKind::Dir) {
+        is_dir = ix.dir_of(m.dir, &root, rel, sizeof rel);
+    } else if (m.kind == SlotKind::Tracks) {
+        for (u64 id : m.tracks) ix.unread_track(id, Jobs::cb, &jobs);
+    }
+    if (is_dir) {
+        slot.on = true;
+        slot.root = root;
+        format(slot.rel, sizeof slot.rel, "%s", rel);
+        slot.dir = ix.find_dir(root, rel);
+        if (slot.dir) ix.unread_in(slot.dir, Jobs::cb, &jobs);
+        if (!slot.dir || ix.dir_state(slot.dir) == 0) {
+            os_mutex_lock(&sh.lock);
+            sh.walk_next_root = root; // listed now, if the walk has not come to it
+            format(sh.walk_next, sizeof sh.walk_next, "%s", rel);
+            os_cond_signal(&sh.scan_wake);
+            os_mutex_unlock(&sh.lock);
+        }
+    }
+    if (!jobs.b) { jobs.b = (TagJobs*)mem_alloc(sizeof(TagJobs)); new (jobs.b) TagJobs{}; } // an empty slot empties it
+    os_mutex_lock(&sh.lock);
+    if (sh.slot_jobs) { sh.slot_jobs->free(); mem_free(sh.slot_jobs); }
+    sh.slot_jobs = jobs.b;
+    os_cond_signal(&sh.tag_wake);
+    os_mutex_unlock(&sh.lock);
+}
+
 void write_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     Index ix;
@@ -84,19 +157,40 @@ void write_thread(void* arg) {
     Array<WriteMsg*> work;
     Array<u32> touched;             // roots whose counts are to be said
     Array<Note> walked;             // walks whose last batch is in this commit
+    Slot slot;
+    Array<const char*> texts;
+    Array<u8> fields, sources;
+    Array<Note> notes;
+    f64 last_commit = 0.0;
     for (;;) {
         os_mutex_lock(&sh.lock);
         while (!sh.quit && sh.writes.len == 0) os_cond_wait(&sh.write_wake, &sh.lock);
         if (sh.quit) { os_mutex_unlock(&sh.lock); break; }
-        // A batch alone waits a little for others, so a commit carries a few of them.
-        if (sh.writes.len == 1 && sh.writes[0]->kind == WriteKind::Batch) os_cond_timed_wait(&sh.write_wake, &sh.lock, kCommitSeconds);
-        for (WriteMsg* m : sh.writes) work.push(m);
+        // Commits at most four times a second, each carrying what came meanwhile; a slot
+        // goes at once, since someone is looking.
+        for (;;) {
+            bool slot_waiting = false;
+            for (WriteMsg* m : sh.writes) slot_waiting |= m->kind == WriteKind::Slot;
+            f64 left = kCommitSeconds - (time_now() - last_commit);
+            if (slot_waiting || left <= 0.0 || sh.quit) break;
+            os_cond_timed_wait(&sh.write_wake, &sh.lock, left);
+        }
+        // The walk's rows first, in a commit of their own, so a file is findable by name as
+        // soon as it can be; the tags' after.
+        for (WriteMsg* m : sh.writes) if (m->kind != WriteKind::Tags) work.push(m);
+        u32 names_end = work.len;
+        for (WriteMsg* m : sh.writes) if (m->kind == WriteKind::Tags) work.push(m);
         sh.writes.clear();
         os_mutex_unlock(&sh.lock);
 
+        auto is_live = [&](u32 r) { for (u32 x : live) if (x == r) return true; return false; };
+        auto touch = [&](u32 r) { for (u32 x : touched) if (x == r) return; touched.push(r); };
+        Jobs jobs, slot_more;
         if (up) ix.begin();
         bool save = false;
-        for (WriteMsg* m : work) {
+        for (u32 k = 0; k < work.len; ++k) {
+            WriteMsg* m = work[k];
+            if (k == names_end && k > 0 && up) { ix.commit(); ix.begin(); atomic_add_fetch(&sh.generation, (u64)1, MO_RELEASE); }
             switch (m->kind) {
             case WriteKind::AddRoot:
                 live.push(m->root);
@@ -116,12 +210,12 @@ void write_thread(void* arg) {
             }
             case WriteKind::Batch: {
                 Batch& b = *m->batch;
-                auto is_live = [&](u32 r) { for (u32 x : live) if (x == r) return true; return false; };
                 if (up) {
                     for (const DirMsg& d : b.dirs) {
                         if (!is_live(d.root)) continue;
                         DirRec r{d.root, b.s.at(d.path), b.s.at(d.parent), b.s.at(d.name), d.state, b.s.at(d.reason)};
-                        ix.put_dir(r);
+                        u64 id = ix.put_dir(r);
+                        if (slot.on && !slot.dir && slot.root == d.root && strcmp(slot.rel, r.path) == 0) slot.dir = id;
                     }
                     u64 dir_id = 0;
                     u32 dir_root = 0;
@@ -135,26 +229,63 @@ void write_thread(void* arg) {
                         r.size = t.size; r.mtime = t.mtime;
                         r.title = b.s.at(t.title); r.artist = b.s.at(t.artist); r.album = b.s.at(t.album);
                         r.track = t.track; r.disc = t.disc;
-                        bool fresh, changed;
-                        ix.put_track(r, dir_id, &fresh, &changed);
+                        bool fresh, changed, unread;
+                        u64 id = ix.put_track(r, dir_id, &fresh, &changed, &unread);
+                        if (id && unread) {
+                            // A track in the slot's directory goes with the slot's; the rest in walk order.
+                            if (slot.on && slot.dir && slot.dir == dir_id) slot_more.add(id, t.root, r.path, t.size, t.mtime);
+                            else jobs.add(id, t.root, r.path, t.size, t.mtime);
+                        }
                     }
                 }
-                for (const DirMsg& d : b.dirs) { bool seen = false; for (u32 x : touched) seen |= x == d.root; if (!seen) touched.push(d.root); }
+                for (const DirMsg& d : b.dirs) touch(d.root);
                 b.free();
                 mem_free(m->batch);
                 break;
             }
+            case WriteKind::Tags: {
+                TagBatch& b = *m->tags;
+                for (const TagRec& r : b.recs) {
+                    if (!is_live(r.root)) continue;
+                    texts.clear(); fields.clear(); sources.clear();
+                    for (u32 i = 0; i < r.nvals; ++i) {
+                        const TagVal& v = b.vals[r.vals + i];
+                        texts.push(b.s.at(v.text)); fields.push(v.field); sources.push(v.source);
+                    }
+                    Index::Tags t;
+                    t.track = r.track; t.size = r.size; t.mtime = r.mtime;
+                    t.rate = r.rate; t.channels = r.channels; t.bits = r.bits; t.frames = r.frames; t.estimated = r.estimated != 0;
+                    t.reason = b.s.at(r.reason);
+                    t.title = b.s.at(r.title); t.artist = b.s.at(r.artist); t.album = b.s.at(r.album); t.albumartist = b.s.at(r.albumartist);
+                    t.date = b.s.at(r.date); t.genre = b.s.at(r.genre); t.trackno = r.trackno; t.discno = r.discno;
+                    t.shown = b.s.at(r.shown);
+                    t.nvals = r.nvals; t.fields = fields.data; t.sources = sources.data; t.texts = texts.data;
+                    if (up) ix.put_tags(t);
+                    touch(r.root);
+                }
+                b.free();
+                mem_free(m->tags);
+                break;
+            }
+            case WriteKind::Slot:
+                if (up) resolve_slot(sh, ix, *m->slot, slot);
+                m->slot->tracks.free();
+                mem_free(m->slot);
+                break;
             }
             mem_free(m);
         }
         work.clear();
         if (up && !ix.commit()) KV_ERROR("library", "the index could not commit: %s", ix.error);
+        last_commit = time_now();
         if (up && ix.damaged) {
             // sqlite says the file is damaged: made again, and every root walked again into it.
             KV_WARN("library", "the index is damaged (%s) and is being made again", ix.error);
             ix.close();
             Index::remove_files(sh.index_path);
             up = open_index(sh, ix);
+            if (jobs.b) { jobs.b->free(); mem_free(jobs.b); jobs.b = nullptr; }
+            if (slot_more.b) { slot_more.b->free(); mem_free(slot_more.b); slot_more.b = nullptr; }
             os_mutex_lock(&sh.lock);
             sh.rebuilt = true;
             for (const Shared::RootLine& r : sh.root_lines) {
@@ -169,28 +300,55 @@ void write_thread(void* arg) {
         u64 gen = atomic_add_fetch(&sh.generation, (u64)1, MO_RELEASE);
         if (save) save_roots(sh);
 
-        // What changed, for the main thread.
-        os_mutex_lock(&sh.lock);
-        for (Note& n : walked) { bool seen = false; for (u32 x : touched) seen |= x == n.root; if (!seen) touched.push(n.root); }
+        // What the commit made readable goes to the tagger: the walk's, and the slot's more.
+        if (jobs.b || slot_more.b) {
+            os_mutex_lock(&sh.lock);
+            if (jobs.b) sh.jobs.push(jobs.b);
+            if (slot_more.b) {
+                if (sh.slot_jobs) { // not yet taken: these join it
+                    for (const TagJob& j : slot_more.b->jobs) sh.slot_jobs->jobs.push(TagJob{j.track, j.root, sh.slot_jobs->s.add(slot_more.b->s.at(j.rel)), j.size, j.mtime});
+                    slot_more.b->free(); mem_free(slot_more.b);
+                } else {
+                    sh.slot_jobs = slot_more.b;
+                }
+            }
+            os_cond_signal(&sh.tag_wake);
+            os_mutex_unlock(&sh.lock);
+        }
+
+        // What changed, for the main thread: counted first, then handed over under the lock.
+        for (Note& n : walked) touch(n.root);
         u64 total = up ? ix.count_all() : 0;
         for (u32 root : touched) {
             Note n{NoteKind::Counts};
             n.root = root;
-            if (up) { n.tracks = ix.count_tracks(root); n.dirs = ix.count_dirs(root, &n.failed); }
+            if (up) { n.tracks = ix.count_tracks(root); n.dirs = ix.count_dirs(root, &n.failed); n.unread = ix.count_unread(root); }
             n.generation = gen; n.total = total;
-            sh.notes.push(n);
+            notes.push(n);
         }
-        for (Note& n : walked) { if (up) n.tracks = ix.count_tracks(n.root); n.generation = gen; n.total = total; sh.notes.push(n); }
+        for (Note& n : walked) {
+            if (up) { n.tracks = ix.count_tracks(n.root); n.unread = ix.count_unread(n.root); }
+            n.generation = gen; n.total = total;
+            notes.push(n);
+        }
         Note c{NoteKind::Committed};
         c.generation = gen; c.total = total;
-        sh.notes.push(c);
+        notes.push(c);
+        os_mutex_lock(&sh.lock);
+        for (const Note& n : notes) sh.notes.push(n);
         os_cond_signal(&sh.read_wake); // open windows may want filling again
         os_mutex_unlock(&sh.lock);
+        notes.clear();
         touched.clear();
         walked.clear();
     }
-    for (WriteMsg* m : work) { if (m->batch) { m->batch->free(); mem_free(m->batch); } mem_free(m); }
-    work.free(); live.free(); touched.free(); walked.free();
+    for (WriteMsg* m : work) {
+        if (m->batch) { m->batch->free(); mem_free(m->batch); }
+        if (m->tags) { m->tags->free(); mem_free(m->tags); }
+        if (m->slot) { m->slot->tracks.free(); mem_free(m->slot); }
+        mem_free(m);
+    }
+    work.free(); live.free(); touched.free(); walked.free(); texts.free(); fields.free(); sources.free(); notes.free();
     ix.close();
 }
 
@@ -256,7 +414,11 @@ struct RootInfo {
     Handle row;
     char   path[kPathMax] = "";
     bool   walked = false;
+    bool   finished = false;   // LibraryScanFinished said, since the last walk
+    f64    walk_seconds = 0.0;
 };
+// A read of the tagger's in the I/O queue.
+struct Reading { Handle request; ReadAsk ask; };
 struct Window {
     u32    id = 0;
     LibraryQuery q;
@@ -278,8 +440,11 @@ struct Library {
     u64      said_generation = 0;
     f64      last_refill = 0.0;
     f64      rate_at = 0.0;
-    u64      rate_files = 0;
+    u64      rate_files = 0, rate_tags = 0;
     char     data_dir[kPathMax] = "";
+    OsThread tagger;
+    Array<Reading> reading;
+    Array<ReadAsk> waiting;       // asked, not yet in the queue (it was full)
 };
 
 Library* state(Engine& e) { return engine_module_state_as<Library>(e, "library"); }
@@ -407,6 +572,30 @@ void commands(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
         w->open = true;
         ask(L, *w);
     }
+    for (const LibraryPrioritize& p : ctx.received<LibraryPrioritize>()) {
+        SlotMsg* m = (SlotMsg*)mem_alloc(sizeof(SlotMsg));
+        new (m) SlotMsg{};
+        if (p.path[0]) { m->kind = SlotKind::Path; normal_path(p.path, m->path, sizeof m->path); }
+        else if (p.dir) { m->kind = SlotKind::Dir; m->dir = p.dir; }
+        else if (p.query) {
+            // An open window's tracks, as its rows are now.
+            m->kind = SlotKind::Tracks;
+            if (Window* w = window(L, p.query))
+                for (Handle h : w->rows) if (rows && rows->valid(h)) { const LibraryRow& r = rows->rows_of<LibraryRow>()[h.index()]; if (r.kind == (u8)LibraryRowKind::Track) m->tracks.push(r.id); }
+        } else {
+            m->kind = SlotKind::Tracks;
+            for (u32 i = 0; i < p.count && i < 32; ++i) m->tracks.push(p.tracks[i]);
+        }
+        WriteMsg* w = (WriteMsg*)mem_alloc(sizeof(WriteMsg));
+        new (w) WriteMsg{};
+        w->kind = WriteKind::Slot;
+        w->slot = m;
+        os_mutex_lock(&L.sh->lock);
+        L.sh->writes.push(w);
+        os_cond_signal(&L.sh->write_wake);
+        os_mutex_unlock(&L.sh->lock);
+        L.scan_res.slot = m->kind != SlotKind::None ? 1 : 0;
+    }
     for (const LibraryClose& c : ctx.received<LibraryClose>()) {
         for (u32 i = 0; i < L.windows.len; ++i) {
             if (L.windows[i].id != c.id) continue;
@@ -439,19 +628,31 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
         LibraryRoot& row = root_row(roots, *r);
         switch (n.kind) {
         case NoteKind::Counts:
-            row.tracks = n.tracks; row.dirs = n.dirs; row.failed = n.failed;
+            row.tracks = n.tracks; row.dirs = n.dirs; row.failed = n.failed; row.unread = n.unread;
             break;
         case NoteKind::Walked:
             r->walked = true;
-            row.tracks = n.tracks;
-            if (row.state != (u8)LibraryRootState::Offline) row.state = (u8)LibraryRootState::Idle;
-            ctx.emit(LibraryScanFinished{n.root, n.tracks, n.seconds});
+            r->walk_seconds = n.seconds;
+            row.tracks = n.tracks; row.unread = n.unread;
             break;
         case NoteKind::Offline:
             row.state = (u8)LibraryRootState::Offline;
             format(row.reason, sizeof row.reason, "%s", n.reason);
             break;
         case NoteKind::Committed: break;
+        }
+    }
+    // A root's state from its counts: walking until its walk is in; reading while tracks
+    // want reading; then idle, and the scan's end said once.
+    for (RootInfo& r : L.roots) {
+        if (!roots) break;
+        LibraryRoot& row = root_row(roots, r);
+        if (row.state == (u8)LibraryRootState::Offline) { if (r.walked && !r.finished) { r.finished = true; ctx.emit(LibraryScanFinished{r.id, row.tracks, r.walk_seconds}); } continue; }
+        if (!r.walked) row.state = (u8)LibraryRootState::Walking;
+        else if (row.unread) row.state = (u8)LibraryRootState::Reading;
+        else {
+            row.state = (u8)LibraryRootState::Idle;
+            if (!r.finished) { r.finished = true; ctx.emit(LibraryScanFinished{r.id, row.tracks, r.walk_seconds}); }
         }
     }
     for (Result& res : results) {
@@ -471,12 +672,69 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     results.free();
 }
 
+// The tagger's reads, through the engine's I/O queue: below the player's (Low), or at Normal
+// for the slot's; at most kMaxReads at once, within the queue's own budget.
+void io_pump(TickContext& ctx, Library& L) {
+    IoQueue* io = platform_io(*ctx.engine);
+    os_mutex_lock(&L.sh->lock);
+    for (const ReadAsk& a : L.sh->read_asks) L.waiting.push(a);
+    L.sh->read_asks.clear();
+    os_mutex_unlock(&L.sh->lock);
+    Array<ReadDone> done;
+    // What has come.
+    for (u32 i = 0; i < L.reading.len;) {
+        Reading& r = L.reading[i];
+        const IoCompletion* c = nullptr;
+        if (io) for (const IoCompletion& x : io->completions()) if (x.request == r.request) { c = &x; break; }
+        if (!c && io) { ++i; continue; }
+        ReadDone d;
+        d.job = r.ask.job; d.gen = r.ask.gen; d.at = r.ask.at;
+        if (c) {
+            d.ok = c->status == IoStatus::Done;
+            d.data = c->data; d.size = c->size; d.err = c->error;
+            io->reap(r.request);
+        }
+        done.push(d);
+        L.reading[i] = L.reading[L.reading.len - 1];
+        --L.reading.len;
+    }
+    // What can go: the slot's first.
+    for (u32 pass = 0; pass < 2; ++pass) {
+        for (u32 i = 0; i < L.waiting.len && L.reading.len < kMaxReads;) {
+            const ReadAsk& a = L.waiting[i];
+            if ((pass == 0) != a.slot) { ++i; continue; }
+            IoRequest rq;
+            rq.path = a.path;
+            rq.priority = a.slot ? IoPriority::Normal : IoPriority::Low;
+            rq.offset = a.at;
+            rq.length = (usize)a.len;
+            Handle h = io ? io->read_file(rq) : Handle{};
+            if (h.is_null()) {
+                if (io) break; // the queue is full: next tick
+                ReadDone d; d.job = a.job; d.gen = a.gen; d.at = a.at; d.err = 5; done.push(d); // no queue at all
+            } else {
+                L.reading.push(Reading{h, a});
+            }
+            L.waiting[i] = L.waiting[L.waiting.len - 1];
+            --L.waiting.len;
+        }
+    }
+    if (done.len) {
+        os_mutex_lock(&L.sh->lock);
+        for (const ReadDone& d : done) L.sh->read_dones.push(d);
+        os_cond_signal(&L.sh->tag_wake);
+        os_mutex_unlock(&L.sh->lock);
+    }
+    done.free();
+}
+
 // Phase PreSim, main thread, every tick.
 void library_pump(TickContext& ctx) {
     Library& L = ctx.state_as<Library>();
     KTable* roots = ctx.write_ktable(g_roots_ktable);
     KTable* rows = ctx.write_ktable(g_rows_ktable);
     commands(ctx, L, roots, rows);
+    io_pump(ctx, L);
     from_threads(ctx, L, roots, rows);
 
     // The generation, said when it moves; open windows asked again, a few times a second.
@@ -495,13 +753,21 @@ void library_pump(TickContext& ctx) {
     s.walking = atomic_load(&L.sh->walking, MO_RELAXED);
     s.dirs_listed = atomic_load(&L.sh->dirs_listed, MO_RELAXED);
     s.files_found = atomic_load(&L.sh->files_found, MO_RELAXED);
-    bool walking = false;
-    for (const RootInfo& r : L.roots) walking |= !r.walked;
-    s.active = walking ? 1 : 0;
+    s.tags_read = atomic_load(&L.sh->tags_read, MO_RELAXED);
+    bool busy = false;
+    u64 unread = 0;
+    for (const RootInfo& r : L.roots) {
+        busy |= !r.finished;
+        if (roots) unread += root_row(roots, r).unread;
+    }
+    s.unread = unread;
+    s.active = busy || atomic_load(&L.sh->tags_active, MO_RELAXED) ? 1 : 0;
     if (now - L.rate_at >= 1.0) {
         s.names_per_second = L.rate_at > 0.0 ? (f64)(s.files_found - L.rate_files) / (now - L.rate_at) : 0.0;
+        s.tags_per_second = L.rate_at > 0.0 ? (f64)(s.tags_read - L.rate_tags) / (now - L.rate_at) : 0.0;
         L.rate_at = now;
         L.rate_files = s.files_found;
+        L.rate_tags = s.tags_read;
     }
 }
 
@@ -541,11 +807,11 @@ bool library_startup(Engine& e, ModuleInstance& self) {
     new (L->sh) Shared();
     Shared& sh = *L->sh;
     os_mutex_init(&sh.lock);
-    os_cond_init(&sh.scan_wake); os_cond_init(&sh.write_wake); os_cond_init(&sh.read_wake);
+    os_cond_init(&sh.scan_wake); os_cond_init(&sh.write_wake); os_cond_init(&sh.read_wake); os_cond_init(&sh.tag_wake);
     format(sh.index_path, sizeof sh.index_path, "%s/index.sqlite", L->data_dir);
     format(sh.roots_path, sizeof sh.roots_path, "%s/roots.txt", L->data_dir);
     if (!os_thread_start(&L->writer, write_thread, &sh) || !os_thread_start(&L->reader, read_thread, &sh) ||
-        !os_thread_start(&L->scan, scan_thread, &sh)) {
+        !os_thread_start(&L->scan, scan_thread, &sh) || !os_thread_start(&L->tagger, tag_thread, &sh)) {
         KV_ERROR("library", "the library's threads will not start");
         return false; // shutdown joins what started
     }
@@ -561,15 +827,30 @@ void library_shutdown(Engine& e, ModuleInstance&) {
     Shared& sh = *L->sh;
     os_mutex_lock(&sh.lock);
     sh.quit = true;
-    os_cond_broadcast(&sh.scan_wake); os_cond_broadcast(&sh.write_wake); os_cond_broadcast(&sh.read_wake);
+    os_cond_broadcast(&sh.scan_wake); os_cond_broadcast(&sh.write_wake); os_cond_broadcast(&sh.read_wake); os_cond_broadcast(&sh.tag_wake);
     os_mutex_unlock(&sh.lock);
+    if (L->tagger.handle) os_thread_join(&L->tagger);
+    // Reads still in the queue: cancelled, and their bytes freed if they came anyway.
+    if (IoQueue* io = platform_io(e)) {
+        for (Reading& r : L->reading) {
+            io->cancel(r.request);
+            for (const IoCompletion& c : io->completions())
+                if (c.request == r.request) { if (c.data) free_in(mem_general(), c.data, c.size ? c.size : 1); io->reap(r.request); break; }
+        }
+    }
+    L->reading.free();
+    L->waiting.free();
     if (L->scan.handle) os_thread_join(&L->scan);
     if (L->writer.handle) os_thread_join(&L->writer);
     if (L->reader.handle) os_thread_join(&L->reader);
     for (WriteMsg* m : sh.writes) { if (m->batch) { m->batch->free(); mem_free(m->batch); } mem_free(m); }
     for (Result& r : sh.results) mem_free(r.rows);
+    for (WriteMsg* m : sh.writes) { if (m->tags) { m->tags->free(); mem_free(m->tags); } if (m->slot) { m->slot->tracks.free(); mem_free(m->slot); } }
+    for (TagJobs* b : sh.jobs) { b->free(); mem_free(b); }
+    if (sh.slot_jobs) { sh.slot_jobs->free(); mem_free(sh.slot_jobs); }
     sh.walks.free(); sh.drops.free(); sh.writes.free(); sh.asks.free(); sh.notes.free(); sh.results.free(); sh.root_lines.free();
-    os_cond_destroy(&sh.scan_wake); os_cond_destroy(&sh.write_wake); os_cond_destroy(&sh.read_wake);
+    sh.jobs.free(); sh.read_asks.free(); sh.read_dones.free();
+    os_cond_destroy(&sh.scan_wake); os_cond_destroy(&sh.write_wake); os_cond_destroy(&sh.read_wake); os_cond_destroy(&sh.tag_wake);
     os_mutex_destroy(&sh.lock);
     mem_free(L->sh);
     L->sh = nullptr;
@@ -602,7 +883,8 @@ void cmd_status(CliContext& ctx, Span<const char* const>) {
     const LibraryScan& s = L->scan_res;
     ctx.print("index: %llu tracks, generation %llu%s; %s", (unsigned long long)s.tracks, (unsigned long long)s.generation,
               s.rebuilt ? ", made again at start-up" : "", s.active ? "walking" : "idle");
-    if (s.active) ctx.print("walking root %u: %s (%.0f files a second)", s.walking, s.dir, s.names_per_second);
+    if (s.walking) ctx.print("walking root %u: %s (%.0f files a second)", s.walking, s.dir, s.names_per_second);
+    if (s.unread) ctx.print("reading tags: %llu to go (%.0f a second)", (unsigned long long)s.unread, s.tags_per_second);
     KTable* t = engine_ktable(*ctx.engine, g_roots_ktable);
     for (const RootInfo& r : L->roots) {
         const LibraryRoot& row = t->rows_of<LibraryRoot>()[r.row.index()];
@@ -617,7 +899,7 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "library status", .help = "the roots and the scan", .fn = cmd_status},
 };
 
-constinit const FieldDesc k_root_fields[] = {KV_FIELDS(LibraryRoot, id, state, dirs, tracks, failed, path, reason)};
+constinit const FieldDesc k_root_fields[] = {KV_FIELDS(LibraryRoot, id, state, dirs, tracks, failed, unread, path, reason)};
 constinit const FieldDesc k_row_fields[] = {KV_FIELDS(LibraryRow, query, index, id, kind, missing, offline, root, track_number, disc_number, size, frames, rate, name, title, artist), // sixteen at most a list
                                             KV_FIELDS(LibraryRow, album, path, reason)};
 constinit const ComponentDesc k_components[] = {KV_COMPONENT(LibraryRoot, k_root_fields, CompCosmetic), KV_COMPONENT(LibraryRow, k_row_fields, CompCosmetic)};
@@ -629,6 +911,7 @@ constinit const FieldDesc k_f_add[] = {KV_FIELDS(LibraryAddRoot, path)};
 constinit const FieldDesc k_f_remove[] = {KV_FIELDS(LibraryRemoveRoot, root)};
 constinit const FieldDesc k_f_query[] = {KV_FIELDS(LibraryQuery, id, view, parent, text, first, count)};
 constinit const FieldDesc k_f_close[] = {KV_FIELDS(LibraryClose, id)};
+constinit const FieldDesc k_f_prio[] = {KV_FIELDS(LibraryPrioritize, path, dir, query, count, tracks)};
 constinit const FieldDesc k_f_result[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation)};
 constinit const FieldDesc k_f_changed[] = {KV_FIELDS(LibraryChanged, generation)};
 constinit const FieldDesc k_f_finished[] = {KV_FIELDS(LibraryScanFinished, root, tracks, seconds)};
@@ -637,6 +920,7 @@ constinit const EventTypeDesc k_events[] = {
     KV_EVENT_EX(LibraryRemoveRoot, k_f_remove, 0),
     KV_EVENT_EX(LibraryQuery, k_f_query, 0),
     KV_EVENT_EX(LibraryClose, k_f_close, 0),
+    KV_EVENT_EX(LibraryPrioritize, k_f_prio, 0),
     KV_EVENT_EX(LibraryResult, k_f_result, 0),
     KV_EVENT_EX(LibraryChanged, k_f_changed, 0),
     KV_EVENT_EX(LibraryScanFinished, k_f_finished, 0),
@@ -644,7 +928,7 @@ constinit const EventTypeDesc k_events[] = {
 constinit const ResourceDesc k_resources[] = {{".scan"}};
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = library_pump,
-     .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose",
+     .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize",
      .writes = ".roots, .rows, .scan",
      .emits = "LibraryResult, LibraryChanged, LibraryScanFinished",
      .main_thread = true, .runs = RunWhen::Always},

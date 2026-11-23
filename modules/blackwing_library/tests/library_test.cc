@@ -135,7 +135,8 @@ void test_library_walk(TestCtx& c) {
     u32 expect = (u32)made.files + 2 + (root_user ? 1 : 0); // and SHOUTING.MP3, the Latin-1 name
     KV_CHECK(c, root.id == 1 && root.state == (u8)LibraryRootState::Idle && root.tracks == expect && g_finished_tracks == expect);
     KV_CHECK(c, root_user || root.failed == 1);
-    KV_CHECK(c, r.scan().tracks == expect && r.scan().active == 0 && g_changed > 0);
+    KV_CHECK(c, r.scan().tracks == expect && r.scan().active == 0 && g_changed > 0 && root.unread == 0 && r.scan().unread == 0);
+    KV_CHECK(c, r.scan().tags_read == expect);
     KV_INFO("test", "library walk: %u tracks in %.0f ms, %u dirs", root.tracks, walked * 1e3, root.dirs);
 
     // The roots, then the root's own directories, then one album's tracks with their guesses.
@@ -156,12 +157,20 @@ void test_library_walk(TestCtx& c) {
     KV_CHECK(c, in_odd.len == 4 && in_odd[0].kind == (u8)LibraryRowKind::Directory && in_odd[1].kind == (u8)LibraryRowKind::Directory);
     KV_CHECK(c, in_odd.len == 4 && strcmp(in_odd[2].name, "SHOUTING.MP3") == 0 && strcmp(in_odd[3].name, "caf\xef\xbf\xbd latin1.flac") == 0);
     KV_CHECK(c, in_odd.len == 4 && in_odd[3].path[strlen(in_odd[3].path) - 13] == '\xe9'); // the path the player opens is the bytes
+    // Files that are not audio, whatever their names: rows, with the reason.
+    KV_CHECK(c, in_odd.len == 4 && in_odd[2].rate == 0 && strstr(in_odd[2].reason, "too short to be audio") && in_odd[3].reason[0]);
     in_odd.free();
 
     // Found by a word of its title: exactly one, playable by its path.
     KV_CHECK(c, r.query(4, LibraryView::Search, 0, "zq37"));
     Array<LibraryRow> hit = r.rows(4);
     KV_CHECK(c, hit.len == 1 && g_result[4].total == 1 && strstr(hit[0].title, "Zq37") && hit[0].track_number > 0);
+    // Its tags read: the title is the Vorbis comment's (the file name has its number in front
+    // and its extension after), and the decoder said its rate and length.
+    char want[64];
+    format(want, sizeof want, "%s Track Zq37", kvtest::kWords[(37 * 7) % kvtest::kNWords]);
+    KV_CHECK(c, hit.len == 1 && strcmp(hit[0].title, want) == 0 && hit[0].rate == 44100 && hit[0].frames == 4096 && !hit[0].reason[0]);
+    KV_CHECK(c, hit.len == 1 && hit[0].artist[0] && hit[0].album[0] && strstr(hit[0].path, hit[0].album));
     KV_CHECK(c, hit.len == 1 && io_is_file(hit[0].path));
     hit.free();
     // By a word that is not ASCII, with its marks left off: "Moskva" is not, but "москва" is "Москва".
@@ -185,6 +194,7 @@ void test_library_walk(TestCtx& c) {
     KV_CHECK(c, s.start(data));
     KV_CHECK(c, s.root(1).id == 1 && s.until([] { return g_finished == 1; }));
     KV_CHECK(c, s.root(1).tracks == expect && !s.scan().rebuilt);
+    KV_CHECK(c, s.scan().tags_read == 0); // every file's size and time unchanged: none is read again
     KV_CHECK(c, s.query(4, LibraryView::Search, 0, "zq37"));
     Array<LibraryRow> again = s.rows(4);
     KV_CHECK(c, again.len == 1);
@@ -224,5 +234,53 @@ void test_library_walk(TestCtx& c) {
     o.stop();
 
     format(p, sizeof p, "%s/Odd/Locked", music); chmod(p, 0755);
+    io_remove_tree(tmp);
+}
+
+// The slot: with a scan of eight thousand files under way, a directory named by its path
+// (one the walk comes to near its end) has its tags read before most of the rest; then the
+// scan goes on. "Before most": the read counter when its row is first seen read, which is
+// a commit and a window's answer after the read itself.
+void test_library_slot(TestCtx& c) {
+    c.begin("library slot");
+    char tmp[1024], music[1100], data[1100];
+    KV_CHECK(c, io_make_temp_dir("bw_slot", tmp, sizeof tmp));
+    format(music, sizeof music, "%s/music", tmp);
+    format(data, sizeof data, "%s/data", tmp);
+    kvtest::make_library(music, 8000, 10);
+    Rig r;
+    KV_CHECK(c, r.start(data));
+    r.add(music);
+    // A late album's directory, by the path the generator gave it (album 290: layout 2).
+    kvtest::Album al;
+    kvtest::album(music, 290, 1, &al);
+    const char* dir = al.dir;
+    KV_CHECK(c, io_is_dir(dir));
+    LibraryPrioritize p;
+    format(p.path, sizeof p.path, "%s", dir);
+    r.say(p);
+    // Its ten tracks read while most of the library is not.
+    u64 dir_id = 0;
+    u32 unread_then = 0;
+    f64 asked = 0.0;
+    bool read = r.until([&] {
+        if (!dir_id && time_now() - asked > 0.02) {
+            asked = time_now();
+            LibraryQuery q; q.id = 9; q.view = LibraryView::Search; q.count = 20;
+            format(q.text, sizeof q.text, "zq2900");
+            r.say(q);
+        }
+        Array<LibraryRow> rows = r.rows(9);
+        bool all = rows.len == 1 && rows[0].rate == 44100;
+        rows.free();
+        if (all) { unread_then = 8000 - (u32)r.scan().tags_read; dir_id = 1; }
+        return all;
+    }, 20.0);
+    KV_CHECK(c, read);
+    KV_INFO("test", "library slot: the slot's track seen read with %u of 8000 still to read", unread_then);
+    KV_CHECK(c, unread_then > 2000); // without the slot it would be among the last few hundred
+    KV_CHECK(c, r.until([] { return g_finished == 1; }, 60.0));
+    KV_CHECK(c, r.root(1).unread == 0 && r.root(1).tracks == 8000);
+    r.stop();
     io_remove_tree(tmp);
 }

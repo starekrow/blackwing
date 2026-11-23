@@ -141,3 +141,50 @@ twice that.
 
 **Not done here**: the tags pass and the priority slot (milestone 4), the other views and
 sorting (5), the watcher, missing files and an emptied root (7).
+
+## Milestone 4, the tags pass and the slot
+
+Nov 23, 2026. The built-in NVMe disk.
+
+**As planned**, with these particulars:
+
+- **A tagger thread**, a fifth, between the writer and the main thread. It cannot read
+  files itself: the engine's I/O queue is submitted to and reaped on the main thread. So
+  it asks the main thread for ranges, which go into the queue at `Low` (the slot's at
+  `Normal`), at most 48 at once, and gets the bytes back into the track's sparse span.
+  Reads are tick-bound: a round trip is two or three ticks.
+- **The decoder's probe is shown the bytes after a front ID3v2 tag**, not the head with
+  the tag in it, so the art in a tag is not read to find out what decodes the file. (The
+  player's own head read still reads such a tag whole; that is the player's.)
+- **`LibraryScanFinished` means the whole scan**, walk and tags; the walk's end is the root
+  going from walking to reading. The PRD's event table left it open.
+- **The slot is resolved by the writer**, which has the index: a path becomes a track, or
+  a directory and its tracks, and a directory the walk has not listed is listed by the scan
+  thread next, ahead of the walk.
+
+**Found on the way.** The first tags pass ran at 425 files a second with the disk idle.
+The tagger waited on reads 98% of the time, and the main thread's tick took 33 ms: the
+writer held the shared mutex while it counted tracks after each commit, and it committed
+after every message. Counting before taking the lock, and committing at most four times a
+second, made it 5,400 files a second. The walk's rows now go in a commit of their own
+before the tags', so a file is findable by name sooner.
+
+**The numbers**, fifty thousand files of twenty to an album:
+
+| | |
+|---|---|
+| a chosen track found by name / heard | 1.70 s / 1.73 s after `LibraryAddRoot` (the walk's rows still going in) |
+| the walk | 50,000 files in 0.51 s; all of them rows at 1.83 s |
+| a folder of twenty prioritized as the tags pass starts | its tags in the index 0.59 s later |
+| the tags pass, warm cache | 5,500 files a second after the walk; all read 10.9 s after `LibraryAddRoot` |
+| the index | 75.7 MB with every source's values |
+| the second start | a window answered in 0.11 s; the walk again in 0.65 s; no file read again |
+| the disk run: page cache emptied of the 50,000 files and the track | a scan of 16.0 s while a 12 s MP3 played eight times from the same disk: 0 underruns |
+
+Found by name takes longer than at milestone 3 (0.47 s) because the writer now shares its
+time with the tags. It is within the three seconds; the writer's inserts (about 30,000
+rows a second, with the search table) are what to make faster if a slower machine needs
+it.
+
+**Not measured**: the USB disks. They are not attached to this machine; their numbers
+are for the close.
