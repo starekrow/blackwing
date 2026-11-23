@@ -247,6 +247,7 @@ before any of it is built. Not yet put to Korvid.
 | KR11 | One directory can be listed, not only a whole tree | `platform` | P0, blocks slice 3 milestone 3 |
 | KR12 | Whether a path is on a network share can be asked | `platform` | P2 |
 | KR13 | A stat says which volume the path is on | `platform` | P2 |
+| KR14 | A module's `.c` sources are compiled as C | kormake | P0, blocked slice 3 milestone 3 |
 
 ### KR11: listing one directory
 
@@ -323,6 +324,25 @@ is not asked.
 and files that vanish are marked missing and kept for a month before they are
 forgotten. That is right for an unplugged disk and wrong for someone who really did
 delete everything; they will see a root marked offline until they remove it.
+
+Nov 23, 2026: KR11 to KR13 were built in Korvid's slice 10 before slice 3 began.
+
+### KR14: C sources
+
+**What was run into.** Slice 3 vendors sqlite's amalgamation, which is C and not C++ (it
+uses `new` as a name; g++ stops at 740 errors), and kormake compiled only `.cc` and `.mm`.
+No module field or tool rule could add a C object.
+
+**What was done**, in Korvid's tree on its `slice-10` branch with the go-ahead, as the
+engine's slice 10 PRD records: `.c` sources in `src/` are a third language with a unity
+file of its own, built with the toolchain's `cc`, `cflags` (per config too) and `c` rule,
+and the module's includes, defines and profiles. Every desktop toolchain has them (Linux
+built and used; the others written). A toolchain with none cannot build such a module and
+says which file. `blackwing_library/src/sqlite.c` sets sqlite's options and includes it.
+
+With it, a fix found on the way: a module's heavy tests now take its `test_deps`, and a
+test's `test_deps` bring their externals (the library's tests take the player, which takes
+PipeWire).
 
 ## Not asked for, and worth knowing
 

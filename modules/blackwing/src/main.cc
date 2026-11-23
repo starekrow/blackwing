@@ -1,6 +1,7 @@
 // blackwing: the player's executable, headless for now.
 //
 //   blackwing [options] play FILE...     plays the files in order and exits after the last
+//   blackwing [options] library [DIR...] keeps the library (adding DIRs to it) until quit
 //   blackwing help                       the commands the engine knows
 //
 //   --device NAME        the output device: "default", or "capture" (no hardware)
@@ -8,6 +9,7 @@
 //   --lead SECONDS       how far ahead of the playhead audio is kept (5)
 //   --verbose            the engine's INFO lines
 //   --trace-events       every event as it is delivered (dev builds), with who emitted it
+//   --data DIR           where the library keeps its index and its roots (the per-user data directory)
 //
 // `play` is sugar for the player's own commands (player add, player play), which are also
 // what a terminal on stdin may type while it plays: player pause, player play, player next,
@@ -17,9 +19,11 @@
 // The loop is this file's own. It ticks the engine at its clock's rate while something is
 // playing, and four times a second when nothing is, so a player left paused costs nothing.
 #include "korvid/blackwing/module.h"
+#include "korvid/blackwing_library/library.h"
 #include "korvid/blackwing_player/player.h"
 #include "korvid/cli/module.h"
 #include "korvid/core/atomic.h"
+#include "korvid/core/cli.h"
 #include "korvid/core/engine.h"
 #include "korvid/core/format.h"
 #include "korvid/core/log.h"
@@ -41,6 +45,8 @@ namespace kv {
 namespace {
 
 constinit u32 g_interrupted = 0; // atomic: set by SIGINT
+constinit bool g_keep = false;    // the library is kept: the end of the queue is not the end of the run
+constexpr u32 kFindWindow = 0xB1AC0001; // the window `library find` fills
 
 void on_sigint(int) { atomic_store(&g_interrupted, 1u, MO_RELAXED); }
 
@@ -81,7 +87,30 @@ void on_underrun(TickContext&, Span<const HifiUnderrun> events) {
     for (const HifiUnderrun& e : events) printf("underrun (%u)\n", e.count);
     fflush(stdout);
 }
-void on_queue_ended(TickContext& ctx, Span<const PlayerQueueEnded>) { engine_request_quit(*ctx.engine); }
+void on_queue_ended(TickContext& ctx, Span<const PlayerQueueEnded>) { if (!g_keep) engine_request_quit(*ctx.engine); }
+
+// ---- the library: what it says, and the glue between it and the player ----------------------
+
+void on_scan_finished(TickContext&, Span<const LibraryScanFinished> events) {
+    for (const LibraryScanFinished& e : events) printf("walked root %u: %u tracks in %.1f s\n", e.root, e.tracks, e.seconds);
+    fflush(stdout);
+}
+// `library find`'s answer, when it comes: a numbered list `library play` takes a number from.
+void on_result(TickContext& ctx, Span<const LibraryResult> events) {
+    for (const LibraryResult& e : events) {
+        if (e.id != kFindWindow) continue;
+        const KTable* t = ctx.read_ktable("library.rows");
+        printf("%u found%s\n", e.total, e.total > e.count ? " (the first shown)" : "");
+        if (!t) continue;
+        Span<const LibraryRow> rows = t->rows_of<LibraryRow>();
+        for (u32 k = 0; k < e.count; ++k)
+            for (u32 i = 0; i < rows.len; ++i)
+                if (t->is_alive(i) && rows[i].query == kFindWindow && rows[i].index == k)
+                    printf("%3u. %s%s%s%s%s\n", k + 1, rows[i].title[0] ? rows[i].title : rows[i].name, rows[i].artist[0] ? " - " : "",
+                           rows[i].artist, rows[i].album[0] ? " - " : "", rows[i].album);
+    }
+    fflush(stdout);
+}
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".started",     KV_ON(PlayerTrackStarted, on_started),   .phase = Phase::PostSim},
@@ -90,6 +119,44 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".failed",      KV_ON(PlayerTrackFailed, on_failed),     .phase = Phase::PostSim},
     {.name = ".underrun",    KV_ON(HifiUnderrun, on_underrun),        .phase = Phase::PostSim},
     {.name = ".queue_ended", KV_ON(PlayerQueueEnded, on_queue_ended), .phase = Phase::PostSim},
+    {.name = ".scanned",     KV_ON(LibraryScanFinished, on_scan_finished), .phase = Phase::PostSim},
+    {.name = ".found",       KV_ON(LibraryResult, on_result),         .phase = Phase::PostSim, .reads = "library.rows"},
+};
+
+void cmd_find(CliContext& ctx, Span<const char* const> args) {
+    if (args.len == 0) { ctx.fail("library find <words>..."); return; }
+    LibraryQuery q;
+    q.id = kFindWindow;
+    q.view = LibraryView::Search;
+    q.count = 20;
+    usize n = 0;
+    for (const char* a : args) n += (usize)format(q.text + n, sizeof q.text - n, "%s%s", n ? " " : "", a);
+    ctx.engine->events.emit(q);
+}
+
+// Plays the n-th track `library find` listed: the player is told its path, and to play it now.
+void cmd_play(CliContext& ctx, Span<const char* const> args) {
+    u32 n = args.len == 1 ? (u32)atoi(args[0]) : 0;
+    if (n == 0) { ctx.fail("library play <number from library find>"); return; }
+    KTable* t = engine_ktable(*ctx.engine, "library.rows");
+    if (!t) { ctx.fail("the library is not running"); return; }
+    Span<LibraryRow> rows = t->rows_of<LibraryRow>();
+    for (u32 i = 0; i < rows.len; ++i) {
+        if (!t->is_alive(i) || rows[i].query != kFindWindow || rows[i].index != n - 1) continue;
+        if (!rows[i].path[0]) { ctx.fail("%s cannot be played: %s", rows[i].name, rows[i].reason); return; }
+        PlayerEnqueue q{};
+        memcpy(q.path, rows[i].path, sizeof q.path);
+        ctx.engine->events.emit(q);
+        ctx.engine->events.emit(PlayerPlay{});
+        ctx.print("queued %s", rows[i].title[0] ? rows[i].title : rows[i].name);
+        return;
+    }
+    ctx.fail("there is no %u in the last find", n);
+}
+
+constinit const CliCommandDesc k_commands[] = {
+    {.name = "library find", .help = "<words>... tracks whose title, artist, album or path has words beginning so", .fn = cmd_find},
+    {.name = "library play", .help = "<number> queues a track the last find listed, and plays", .fn = cmd_play},
 };
 
 } // namespace
@@ -97,12 +164,14 @@ constinit const HandlerDesc k_handlers[] = {
 KV_MODULE_DEFINE(blackwing_module) = {
     .name     = "blackwing",
     .handlers = k_handlers,
+    .commands = k_commands,
 };
 
 namespace {
 
 void usage() {
-    fputs("usage: blackwing [--device NAME] [--capture-to FILE] [--lead SECONDS] [--verbose] [--trace-events] play FILE...\n"
+    fputs("usage: blackwing [--device NAME] [--capture-to FILE] [--lead SECONDS] [--data DIR] [--verbose] [--trace-events] play FILE...\n"
+          "       blackwing [options] library [DIR...]\n"
           "       blackwing help\n", stderr);
 }
 
@@ -126,6 +195,7 @@ bool write_capture(HifiCapture* cap, const char* path) {
 int run(int argc, char** argv) {
     const char* device = "default";
     const char* capture_to = nullptr;
+    const char* data_dir = nullptr;
     f64 lead = 5.0;
     bool verbose = false, trace = false;
     int first = 1;
@@ -133,6 +203,7 @@ int run(int argc, char** argv) {
         if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) device = argv[++first];
         else if (strcmp(argv[first], "--capture-to") == 0 && first + 1 < argc) capture_to = argv[++first];
         else if (strcmp(argv[first], "--lead") == 0 && first + 1 < argc) lead = atof(argv[++first]);
+        else if (strcmp(argv[first], "--data") == 0 && first + 1 < argc) data_dir = argv[++first];
         else if (strcmp(argv[first], "--verbose") == 0) verbose = true;
         else if (strcmp(argv[first], "--trace-events") == 0) trace = true;
         else { fprintf(stderr, "blackwing: unknown option %s\n", argv[first]); usage(); return 2; }
@@ -141,7 +212,9 @@ int run(int argc, char** argv) {
     const char* command = argv[first];
     bool help = strcmp(command, "help") == 0;
     bool play = strcmp(command, "play") == 0;
-    if ((!help && !play) || (play && first + 1 >= argc) || lead <= 0.0) { usage(); return 2; }
+    bool library = strcmp(command, "library") == 0;
+    if ((!help && !play && !library) || (play && first + 1 >= argc) || lead <= 0.0) { usage(); return 2; }
+    g_keep = library;
     if (capture_to) device = "capture";
 
     LogLevel was = log_level();
@@ -159,6 +232,9 @@ int run(int argc, char** argv) {
     pc.device_backend = capture;
     pc.lead_seconds = lead;
     player_configure(pc);
+    LibraryConfig lc;
+    lc.data_dir = data_dir;
+    library_configure(lc);
 
     CliConfig cli;
 #if !defined(_WIN32)
@@ -188,10 +264,10 @@ int run(int argc, char** argv) {
             for (int i = first + 1; i < argc && !failed; ++i) {
                 char line[1200];
                 if (strchr(argv[i], '"') || strlen(argv[i]) > 1000) { fprintf(stderr, "blackwing: cannot name this file on the command line: %s\n", argv[i]); failed = true; break; }
-                format(line, sizeof line, "player add \"%s\"", argv[i]);
+                format(line, sizeof line, library ? "library add \"%s\"" : "player add \"%s\"", argv[i]);
                 failed = !cli_run(e, line, nullptr, nullptr) || failed;
             }
-            if (!failed) failed = !cli_run(e, "player play", nullptr, nullptr);
+            if (!failed && play) failed = !cli_run(e, "player play", nullptr, nullptr);
             if (failed) code = 2;
 #if !defined(_WIN32)
             signal(SIGINT, on_sigint);
@@ -203,7 +279,8 @@ int run(int argc, char** argv) {
                 engine_frame(e, now - last);
                 last = now;
                 const PlayerTransport* t = player_transport(e);
-                bool busy = t && (t->state == (u8)PlayerState::Playing || t->state == (u8)PlayerState::Starting);
+                const LibraryScan* ls = library_scan(e);
+                bool busy = (t && (t->state == (u8)PlayerState::Playing || t->state == (u8)PlayerState::Starting)) || (ls && ls->active);
                 time_sleep(busy ? e.clock.tick_dt : 0.25);
             }
             if (atomic_load(&g_interrupted, MO_RELAXED)) { fputs("\ninterrupted\n", stdout); code = 130; }

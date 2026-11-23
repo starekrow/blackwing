@@ -88,3 +88,56 @@ and returned. It lives in the caller's memory now, with the values.
 
 **Not done here** (they are the library's): the override files, art beside the files,
 and the sort keys.
+
+## Milestone 3, the walk and the index
+
+Nov 23, 2026. Linux laptop, `linux-dev`, the built-in NVMe disk, its page cache warm.
+
+**Blocked, then unblocked in Korvid.** sqlite's amalgamation is C that does not compile
+as C++, and kormake built only `.cc` and `.mm`. With the go-ahead, kormake now builds a
+module's `.c` files with each toolchain's C compiler (KR14, in Korvid's slice 10 on its
+`slice-10` branch); `src/sqlite.c` sets the options and includes the amalgamation. The
+heavy test then found that a module's heavy tests did not take its `test_deps`, and that a
+test's `test_deps` brought no externals; both are fixed there too. sqlite takes 1 m 45 s
+to compile at `-O2 -g`, once.
+
+**As planned**, with these particulars:
+
+- **Four threads**: the main thread's system, a scan thread that walks, a writer with the
+  index's one writing connection, a reader with a read-only one. They speak through
+  inboxes under one mutex. Own threads rather than the I/O queue's tasks: a task's
+  completion is reaped at the pump, and `blackwing` ticks four times a second when idle,
+  which would pace the walk.
+- **The list of roots is a file of its own** (`roots.txt`), not only a table: the index is
+  a cache, and "rebuilt from the roots" needs the roots to be somewhere the index is not.
+- **A directory is a row as soon as its parent is listed**, before it is listed itself, so
+  a folder view shows the whole of what is known.
+- **Links to directories are not followed** (the PRD left it open, and Korvid's slice 10
+  asked): a walk cannot loop or leave its root. Links to files are listed.
+- **Windows follow the index already**: open windows are asked again when the generation
+  moves, at most four times a second. The rest of BL13 (more views, sorting, cancelling in
+  sqlite) is milestone 5's.
+- **`library add`, `remove` and `status` are the library module's own commands**, as the
+  player's are the player's; `blackwing` has `find` and `play`, which glue the library to
+  the player (the PRD put all of BL22 in `blackwing`).
+
+**The numbers.** Fifty thousand generated files (12.2 MB, 4167 albums in four layouts,
+names in several scripts), from `LibraryAddRoot` on an empty index:
+
+| | |
+|---|---|
+| a chosen track found by name | 0.47 s, the walk not over |
+| that track heard through the player | 0.50 s |
+| another, found after the walk | 1.21 s (its batch committed), heard at 1.23 s |
+| the names pass | 50,000 files in 0.56 s: 90,000 files a second |
+| the index | 38.4 MB |
+| the second start: a window of 100 at row 25,000 answered | 0.08 s after start-up |
+| the second start: the walk again | 0.94 s, every id kept |
+
+The three-second criterion holds with room to spare on the built-in disk with a warm
+cache. A cold cache and the USB disks are for the close. The writer is the slower half:
+the walk lists 50,000 files in 0.56 s and the commits that make them findable take about
+twice that.
+
+**Not done here**: the tags pass and the priority slot (milestone 4), the other views and
+sorting (5), the watcher, missing files and an emptied root (7).

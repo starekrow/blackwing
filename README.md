@@ -12,7 +12,8 @@ it was given.
 ## Building
 
 Korvid is expected beside this checkout, at `../korvid` ([korvid.config](korvid.config)
-says so), at a version whose `kormake` is 1.2 or newer.
+says so), at a version whose `kormake` is 1.2 or newer and compiles C (Korvid's slice 10,
+KR14: the library's vendored sqlite is C).
 
 On Linux, the PipeWire development package, for the headers and `pkg-config` file that
 `hifi_platform` builds against. On Debian and Ubuntu:
