@@ -415,7 +415,7 @@ Slices, as a proposal; each gets its own PRD when it starts.
    samples exactly, and ninety seconds play with no underrun while the disk is busy, from
    the built-in disk and two USB drives. An hour-long run is owed after the gate.
    *Built* Nov 23, 2026, through milestone 5; the slice's PRD has what is still owed.
-2. **The recut.** Seek, skip, the queue, volume and `hifi_eq`, all through the recut and
+2. **The recut** ([Blackwing-Slice-2-PRD.md](Blackwing-Slice-2-PRD.md)). Seek, skip, the queue, volume and `hifi_eq`, all through the recut and
    the join; tracks joined in one stream.
    *Done when* a control is heard within the target on a warm file, a cold file is heard
    late rather than as silence, and no join clicks.
