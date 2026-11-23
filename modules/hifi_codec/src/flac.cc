@@ -23,11 +23,8 @@
 #pragma GCC diagnostic ignored "-Wtype-limits"
 #endif
 // A damaged file can make its predictor's sums overflow an int. The frame is thrown away
-// when its checksum fails, but the overflow itself must be defined: wrap, for these lines.
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC push_options
-#pragma GCC optimize("wrapv")
-#endif
+// when its checksum fails, but the overflow itself must be defined: this file is built
+// with the wrapv profile (module.lua's codegen_sources).
 #define DR_FLAC_NO_STDIO
 #define DR_FLAC_NO_OGG
 #define DR_FLAC_NO_WCHAR
@@ -40,9 +37,6 @@
 #define DRFLAC_FREE(p)        ((void)(p))
 #define DR_FLAC_IMPLEMENTATION
 #include "vendor/dr_flac.h"
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC pop_options
-#endif
 #if KV_COMPILER_MSVC
 #pragma warning(pop)
 #else

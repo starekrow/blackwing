@@ -49,8 +49,6 @@ void print_line(void* user, const char* line) {
     fputc('\n', stdout);
 }
 // For requests whose answer nobody wants ("queued 1"); a failure still prints, on stderr.
-void quiet_line(void*, const char*) {}
-
 // ---- the module: what the player says, said on stdout ---------------------------------
 
 void on_started(TickContext&, Span<const PlayerTrackStarted> events) {
@@ -175,9 +173,9 @@ int run(int argc, char** argv) {
                 char line[1200];
                 if (strchr(argv[i], '"') || strlen(argv[i]) > 1000) { fprintf(stderr, "blackwing: cannot name this file on the command line: %s\n", argv[i]); failed = true; break; }
                 format(line, sizeof line, "player add \"%s\"", argv[i]);
-                failed = !cli_run(e, line, quiet_line, nullptr) || failed;
+                failed = !cli_run(e, line, nullptr, nullptr) || failed;
             }
-            if (!failed) failed = !cli_run(e, "player play", quiet_line, nullptr);
+            if (!failed) failed = !cli_run(e, "player play", nullptr, nullptr);
             if (failed) code = 2;
 #if !defined(_WIN32)
             signal(SIGINT, on_sigint);

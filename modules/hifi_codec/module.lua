@@ -5,4 +5,5 @@
 module "hifi_codec" {
   deps     = { "core" },
   licenses = { "src/vendor/LICENSE" },
+  codegen_sources = { wrapv = { "src/flac.cc" } }, -- a damaged file's predictor sums wrap
 }

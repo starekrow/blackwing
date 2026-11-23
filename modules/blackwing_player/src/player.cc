@@ -246,7 +246,7 @@ void advance(TickContext& ctx, Player& p, KTable* queue) {
             rq.path = path;
             rq.priority = IoPriority::High;
             it.read = io->read_file(rq);
-            if (it.read.is_null()) { fail(ctx, p, queue, it, "the path is too long for the I/O queue, or the queue is full"); --ahead; continue; }
+            if (it.read.is_null()) { fail(ctx, p, queue, it, "the I/O queue is full"); --ahead; continue; }
             set_state(queue, it, PlayerItemState::Reading);
         }
         if (it.state == PlayerItemState::Ready && !it.in_play && !it.lent && !gap) {
