@@ -82,6 +82,9 @@ Header `korvid/blackwing_player/player.h`:
 |---|---|---|
 | `PlayerEnqueue` | event type | in: `path`; a file joins the end of the queue |
 | `PlayerPlay`, `PlayerPause`, `PlayerStop`, `PlayerNext` | event type | in: the transport |
+| `PlayerPrevious`, `PlayerJump` | event type | in: the row before (or this one again); `item`, a row now |
+| `PlayerSeek`, `PlayerSeekBy` | event type | in: `item` (0: the one playing) and `frame`; `seconds` on from the last seek |
+| `PlayerSeeked` | event type | out: `item`, `frame`, `seq`; a seek's target was heard |
 | `PlayerTrackStarted` | event type | out: `item`, `rate`, `channels`, `bits`, `frames`, `seq`; the first frame was heard |
 | `PlayerTrackEnded` | event type | out: `item`, `frames`, `seq`, `damaged`, `reason`; the last frame was heard |
 | `PlayerTrackFailed` | event type | out: `item`, `seq`, `reason`; it could not be played |
@@ -89,7 +92,7 @@ Header `korvid/blackwing_player/player.h`:
 | `HifiUnderrun` | event type | out: `count`, `seq`; the lead ran dry |
 | `PlayerItem` | component | `id`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
 | `PlayerItemState`, `PlayerState` | enum | an item's state; the transport's |
-| `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left` |
+| `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `seek_item`, `seek_frame` |
 | `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `bytes_held` |
 | `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
@@ -101,9 +104,10 @@ What the module registers with the engine, as module `player`:
 
 - the ktable `player.queue` (component `PlayerItem`, cosmetic, 4096 rows);
 - the resources `player.transport` and `player.output`;
-- the ten event types above;
+- the fifteen event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
-- the commands `player add`, `play`, `pause`, `stop`, `next`, `status`.
+- the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
+  `seekby`, `status`.
 
 ## Behaviour worth knowing
 
@@ -118,6 +122,15 @@ What the module registers with the engine, as module `player`:
 - **A file cut short is Done, not Failed**: it plays what it has, and its row and its
   `PlayerTrackEnded` say `damaged`, with the reason.
 - **Next is not Ended.** A skipped item goes to Done with no `PlayerTrackEnded`.
+- **A seek, a next, a previous and a jump are each a jump in `hifi`**: the old audio fades
+  out at once, the transport says *starting* (no item) until the new audio is heard, and
+  that fades in. A seek within the row heard says `PlayerSeeked`, not a new start, and
+  `position` counts from its target. `seek_item` and `seek_frame` say what a seek is on
+  its way to; a `PlayerSeekBy` counts from there, so repeats add up.
+- **Previous** goes to the row before within the first three seconds of a row, and to
+  this row's start after them (or when there is no row before).
+- **Going back reopens what was done**: a row before the place that comes back (a
+  previous, a jump) is read again if its file was let go of.
 - **Stop keeps the place in the queue, not in the track.** The item starts over.
 - **Rows are never removed.** The queue is also the history, up to 4096 items.
 - **A file of any size plays** within the cap. A cap smaller than a decoder's window
@@ -141,12 +154,17 @@ in the tick after the frame the device's delay says; pause, next and stop; failu
 between good files; the command line; shutdown in the middle of everything. Two files
 larger than a 40 KB cap, in 4 KB pieces: each starts before it is all read, both are
 exact and joined, and no more than the cap is ever held. A file truncated on the disk
-while it is read: what was read plays, and the item ends damaged, "cut short".
+while it is read: what was read plays, and the item ends damaged, "cut short". Seek,
+seek-by, previous and jump over a four-second file: the seek exact from its target
+after the fade, the old audio unchanged until the jump reaches the device and then
+only its fade and silence, `PlayerSeeked` with the frame, the position from the target;
+two seek-bys in one tick added up; previous past three seconds a restart, within them a
+row back; a jump to the third row.
 
 ## Not in this module
 
-The audio path (`hifi`). Decoders (`hifi_codec`). Tags and the library. Seek, volume and
-the EQ (slice 2, milestones 3 to 6). Playlists and a saved session (later in P0).
+The audio path (`hifi`). Decoders (`hifi_codec`). Tags and the library. Volume, the EQ
+and queue edits (slice 2, milestones 4 to 6). Playlists and a saved session (later in P0).
 
 ## See also
 

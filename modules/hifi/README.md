@@ -17,17 +17,40 @@ the caller's thread                render thread (hifi's)        device thread (
         +--- commands -------------->|                             |
         |<-- notes ------------------+                             |
         |<-- read, silent_run, underruns --------------------------+
-                                     +------- the lead (a ring) -->+
+                                     +--- two rings (two renders) ->+  the join
 ```
 
 The caller and the render thread pass commands and notes under one mutex that neither
-holds while it works. The render thread and the callback share a ring and a few atomic
-counters, and nothing else: the callback never waits.
+holds while it works. The render thread and the callback share two rings and a few
+atomic counters, and nothing else: the callback never waits.
 
-**The stream.** Frames are counted from zero when the `Hifi` is made and never reset.
-`write` is how many the render thread has put in the lead, `read` how many the callback
-has taken; the ring holds the frames between. Everything that happens at a moment in
-the audio is a stream frame.
+**Renders.** A render is everything from decoder to ring: the sources in order, their
+decoders, and a ring the render thread fills. There are two slots, each a ring and its
+counters. One is heard: the callback takes from it. A flush or a jump starts a new
+render, empty, in the other slot, and asks the callback to join it.
+
+**The stream.** Frames are counted from zero when the `Hifi` is made and never reset:
+they are the frames the device has taken. A slot counts its own frames from zero, and
+its `base` is the stream frame of its frame 0, which the callback fixes when it joins
+it. Everything that happens at a moment in the audio is a stream frame.
+
+**The jump.** `hifi_jump` (a seek, a skip, a row chosen) replaces everything with new
+sources. The callback fades what it is playing out at once (`fade_seconds`, 10 ms), then
+switches to the new render as soon as it has `join_seconds` (50 ms) of lead, or all it
+will have, and fades it in. Between them is silence, and the status names no source.
+On a warm file the silence is shorter than a callback period. A jump that arrives
+before the last one was joined takes its place: the render thread takes the request
+back (a compare-exchange; the callback takes it up with one, so exactly one wins) and
+starts again in the same slot. A mark the new render makes before it is joined (its
+`Started` or `Seeked`) carries its slot's frame, and the caller places it once the
+callback has said where that slot's frame 0 fell. A flush is the same with nothing after
+it, ramped (`ramp_seconds`) rather than faded, and what is added afterwards starts clean
+at full level.
+
+**A source can start anywhere.** `HifiSource::start` is the frame it begins at (the
+decoder seeks there, waiting for bytes like any other read), and `seek` says it was
+being heard already: its first mark is `Seeked`, not `Started`. The status's `position`
+is the frame being heard, counted from that start.
 
 **The lead.** The render thread decodes 4096 frames at a time, widens them into the
 device's sample format, and writes them until the ring is full: `lead_seconds` of audio
@@ -53,7 +76,7 @@ playback: the bytes are not touched. Otherwise:
 - It counts an **underrun** when the lead runs dry and the stream was not at its end.
 
 **The end of the stream is not an underrun.** Before the render thread lets the last
-frames of a source be seen, it says whether the stream goes on past them (`end_frame`).
+frames of a source be seen, it says whether the stream goes on past them (the slot's `end`).
 To know, it opens the next source's decoder first, as soon as the current one has
 decoded its last frame: if there is one and the open device can take its format, the
 stream goes on and the join is seamless; if not, the stream ends there, and the
@@ -119,8 +142,9 @@ for (;;) {
 hifi_destroy(h);
 ```
 
-**Skip to something else.** `hifi_flush(h)`, then `hifi_add_source`. Sources that were
-flushed get `Released` and nothing more.
+**Skip to something else, or seek.** `hifi_jump(h, sources, n)`, with the first source's
+`start` set for a seek (and `seek` if it is the one being heard). Sources dropped get
+`Released` and nothing more. `hifi_flush(h)` stops: the same with nothing after it.
 
 ## Quick reference
 
@@ -128,14 +152,15 @@ Header `korvid/hifi/hifi.h`:
 
 | name | kind | what |
 |---|---|---|
-| `HifiConfig` | record | `device`, `device_backend`, `lead_seconds` (5), `start_seconds` (0.25), `ramp_seconds` (0.005) |
-| `HifiSource` | record | `id`, `decoder`, `file` (a `SparseSpan`) |
-| `HifiEventKind` | enum | `Started`, `Ended`, `Failed`, `Released`, `Underrun`, `Want` |
+| `HifiConfig` | record | `device`, `device_backend`, `lead_seconds` (5), `start_seconds` (0.25), `ramp_seconds` (0.005), `fade_seconds` (0.010), `join_seconds` (0.050) |
+| `HifiSource` | record | `id`, `decoder`, `file` (a `SparseSpan`), `start`, `seek` |
+| `HifiEventKind` | enum | `Started`, `Seeked`, `Ended`, `Failed`, `Released`, `Underrun`, `Want` |
 | `HifiEvent` | record | `kind`, `source`, `info`, `status`, `frames`, `need`, `reason` |
-| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
+| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
 | `hifi_create(config)`, `hifi_destroy(h)` | functions | the path and its render thread |
 | `hifi_add_source(h, source)` | function | queue a source |
 | `hifi_pause(h)`, `hifi_play(h)`, `hifi_flush(h)` | functions | hold, let go, drop everything |
+| `hifi_jump(h, sources, n)` | function | everything replaced by these: the old fades out, the new fades in |
 | `hifi_starve(h, id, reason)` | function | a source's bytes will not come |
 | `hifi_read_fence(h)`, `hifi_read_passed(h, fence)` | functions | when a piece given back is no longer read |
 | `hifi_poll(h, out, cap)`, `hifi_status(h, out)` | functions | events since last time; where things stand |
@@ -145,8 +170,13 @@ and publish what it says.
 
 ## Behaviour worth knowing
 
-- **A source's span is borrowed until `Released`**, which comes once for every source
-  whatever happened to it, and usually long before it is heard: decoding runs ahead.
+- **A source's span is borrowed until `Released`**, which comes once for every time it
+  was added, whatever happened to it, and usually long before it is heard: decoding runs
+  ahead. A jump may add a source that an earlier render still has: each lend gets its
+  own `Released`.
+- **`lead_frames` is the lead that will be heard**: while a jump waits to be joined, the
+  new render's, not what is left of the old. `written` is the heard slot's, in stream
+  frames.
 - **A want is said once per range.** The caller keeps it until the range is there; the
   same range is not asked for again.
 - **A waiting decoder is looked at every 2 ms**, for want of a timed wait on a condition
@@ -180,7 +210,10 @@ hold the device once it has played out, and play or a new source lets it go; fai
 fail alone. One test runs the capture device on the wall clock. Two sources whose 4 KB
 pieces are handed over only when they are wanted play exact and gapless; a source
 starved half way ends `Damaged` with the reason, exact up to there, and one starved
-before it opened fails.
+before it opened fails. A seek within a source fades out at once, lands on its frame
+(exact after the fade in), says `Seeked` and counts its position from the target; a
+jump to a source whose bytes are slow is silence until they come; a jump that takes the
+place of one never joined; a jump while paused waits for play.
 
 ## Not in this module
 

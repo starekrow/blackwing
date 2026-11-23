@@ -32,6 +32,18 @@ struct PlayerPause   { u8 unused = 0; };
 struct PlayerStop    { u8 unused = 0; };
 // Ends the item that is playing, or about to, and goes on to the one after it.
 struct PlayerNext    { u8 unused = 0; };
+// Within the first three seconds of an item, the one before it; later, this one from its
+// start.
+struct PlayerPrevious { u8 unused = 0; };
+// Plays this row now.
+struct PlayerJump    { u64 item; };
+// Goes to `frame` of a row: item 0 is the one playing. Within the row being heard, the
+// old audio fades out at once and the new fades in; PlayerSeeked says when it is heard.
+// Of another row, it is a jump there, starting at that frame.
+struct PlayerSeek    { u64 item; u64 frame; };
+// Goes `seconds` on (negative: back) from wherever the last seek was going, or from the
+// frame heard, so repeats add up.
+struct PlayerSeekBy  { f64 seconds; };
 
 // ---- notifications: events the player emits --------------------------------------------
 // Each carries `seq`, which counts up by one across all of them. Events of different types
@@ -41,6 +53,8 @@ struct PlayerNext    { u8 unused = 0; };
 
 // The item's first frame has been heard.
 struct PlayerTrackStarted { u64 item; u32 rate; u16 channels; u16 bits; u64 frames; u32 seq; };
+// A seek's target frame has been heard. Not a new PlayerTrackStarted: the item goes on.
+struct PlayerSeeked       { u64 item; u64 frame; u32 seq; };
 // Its last frame has been heard. `damaged`: the file was cut short or spoiled, and
 // `reason` says how; what was heard was good.
 struct PlayerTrackEnded   { u64 item; u64 frames; u32 seq; bool damaged; char reason[96]; };
@@ -95,13 +109,16 @@ const char* player_state_name(PlayerState s);
 struct PlayerTransport {
     u8   state    = 0;  // a PlayerState
     u8   pad[7]   = {};
-    u64  item     = 0;  // the item being heard; 0 when none is
-    u64  position = 0;  // frames of it heard
+    u64  item     = 0;  // the item being heard; 0 when none is (between the old audio and the new, after a seek or a skip)
+    u64  position = 0;  // the frame of it being heard: where it started, or was sent to, and the frames heard since
     u64  frames   = 0;  // its length; 0 when its header does not say
     u32  rate     = 0;  // frames per second of the item being heard
     u32  queued   = 0;  // items ever queued
     u32  left     = 0;  // items not yet Done or Failed
     u32  pad2     = 0;
+    u64  place    = 0;  // the row the transport is at: the one playing, or about to; 0 past the end
+    u64  seek_item  = 0; // a seek on its way to the ear: its row (0: none), and the frame it was sent to
+    u64  seek_frame = 0;
 };
 
 // The resource "player.output": the device and the lead, as hifi reports them.

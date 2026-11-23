@@ -38,6 +38,8 @@ struct HifiConfig {
     f64 lead_seconds  = 5.0;   // how far ahead of the playhead finished audio is kept
     f64 start_seconds = 0.25;  // how much lead there must be before playback starts, or restarts after an underrun
     f64 ramp_seconds  = 0.005; // the fade to and from silence on pause, resume, flush and underrun
+    f64 fade_seconds  = 0.010; // a jump's fade: the old audio out at once, the new in
+    f64 join_seconds  = 0.050; // the lead a jump's new audio must have before it is heard
 };
 
 // One thing to play: a decoder and the file it reads. The span's bytes and map must stay
@@ -47,10 +49,13 @@ struct HifiSource {
     u64                id      = 0; // the caller's name for it; comes back in events
     const DecoderDesc* decoder = nullptr;
     SparseSpan         file;
+    u64                start   = 0;     // the frame of it to begin at
+    bool               seek    = false; // it was being heard, and this goes on from elsewhere in it: Seeked, not Started
 };
 
 enum class HifiEventKind : u8 {
-    Started,  // the source's first frame has been heard. `info` is what its decoder found
+    Started,  // the source's first frame has been heard. `info` is what its decoder found; `frames` the frame of it that was (its `start`)
+    Seeked,   // as Started, for a source added with `seek`: the frame it was sent to (`frames`) has been heard
     Ended,    // its last frame has been heard. `status` is End or Damaged, `reason` why, `frames` how many it gave
     Failed,   // it could not be played at all: `reason`. Never Started
     Released, // the path will not touch the source's bytes again. Once per source, whatever became of it
@@ -76,14 +81,15 @@ struct HifiStatus {
     bool             exact       = false; // every sample reaching the device is the source's own: the format carries its bits, unshared
     bool             paused      = false;
     bool             held        = false; // the device is held: nothing to play, and what it had was heard
-    bool             flushing    = false; // a hifi_flush has not reached the render thread yet
-    u64              written     = 0; // stream frames the render thread has put in the lead, ever
+    bool             flushing    = false; // a hifi_flush or hifi_jump has not reached the render thread yet
+    bool             joining     = false; // a jump's new audio is waiting to be joined
+    u64              written     = 0; // stream frames the render thread has put in the lead being heard, ever (a jump's count once it is joined)
     u64              taken       = 0; // stream frames the device has taken (or skipped past, after a flush)
     u64              heard       = 0; // stream frames the listener has heard
-    u32              lead_frames = 0; // written - taken: what is ready and not yet taken
+    u32              lead_frames = 0; // what is ready and not yet taken, of what will be heard: a jump's own while it waits
     u32              underruns   = 0; // ever
     u64              source      = 0; // the source being heard; 0 between sources
-    u64              position    = 0; // frames of it heard so far
+    u64              position    = 0; // the frame of it being heard: its start, and the frames heard since
 };
 
 // Starts the render thread. Not paused. Null only if the thread cannot start.
@@ -103,6 +109,12 @@ void hifi_play(Hifi* h);
 // Drops every source and everything in the lead: what is playing ramps down and stops.
 // Sources flushed get Released and nothing else. What is added afterwards starts clean.
 void hifi_flush(Hifi* h);
+// Plays `sources` in place of everything: a seek, a skip, a row chosen. What is sounding
+// fades out at once (fade_seconds); the new audio fades in once it has join_seconds of
+// lead, or all it will have. Between them is silence, and no source is being heard.
+// Sources dropped get Released. n may be 0: the old audio fades out, and what is added
+// afterwards is joined the same way.
+void hifi_jump(Hifi* h, const HifiSource* sources, u32 n);
 // The bytes source `id` waits for will not come (a read failed): when it next waits, its
 // decode ends there, Damaged with `reason`, or it Fails if it had not opened yet. What
 // was decoded before plays.

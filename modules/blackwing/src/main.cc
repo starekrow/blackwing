@@ -59,6 +59,15 @@ void on_started(TickContext&, Span<const PlayerTrackStarted> events) {
     }
     fflush(stdout);
 }
+void on_seeked(TickContext& ctx, Span<const PlayerSeeked> events) {
+    const PlayerTransport* t = ctx.resource<const PlayerTransport>("player.transport");
+    for (const PlayerSeeked& e : events) {
+        u32 rate = t && t->item == e.item ? t->rate : 0;
+        if (rate) printf("at %.1f s of %llu\n", (f64)e.frame / rate, (unsigned long long)e.item);
+        else      printf("at frame %llu of %llu\n", (unsigned long long)e.frame, (unsigned long long)e.item);
+    }
+    fflush(stdout);
+}
 void on_ended(TickContext&, Span<const PlayerTrackEnded> events) {
     for (const PlayerTrackEnded& e : events)
         if (e.damaged) printf("ended %llu early: %s\n", (unsigned long long)e.item, e.reason);
@@ -77,6 +86,7 @@ void on_queue_ended(TickContext& ctx, Span<const PlayerQueueEnded>) { engine_req
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".started",     KV_ON(PlayerTrackStarted, on_started),   .phase = Phase::PostSim},
     {.name = ".ended",       KV_ON(PlayerTrackEnded, on_ended),       .phase = Phase::PostSim},
+    {.name = ".seeked",      KV_ON(PlayerSeeked, on_seeked),          .phase = Phase::PostSim, .reads = "player.transport"},
     {.name = ".failed",      KV_ON(PlayerTrackFailed, on_failed),     .phase = Phase::PostSim},
     {.name = ".underrun",    KV_ON(HifiUnderrun, on_underrun),        .phase = Phase::PostSim},
     {.name = ".queue_ended", KV_ON(PlayerQueueEnded, on_queue_ended), .phase = Phase::PostSim},

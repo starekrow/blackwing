@@ -16,6 +16,7 @@
 #include "korvid/platform/module.h"
 #include "../../hifi_codec/tests/md5.h"
 #include "korvid/platform/io.h"
+#include "korvid/hifi_codec/flac.h"
 #include <initializer_list>
 #include <unistd.h>
 #include <stdio.h>
@@ -45,6 +46,7 @@ void on_ended(TickContext&, Span<const PlayerTrackEnded> ev)     { for (auto& e 
 void on_failed(TickContext&, Span<const PlayerTrackFailed> ev)   { for (auto& e : ev) put(e.seq, 'F', e.item, 0, false, e.reason); }
 void on_queue_ended(TickContext&, Span<const PlayerQueueEnded> ev) { for (auto& e : ev) put(e.seq, 'Q', 0); }
 void on_underrun(TickContext&, Span<const HifiUnderrun> ev)      { for (auto& e : ev) put(e.seq, 'U', e.count); }
+void on_seeked(TickContext&, Span<const PlayerSeeked> ev)        { for (auto& e : ev) put(e.seq, 'K', e.item, e.frame); }
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".started", KV_ON(PlayerTrackStarted, on_started), .phase = Phase::PostSim},
@@ -52,6 +54,7 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".failed",  KV_ON(PlayerTrackFailed, on_failed),   .phase = Phase::PostSim},
     {.name = ".queue",   KV_ON(PlayerQueueEnded, on_queue_ended), .phase = Phase::PostSim},
     {.name = ".under",   KV_ON(HifiUnderrun, on_underrun),      .phase = Phase::PostSim},
+    {.name = ".seeked",  KV_ON(PlayerSeeked, on_seeked),        .phase = Phase::PostSim},
 };
 KV_MODULE_DEFINE(k_listener) = {.name = "listener", .handlers = k_handlers};
 
@@ -141,20 +144,6 @@ struct Rig {
         f64 until = time_now() + 2.0;
         for (;;) { step(); if (o().lead_frames >= frames) return true; if (time_now() > until) return false; time_sleep(0.0005); }
     }
-    // Steps until the lead has stopped changing: the reads have landed and the render
-    // thread has decoded all it is going to. For after a command whose effect on the lead
-    // cannot be named as a number (a next: some dropped, some put back).
-    void settle() {
-        u32 last = ~0u, same = 0;
-        f64 until = time_now() + 2.0;
-        while (same < 3 && time_now() < until) {
-            time_sleep(0.004);
-            step();
-            u32 lead = o().lead_frames;
-            same = lead == last ? same + 1 : 0;
-            last = lead;
-        }
-    }
     bool wait_log(char kind, u64 item) {
         f64 until = time_now() + 2.0;
         for (;;) { step(); if (heard(kind, item)) return true; if (time_now() > until) return false; time_sleep(0.0005); }
@@ -195,6 +184,42 @@ struct Rig {
         return hifi_capture_data(cap) + seg[k].offset;
     }
 };
+
+// A FLAC file's samples, 16-bit stereo, decoded straight: what a capture is compared with.
+struct Pcm16 { i16* s = nullptr; u64 frames = 0; };
+Pcm16 decode16(const char* path) {
+    Pcm16 p;
+    IoBytes b;
+    if (!io_read_now(path, &b)) return p;
+    const DecoderDesc& d = k_flac_decoder;
+    u8* mem = (u8*)mem_alloc(d.memory_bytes);
+    DecoderOpen o = d.open(sparse_whole(Span<const u8>(b.data, (u32)b.size)), Span<u8>(mem, d.memory_bytes));
+    if (o.state) {
+        i32 buf[4096 * 2];
+        p.s = (i16*)mem_alloc((usize)(o.info.frames + 4096) * 4);
+        for (;;) {
+            DecodeResult r = d.decode(o.state, buf, 4096);
+            for (u32 i = 0; i < r.frames * 2; ++i) p.s[p.frames * 2 + i] = (i16)buf[i];
+            p.frames += r.frames;
+            if (r.status != DecodeStatus::Ok) break;
+        }
+        d.close(o.state);
+    }
+    mem_free(mem);
+    b.free();
+    return p;
+}
+// The first captured frame at or after `from` where `pcm` from `at` runs for 64 frames.
+u64 find_run16(const u8* d, u64 from, u64 to, const Pcm16& pcm, u64 at) {
+    for (u64 k = from; k + 64 <= to; ++k) if (memcmp(d + k * 4, pcm.s + at * 2, 256) == 0) return k;
+    return ~0ull;
+}
+u32 count_of(char kind, u64 item) { u32 n = 0; for (u32 i = 0; i < g_nlog; ++i) n += g_log[i].kind == kind && g_log[i].item == item; return n; }
+const Heard& last_of(char kind, u64 item) {
+    static const Heard none = {};
+    for (u32 i = g_nlog; i-- > 0;) if (g_log[i].kind == kind && g_log[i].item == item) return g_log[i];
+    return none;
+}
 
 // The first `frames` 16-bit frames of a capture hash to a FLAC file's own MD5.
 bool md5_is(const u8* captured, u64 frames, u32 channels, const char* flac_path) {
@@ -375,16 +400,18 @@ void test_player(TestCtx& c) {
         r.say(PlayerNext{});
         r.step();
         KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Done && r.t().item == 0);
-        r.settle();                                   // items 2 and 3, put back behind the flush
-        KV_CHECK(c, r.o().lead_frames >= kN * 2);
+        KV_CHECK(c, r.wait_lead(kN * 2));             // items 2 and 3, the jump's new lead
         r.pull(2000);
         KV_CHECK(c, log_is("S1 S2") && r.t().item == 2);
         HifiDeviceFormat f; u64 frames;
         const u8* d = r.seg_data(0, &f, &frames);
-        // After the ramp out of item 1 (at most 220 frames), item 2 from its first frame, exact.
-        u64 start = 5000;
-        while (start < 5000 + 222 && !md5_is(d + start * 4, 64, 2, data(A)) && memcmp(d + start * 4, d, 256) != 0) ++start;
-        KV_CHECK(c, start <= 5000 + 220 && memcmp(d + start * 4, d, (usize)(frames - start) * 4) == 0);
+        // A next is a jump: item 1 fades out at once and item 2 fades in from its first
+        // frame (10 ms each, 441 frames), with less than a callback of silence between.
+        // After its fade in, item 2 is exact.
+        const u64 fade = 441;
+        u64 after = 5000;
+        while (after < 5000 + 2 * fade + 1024 && memcmp(d + after * 4, d + fade * 4, 256) != 0) ++after;
+        KV_CHECK(c, after <= 5000 + 2 * fade + 1024 && memcmp(d + after * 4, d + fade * 4, (usize)(frames - after) * 4) == 0);
 
         u64 at = r.t().position;
         r.say(PlayerStop{});
@@ -407,6 +434,82 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, r.play_until('Q', 0));
         KV_CHECK(c, log_is("S1 S2 S2 E2 S3 E3 Q0") && r.o().underruns == 0);
         r.stop();
+    }
+
+    // Seek, seek-by, previous and jump: each a jump in hifi. A seek lands on its frame,
+    // says PlayerSeeked (not a new start) when the frame is heard, and the position
+    // counts from it; seek-bys in one tick add up; previous restarts a row past three
+    // seconds and goes back a row within them; a jump plays the row asked for.
+    c.begin("player seek");
+    {
+        const char* L = "tone_16_2ch_8000_long.flac"; // 32000 frames at 8 kHz: 4 seconds
+        Pcm16 pcm = decode16(data(L));
+        KV_CHECK(c, pcm.frames == 32000);
+        const u64 fade = 80;                           // 10 ms at 8 kHz
+        Rig r;
+        KV_CHECK(c, r.start());
+        r.add(data(L)); r.add(data(L)); r.add(data(L));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(8000));
+        u32 still = 0;
+        while (r.t().position < 2000 && still < 1000) r.pace(&still);
+        KV_CHECK(c, log_is("S1") && r.t().item == 1);
+        u64 before = 0;
+        { HifiDeviceFormat f; r.seg_data(0, &f, &before); }
+        r.say(PlayerSeek{0, 20000});
+        r.step();
+        KV_CHECK(c, r.t().item == 0 && r.t().seek_item == 1 && r.t().seek_frame == 20000 && r.t().place == 1); // starting: the old audio on its way out
+        f64 until = time_now() + 2.0;
+        while (!heard('K', 1) && time_now() < until) r.pace(&still);
+        KV_CHECK(c, log_is("S1 K1") && ev('K', 1).frames == 20000 && r.t().seek_item == 0);
+        HifiDeviceFormat f; u64 frames = 0;
+        const u8* d = r.seg_data(0, &f, &frames);
+        u64 after = d ? find_run16(d, before, frames, pcm, 20000 + fade) : ~0ull;
+        KV_CHECK(c, after != ~0ull && memcmp(d + after * 4, pcm.s + (20000 + fade) * 2, (usize)(frames - after) * 4) == 0);
+        KV_CHECK(c, after != ~0ull && r.t().item == 1 && r.t().position == 20000 + fade + (frames - after)); // from the target, every frame heard since
+        // At once: the old audio as it was until the jump reached the device, then its
+        // fade, then nothing but silence until the new audio's fade in.
+        u64 cut = before;
+        while (d && cut < frames && memcmp(d + cut * 4, pcm.s + cut * 2, 4) == 0) ++cut;
+        u64 quiet_from = cut + fade, quiet_to = after - fade; // the new audio's fade in begins at quiet_to
+        KV_CHECK(c, after != ~0ull && quiet_from <= quiet_to + 1);
+        KV_CHECK(c, after != ~0ull && (quiet_from >= quiet_to || all_zero(d + quiet_from * 4, (usize)(quiet_to - quiet_from) * 4)));
+
+        // Two seek-bys in one tick: a quarter of a second each, from the same place.
+        u64 p0 = r.t().position;
+        r.say(PlayerSeekBy{0.25}); r.say(PlayerSeekBy{0.25});
+        r.step();
+        KV_CHECK(c, r.t().seek_frame == p0 + 4000);
+        until = time_now() + 2.0;
+        while (count_of('K', 1) < 2 && time_now() < until) r.pace(&still);
+        KV_CHECK(c, count_of('K', 1) == 2 && last_of('K', 1).frames == p0 + 4000);
+
+        // Past three seconds, previous is this row from its start; and within them,
+        // with no row before it, the same again.
+        r.say(PlayerSeek{0, 28000});
+        until = time_now() + 2.0;
+        while (count_of('K', 1) < 3 && time_now() < until) r.pace(&still);
+        r.say(PlayerPrevious{});
+        until = time_now() + 2.0;
+        while (count_of('K', 1) < 4 && time_now() < until) r.pace(&still);
+        KV_CHECK(c, count_of('K', 1) == 4 && last_of('K', 1).frames == 0 && count_of('S', 1) == 1);
+        // The next row, and back within its first three seconds: the row before, started again.
+        r.say(PlayerNext{});
+        until = time_now() + 2.0;
+        while (!heard('S', 2) && time_now() < until) r.pace(&still);
+        r.say(PlayerPrevious{});
+        until = time_now() + 2.0;
+        while (count_of('S', 1) < 2 && time_now() < until) r.pace(&still);
+        KV_CHECK(c, heard('S', 2) && count_of('S', 1) == 2 && r.t().item == 1 && r.item(2).state != (u8)PlayerItemState::Done);
+        // A jump to the third row: the first two are done, and it plays to the end.
+        r.say(PlayerJump{3});
+        until = time_now() + 5.0;
+        while (!heard('Q', 0) && time_now() < until) r.pace(&still);
+        KV_CHECK(c, heard('S', 3) && heard('E', 3) && !heard('E', 1) && !heard('E', 2) && heard('Q', 0));
+        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Done && r.item(2).state == (u8)PlayerItemState::Done);
+        KV_CHECK(c, r.o().underruns == 0);
+        r.stop();
+        mem_free(pcm.s);
     }
 
     // The command line says the same things: its commands emit the same events.

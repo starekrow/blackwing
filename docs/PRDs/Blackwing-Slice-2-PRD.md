@@ -460,3 +460,12 @@ window (a few pieces) cannot be played under. On the USB 2 flash drive under sli
 load: the first sound at 0.6 s (slice 1: 24 s), and at a skip every 9 seconds all ten
 tracks play, each heard 0.04 to 0.07 s after the skip, with no underrun.
 
+**Milestone 3, the jump** (Nov 23, 2026; BR7, BR8, BR11, BR17). As planned: two slots,
+each a ring; a jump fades the heard one out over 10 ms and joins the new one when it has
+50 ms, fading it in; the new render's marks are placed in the stream when the callback
+says where it joined. Seek, seek-by, previous, jump and next are jumps; stop is
+`hifi_flush`, now a jump to nothing. Found on the way: a race that could leave the render
+thread asleep with a source waiting for bytes, and two bugs in the player's place
+(seek-bys in one tick; a done row coming back). The aligned recut, the other kind of
+join, is milestone 4.
+

@@ -1,14 +1,27 @@
 // The audio path: the caller's side, the render thread and the device callback.
 //
+// A render is everything from decoder to ring: the sources being played in order, their
+// decoders, and a ring the render thread fills. There are two slots, each a ring and its
+// counters. One is heard: the callback takes from it. A jump (a seek, a skip, a flush)
+// starts a new render in the other slot, and the callback joins it: it fades the heard
+// ring out at once, then switches to the new one when it has a short lead, and fades
+// that in. The new render's frames count on in the same stream from wherever the
+// callback switched, so a mark the new render makes is held until that frame is known.
+//
 // What is shared, and how:
 //
 //   caller <-> render   `lock` guards the command list, the event list and the device
 //                       pointer. Neither side holds it while it decodes, sleeps or waits
 //                       for the other; the render thread waits on `wake` when idle.
-//   render  -> callback the ring's bytes and `write` (released after the bytes are in),
-//                       `end_frame` (the stream ends here for now: running dry there is
-//                       not an underrun), `skip_to` (drop everything before this frame).
-//   callback -> render  `read`, `silent_run`, `underruns`.
+//   render  -> callback each slot's bytes and `write` (released after the bytes are in),
+//                       its `end` (the stream ends here for now: running dry there is not
+//                       an underrun); `join_pending` (a render waits to be joined: its
+//                       epoch), with `join_slot` and `join_fade` ahead of it. The render
+//                       thread takes a request back with a compare-exchange, and the
+//                       callback takes it up with one, so exactly one of them wins.
+//   callback -> render  each slot's `read`; `heard_slot`, `joined` (the epoch it joined
+//                       last) and the joined slot's `base` (its frame 0 in the stream);
+//                       `read` (stream frames taken), `silent_run`, `underruns`.
 //   caller  -> callback `want_pause`.
 //   caller <-> render   `held`, under `lock`: the device is held. The render thread holds
 //                       it when there is nothing to play and the device has played out
@@ -17,9 +30,10 @@
 //                       decoder call is made. A caller that clears a piece's byte in a
 //                       source's map waits for it to move on before the piece goes.
 //
-// Stream frames are counted from zero and never reset: `write` and `read` are positions
-// in one endless stream, the ring holds the frames between them, and a mark (a source
-// starts here, ends here) is a stream frame. A change of device format keeps counting.
+// Stream frames are the frames the device has taken, counted from zero and never reset.
+// A slot counts its own frames from zero; the stream frame of one is the slot's `base`
+// plus it. A mark (a source starts here, ends here) is a stream frame. A change of device
+// format keeps counting.
 #include "korvid/hifi/hifi.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/format.h"
@@ -39,17 +53,21 @@ constexpr u64 kNever       = ~(u64)0;
 constexpr u32 kChunkFrames = 4096; // what the render thread decodes at a time
 constexpr u32 kMaxPending  = 256;  // commands, and events, in flight
 constexpr u32 kMaxStarved  = 16;   // sources told their bytes will not come, remembered
-constexpr f64 kWantNap     = 0.002; // how soon a decoder waiting for bytes is tried again
+constexpr f64 kWantNap     = 0.002; // how soon a decoder waiting for bytes, or a join, is looked at again
 
-enum class CmdKind : u8 { Add, Flush, Starve, Quit };
+enum class CmdKind : u8 { Add, Flush, Jump, Starve, Quit };
 struct Cmd { CmdKind kind = CmdKind::Add; HifiSource source; u32 epoch = 0; char reason[96] = ""; };
 
 // What the render thread tells the caller. A mark carries the stream frame it becomes
-// true at; the others are true at once.
+// true at; the others are true at once. A mark of a render not yet joined carries its
+// slot's frame instead, and the caller places it once the callback has said where that
+// slot's frame 0 fell.
 struct Note {
     HifiEvent event;
     u64       frame = 0;
     u32       epoch = 0;
+    bool      relative = false;
+    u32       slot = 0;
 };
 
 template <class T, u32 N> struct Fifo {
@@ -61,17 +79,26 @@ template <class T, u32 N> struct Fifo {
     void remove(u32 i) { for (u32 k = i; k + 1 < count; ++k) at(k) = at(k + 1); --count; }
 };
 
-// A source with its decoder open, or opening.
+// A source with its decoder open, or opening (and seeking to where it starts).
 struct Playing {
     HifiSource  src;
     void*       state   = nullptr;
     u8*         memory  = nullptr;
     DecoderInfo info;
-    bool        opening = false; // its decoder's open is waiting for bytes
+    bool        opening = false; // its decoder's open, or its seek, is waiting for bytes
     ByteRange   wanted;          // the last Want said for it, while it waits
 };
 
 struct Starved { u64 id = 0; char reason[96] = ""; };
+
+// A ring and its counters: one render's lead.
+struct Slot {
+    u8* data  = nullptr;           // ring_frames * frame_bytes; replaced only while no device is open
+    u64 write = 0;                 // atomic, render -> callback: frames written, from the slot's start
+    u64 end   = kNever;            // atomic, render -> callback: the slot's stream ends here for now
+    u64 read  = 0;                 // atomic, callback -> anyone: frames taken
+    u64 base  = 0;                 // atomic: the stream frame of the slot's frame 0, once it is heard
+};
 
 } // namespace
 
@@ -90,38 +117,45 @@ struct Hifi {
 
     // ---- the caller's alone ----
     Fifo<Note, kMaxPending> pending;   // marks not yet reached
-    u32 epoch         = 0;             // bumped by a flush; older marks are dropped
+    u32 epoch         = 0;             // bumped by a flush or a jump; older marks are dropped
     u64 heard         = 0;
     u32 seen_underruns = 0;
     u64 cur_source    = 0;
     u64 cur_frame     = 0;             // the stream frame the source being heard started at
+    u64 cur_first     = 0;             // the frame of it heard there
     OsThread thread;
 
-    // ---- render -> callback ----
-    u8* ring         = nullptr;        // ring_frames * frame_bytes; replaced only while no device is open
-    u32 ring_frames  = 0;
-    u32 frame_bytes  = 0;
-    u32 ramp_frames  = 1;
-    u32 start_frames = 1;
-    u64 write        = 0;              // atomic
-    u64 end_frame    = kNever;         // atomic
-    u64 skip_to      = 0;              // atomic
+    // ---- render <-> callback ----
+    Slot slot[2];
+    u32  ring_frames  = 0;
+    u32  frame_bytes  = 0;
+    u32  ramp_frames  = 1;
+    u32  fade_frames  = 1;             // a jump's fade, out and in
+    u32  start_frames = 1;
+    u32  join_frames  = 1;             // the lead a jump waits for before it is joined
+    u32  heard_slot   = 0;             // atomic: the callback's while a device is open
+    u32  join_pending = 0;             // atomic: the epoch of a render waiting to be joined; 0: none
+    u32  join_slot    = 0;             // atomic: its slot, written before join_pending
+    u32  join_fade    = 0;             // atomic: 1 to fade it in (a jump), 0 for a clean start (a flush)
+    u32  joined       = 0;             // atomic: the last epoch the callback joined
 
     // ---- callback -> anyone ----
-    u64 read         = 0;              // atomic
+    u64 read         = 0;              // atomic: stream frames taken
     u64 silent_run   = 0;              // atomic: frames of silence the callback has written since its last real frame
     u32 underruns    = 0;              // atomic
 
     // ---- caller -> callback, render ----
     u32 want_pause   = 0;              // atomic
-    u32 flushes_done = 0;              // atomic: the last flush the render thread has carried out
+    u32 flushes_done = 0;              // atomic: the last flush or jump the render thread has carried out
     u64 readers      = 0;              // atomic: odd while the render thread is in a step
     bool held        = false;          // under `lock`: the device is held (hifi_device_hold)
 
     // ---- the callback's alone ----
-    bool running = false;              // taking from the lead
-    bool fresh   = true;               // the next start is a clean one: full gain from its first frame
-    f32  gain    = 1.0f;
+    bool running  = false;             // taking from the lead
+    bool fresh    = true;              // the next start is a clean one: full gain from its first frame
+    bool by_join  = false;             // the next start is a joined jump's: at once, fading in
+    bool fading   = false;             // the ramp under way is a jump's fade
+    f32  gain     = 1.0f;
 
     // ---- the render thread's alone ----
     Fifo<HifiSource, kMaxPending> queue;
@@ -132,10 +166,12 @@ struct Hifi {
     bool         cur_done   = false;   // the decoder has given its last
     DecodeStatus cur_status = DecodeStatus::End;
     char         cur_reason[96] = "";
-    bool         cur_marked = false;   // its Started mark is out
+    bool         cur_marked = false;   // its Started (or Seeked) mark is out
     bool         draining   = false;   // waiting for the lead to play out before the device changes
     u32          playout_waits = 0;    // looks, since there was work, for the device to have played out
     u32          render_epoch = 0;
+    u32          wslot = 0;            // the slot this render writes
+    u32          pending_epoch = 0;    // this render waits to be joined: its marks are its slot's frames
     Starved      starved[kMaxStarved]; // sources whose bytes will not come
     u32          nstarved = 0;
     i32*         scratch = nullptr;    // kChunkFrames * 8 decoded samples
@@ -150,7 +186,7 @@ namespace {
 template <class T> inline T scaled(T v, f32 g) { return (T)llrint((f64)v * (f64)g); }
 template <> inline f32 scaled<f32>(f32 v, f32 g) { return v * g; }
 
-// One frame from the ring to `out`, times `g`. At full gain it is a copy: the ramp's
+// One frame from a ring to `out`, times `g`. At full gain it is a copy: the ramp's
 // first and last frames are exact too.
 inline void copy_scaled(const Hifi& h, const u8* src, u8* out, f32 g) {
     u32 channels = h.format.channels;
@@ -167,47 +203,74 @@ inline void copy_scaled(const Hifi& h, const u8* src, u8* out, f32 g) {
     }
 }
 
-// The device's callback, on its realtime thread. Takes from the lead; writes silence when
-// there is nothing to take or it is holding. Its only arithmetic is the ramp.
+// Switches to the render waiting to be joined, if it has its short lead (or all it will
+// have), and the request is still standing. Nothing may be sounding: a jump has faded
+// the heard ring out first. Its frame 0 is stream frame `stream`.
+bool try_join(Hifi& h, u32 epoch, u64 stream) {
+    u32 b = atomic_load(&h.join_slot, MO_RELAXED);
+    Slot& s = h.slot[b];
+    u64 w = atomic_load(&s.write, MO_ACQUIRE), endf = atomic_load(&s.end, MO_ACQUIRE);
+    if (w < h.join_frames && w != endf) return false;
+    u32 fade = atomic_load(&h.join_fade, MO_RELAXED);
+    u32 expect = epoch;
+    if (!atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) return false; // taken back
+    atomic_store(&s.base, stream, MO_RELEASE);
+    atomic_store(&h.heard_slot, b, MO_RELEASE);
+    atomic_store(&h.joined, epoch, MO_RELEASE);
+    h.by_join = fade != 0;
+    h.fresh   = fade == 0;
+    return true;
+}
+
+// The device's callback, on its realtime thread. Takes from the heard ring; writes
+// silence when there is nothing to take or it is holding. Its only arithmetic is the
+// ramp and the fade.
 void hifi_callback(void* user, void* out_v, u32 frames) {
     Hifi& h = *(Hifi*)user;
     u8*   out = (u8*)out_v;
     const u32 fb = h.frame_bytes;
-    const u64 w    = atomic_load(&h.write, MO_ACQUIRE);
-    const u64 endf = atomic_load(&h.end_frame, MO_ACQUIRE);
-    const u64 skip = atomic_load(&h.skip_to, MO_ACQUIRE);
     const bool pause = atomic_load(&h.want_pause, MO_RELAXED) != 0;
-    u64 r = h.read; // only this thread writes it
+    u32 pend = atomic_load(&h.join_pending, MO_ACQUIRE);
+    u64 stream = atomic_load(&h.read, MO_RELAXED); // only this thread writes it
     u32 produced = 0;
 
-    // Up to three passes: playing; then, if that ramped down for a flush, starting what
-    // was put in the lead behind it, in this same callback.
-    for (u32 pass = 0; pass < 3 && produced < frames; ++pass) {
+    // A few passes: playing; then, if that faded out for a jump, the joined render, in
+    // this same callback when it is ready.
+    for (u32 pass = 0; pass < 4 && produced < frames; ++pass) {
+        Slot& s = h.slot[atomic_load(&h.heard_slot, MO_RELAXED)];
+        u64 r = atomic_load(&s.read, MO_RELAXED);
+        u64 w    = atomic_load(&s.write, MO_ACQUIRE);
+        u64 endf = atomic_load(&s.end, MO_ACQUIRE);
         if (!h.running) {
-            if (skip > r) { r = skip < w ? skip : w; h.fresh = true; } // nothing sounding: step over what was flushed
+            if (pend && try_join(h, pend, stream)) { pend = 0; continue; } // nothing sounding: switch now
             u64 ready = w - r;
-            if (pause || ready == 0 || (ready < h.start_frames && w != endf)) break;
+            u64 need  = h.by_join ? h.join_frames : h.start_frames;
+            if (pause || pend || ready == 0 || (ready < need && w != endf)) break;
             h.running = true;
+            h.fading  = h.by_join;
             h.gain    = h.fresh ? 1.0f : 0.0f;
             h.fresh   = false;
+            h.by_join = false;
         }
         const u64  avail  = w - r;
-        const bool down   = pause || skip > r;     // told to stop: ramp to silence
+        const bool down   = pause || pend != 0;    // told to stop, or a jump waits: to silence
         const bool more   = (w != endf);           // the stream goes on past what is here
         const u32  want   = frames - produced;
         const u32  take   = want < avail ? want : (u32)avail;
-        const u32  ramp   = h.ramp_frames;
+        if (pend && atomic_load(&h.join_fade, MO_RELAXED)) h.fading = true; // a jump's fade out, at once; a flush ramps
+        const u32  ramp   = h.fading ? h.fade_frames : h.ramp_frames;
         const f32  step   = 1.0f / (f32)ramp;
-        const bool nearly_dry = more && (avail - take) < ramp;
+        const bool nearly_dry = more && (avail - take) < h.ramp_frames;
         u8* dst = out + (usize)produced * fb;
         u32 took = 0;
         if (h.gain == 1.0f && !down && !nearly_dry) {
             // The whole of normal playback: the ring's bytes, untouched.
             u32 at    = (u32)(r % h.ring_frames);
             u32 first = h.ring_frames - at < take ? h.ring_frames - at : take;
-            memcpy(dst, h.ring + (usize)at * fb, (usize)first * fb);
-            memcpy(dst + (usize)first * fb, h.ring, (usize)(take - first) * fb);
+            memcpy(dst, s.data + (usize)at * fb, (usize)first * fb);
+            memcpy(dst + (usize)first * fb, s.data, (usize)(take - first) * fb);
             took = take;
+            h.fading = false;
         } else {
             for (; took < take; ++took) {
                 if (down) {
@@ -216,19 +279,21 @@ void hifi_callback(void* user, void* out_v, u32 frames) {
                 } else {
                     // Running dry with more expected: down to silence by the last frame there is.
                     f32 limit = 1.0f;
-                    if (more) { u64 left = avail - took - 1; if (left < ramp) limit = (f32)left * step; }
+                    if (more) { u64 left = avail - took - 1; if (left < h.ramp_frames) limit = (f32)left / (f32)h.ramp_frames; }
                     f32 g = h.gain + step;
                     h.gain = g < limit ? g : limit;
+                    if (h.gain >= 1.0f) h.fading = false;
                 }
                 u32 at = (u32)((r + took) % h.ring_frames);
-                copy_scaled(h, h.ring + (usize)at * fb, dst + (usize)took * fb, h.gain);
+                copy_scaled(h, s.data + (usize)at * fb, dst + (usize)took * fb, h.gain);
             }
         }
         r += took;
         produced += took;
+        stream += took;
+        atomic_store(&s.read, r, MO_RELEASE);
         if (down && h.gain <= 0.0f) {
-            h.running = false;                      // and round again: a flush may have new audio behind it
-            if (skip > r) { r = skip < w ? skip : w; h.fresh = true; }
+            h.running = false; // and round again: a jump may be ready behind it
             continue;
         }
         if (r == w) {
@@ -242,23 +307,51 @@ void hifi_callback(void* user, void* out_v, u32 frames) {
     u64 quiet = frames - produced;
     if (produced == 0) quiet += atomic_load(&h.silent_run, MO_RELAXED);
     atomic_store(&h.silent_run, quiet, MO_RELEASE);
-    atomic_store(&h.read, r, MO_RELEASE);
+    atomic_store(&h.read, stream, MO_RELEASE);
 }
 
 // ---- the render thread ----------------------------------------------------------------
 
-void note(Hifi& h, HifiEventKind kind, u64 source, u64 frame, const char* reason = "") {
+void push_note(Hifi& h, const Note& n) {
+    os_mutex_lock(&h.lock);
+    if (!h.notes.push(n)) KV_ERROR("hifi", "the event list is full: an event for source %llu is lost", (unsigned long long)n.event.source);
+    os_mutex_unlock(&h.lock);
+}
+
+// A note that is true at once.
+void note(Hifi& h, HifiEventKind kind, u64 source, const char* reason = "") {
     Note n;
     n.event.kind   = kind;
     n.event.source = source;
-    n.frame = frame;
     n.epoch = h.render_epoch;
     format(n.event.reason, sizeof n.event.reason, "%s", reason);
-    if (kind == HifiEventKind::Started) n.event.info = h.cur.info;
-    if (kind == HifiEventKind::Ended)   { n.event.info = h.cur.info; n.event.status = h.cur_status; n.event.frames = h.cur_frames; }
-    os_mutex_lock(&h.lock);
-    if (!h.notes.push(n)) KV_ERROR("hifi", "the event list is full: an event for source %llu is lost", (unsigned long long)source);
-    os_mutex_unlock(&h.lock);
+    push_note(h, n);
+}
+
+// A mark: true when the frame `at` of this render's slot is heard. While the render
+// waits to be joined, the slot's place in the stream is not known: the caller places it.
+void mark(Hifi& h, HifiEventKind kind, u64 at, const char* reason = "") {
+    Note n;
+    n.event.kind   = kind;
+    n.event.source = h.cur.src.id;
+    n.event.info   = h.cur.info;
+    n.epoch = h.render_epoch;
+    format(n.event.reason, sizeof n.event.reason, "%s", reason);
+    if (kind == HifiEventKind::Ended) { n.event.status = h.cur_status; n.event.frames = h.cur_frames; }
+    else                              n.event.frames = h.cur.src.start;
+    if (h.pending_epoch) {
+        n.frame = at;
+        n.relative = true;
+        n.slot = h.wslot;
+    } else {
+        n.frame = atomic_load(&h.slot[h.wslot].base, MO_ACQUIRE) + at;
+    }
+    push_note(h, n);
+}
+
+// Whether the callback has joined this render: from then on its slot is the heard one.
+void check_joined(Hifi& h) {
+    if (h.pending_epoch && atomic_load(&h.joined, MO_ACQUIRE) == h.pending_epoch) h.pending_epoch = 0;
 }
 
 // Forgets that a source was starved, once it is gone.
@@ -280,16 +373,14 @@ void want(Hifi& h, Playing& p, ByteRange need) {
     n.event.source = p.src.id;
     n.event.need   = need;
     n.epoch = h.render_epoch;
-    os_mutex_lock(&h.lock);
-    if (!h.notes.push(n)) KV_ERROR("hifi", "the event list is full: a want for source %llu is lost", (unsigned long long)p.src.id);
-    os_mutex_unlock(&h.lock);
+    push_note(h, n);
 }
 
 // Lets go of a source: its decoder closed, its memory freed, Released sent.
 void release(Hifi& h, Playing& p) {
     if (p.state) p.src.decoder->close(p.state);
     mem_free(p.memory);
-    note(h, HifiEventKind::Released, p.src.id, 0);
+    note(h, HifiEventKind::Released, p.src.id);
     forget_starved(h, p.src.id);
     p = Playing{};
 }
@@ -305,8 +396,9 @@ void release_nxt(Hifi& h) {
     h.have_nxt = false;
 }
 
-// Opens the next source that will open, as h.nxt; the ones that will not, fail here. One
-// whose open waits for bytes stays h.nxt, opening, and is tried again on the next call.
+// Opens the next source that will open, as h.nxt, and seeks it to where it starts; the
+// ones that will not, fail here. One whose open or seek waits for bytes stays h.nxt,
+// opening, and is tried again on the next call.
 void prepare_next(Hifi& h) {
     for (;;) {
         if (!h.have_nxt) {
@@ -322,7 +414,7 @@ void prepare_next(Hifi& h) {
         if (!p.opening) return;
         const char* why = "";
         if (!p.src.decoder) why = "no decoder takes this kind of file";
-        else {
+        else if (!p.state) {
             DecoderOpen o = p.src.decoder->open(p.src.file, Span<u8>(p.memory, p.src.decoder->memory_bytes));
             if (o.need.len) {
                 const char* dead = starved_reason(h, p.src.id);
@@ -337,7 +429,17 @@ void prepare_next(Hifi& h) {
             if (o.state && (f.channels == 0 || f.channels > 8 || f.rate == 0 || f.bits == 0 || f.bits > 32))
                 why = "the file describes a format that cannot be played";
         }
-        if (why[0]) { note(h, HifiEventKind::Failed, p.src.id, 0, why); release(h, p); h.have_nxt = false; continue; }
+        if (!why[0] && p.state && p.src.start) {
+            SeekResult r = p.src.decoder->seek(p.state, p.src.start);
+            if (r.status == SeekStatus::Wait) {
+                const char* dead = starved_reason(h, p.src.id);
+                if (!dead) { want(h, p, r.need); return; } // still seeking
+                why = dead;
+            } else if (r.status == SeekStatus::Failed) {
+                why = r.reason;
+            }
+        }
+        if (why[0]) { note(h, HifiEventKind::Failed, p.src.id, why); release(h, p); h.have_nxt = false; continue; }
         p.opening = false;
         p.wanted = ByteRange{};
         return;
@@ -353,6 +455,7 @@ void close_device(Hifi& h) {
     if (d) hifi_device_close(d); // no callback runs after this
     h.running = false;           // the callback's, and it is gone
     h.fresh   = true;
+    h.by_join = false;
     h.gain    = 1.0f;
 }
 
@@ -365,7 +468,7 @@ bool device_fits(const Hifi& h, const AudioFormat& f) {
     return h.device && h.format.rate == f.rate && h.format.channels == f.channels && f.bits <= hifi_sample_bits(h.format.sample);
 }
 
-// Opens the device for the current source's format, with a ring to match. False, with
+// Opens the device for the current source's format, with rings to match. False, with
 // the reason, when it cannot.
 bool open_device(Hifi& h, const char** reason) {
     const AudioFormat& f = h.cur.info.format;
@@ -387,20 +490,34 @@ bool open_device(Hifi& h, const char** reason) {
         *reason = "the device's samples are narrower than the file's, and there is no dither yet";
         return false;
     }
-    // No callback is running: the ring and what describes it can change.
-    mem_free(h.ring);
+    // No callback is running: the rings and what describes them can change. What was in
+    // them and never taken is gone with them, and the stream goes on from where it was;
+    // this render's slot is the heard one, from the stream frame the device is at.
     h.frame_bytes  = hifi_frame_bytes(o.format);
     u64 want = (u64)(h.config.lead_seconds * (f64)o.format.rate);
     h.ring_frames  = (u32)(want < 2 * kChunkFrames ? 2 * kChunkFrames : want);
-    h.ring         = (u8*)mem_alloc((usize)h.ring_frames * h.frame_bytes);
-    u32 ramp  = (u32)(h.config.ramp_seconds * (f64)o.format.rate);
-    u32 start = (u32)(h.config.start_seconds * (f64)o.format.rate);
-    h.ramp_frames  = ramp ? ramp : 1;
-    h.start_frames = start ? (start < h.ring_frames ? start : h.ring_frames) : 1;
-    // The stream goes on from where it was; what was never taken is gone with the old ring.
-    u64 w = atomic_load(&h.write, MO_RELAXED);
-    atomic_store(&h.read, w, MO_RELEASE);
+    for (Slot& s : h.slot) {
+        mem_free(s.data);
+        s.data = (u8*)mem_alloc((usize)h.ring_frames * h.frame_bytes);
+    }
+    auto frames_of = [&](f64 seconds) { u32 n = (u32)(seconds * (f64)o.format.rate); return n ? n : 1u; };
+    h.ramp_frames  = frames_of(h.config.ramp_seconds);
+    h.fade_frames  = frames_of(h.config.fade_seconds);
+    u32 start = frames_of(h.config.start_seconds), join = frames_of(h.config.join_seconds);
+    h.start_frames = start < h.ring_frames ? start : h.ring_frames;
+    h.join_frames  = join < h.ring_frames ? join : h.ring_frames;
+    Slot& s = h.slot[h.wslot];
+    u64 w = atomic_load(&s.write, MO_RELAXED);
+    atomic_store(&s.base, atomic_load(&h.read, MO_RELAXED) - w, MO_RELEASE); // the frames this render has written still count from where they would have
+    atomic_store(&s.read, w, MO_RELEASE);
+    atomic_store(&h.heard_slot, h.wslot, MO_RELEASE);
+    atomic_store(&h.join_pending, 0u, MO_RELEASE);
     atomic_store(&h.silent_run, (u64)0, MO_RELEASE);
+    check_joined(h);
+    if (h.pending_epoch) { // a jump that was never joined: there is no callback to join it, so it is the heard render now
+        atomic_store(&h.joined, h.pending_epoch, MO_RELEASE);
+        check_joined(h);
+    }
     os_mutex_lock(&h.lock);
     h.device = o.device;
     h.held   = false;
@@ -412,11 +529,12 @@ bool open_device(Hifi& h, const char** reason) {
     return true;
 }
 
-// Scratch samples (i32 at the source's depth) into the ring at stream frame `at`.
+// Scratch samples (i32 at the source's depth) into this render's ring at its frame `at`.
 void convert_in(Hifi& h, const i32* src, u64 at, u32 frames) {
     const u32 channels = h.format.channels, bits = h.cur.info.format.bits;
+    u8* ring = h.slot[h.wslot].data;
     for (u32 i = 0; i < frames; ++i) {
-        u8* dst = h.ring + (usize)((at + i) % h.ring_frames) * h.frame_bytes;
+        u8* dst = ring + (usize)((at + i) % h.ring_frames) * h.frame_bytes;
         const i32* s = src + (usize)i * channels;
         switch (h.format.sample) {
         case HifiSampleFormat::S16: { i16* o = (i16*)dst; for (u32 c = 0; c < channels; ++c) o[c] = (i16)((u32)s[c] << (16 - bits)); } break;
@@ -428,12 +546,52 @@ void convert_in(Hifi& h, const i32* src, u64 at, u32 frames) {
     }
 }
 
-// The current source cannot be played. If nothing follows it, the stream ends where it
-// is: the callback was told more was coming, and now it is not.
+// The current source cannot be played. If nothing follows it, this render's stream ends
+// where it is: the callback was told more was coming, and now it is not.
 void fail_cur(Hifi& h, const char* why) {
-    note(h, HifiEventKind::Failed, h.cur.src.id, 0, why);
+    note(h, HifiEventKind::Failed, h.cur.src.id, why);
     release_cur(h);
-    if (h.queue.count == 0 && !h.have_nxt) atomic_store(&h.end_frame, atomic_load(&h.write, MO_RELAXED), MO_RELEASE);
+    Slot& s = h.slot[h.wslot];
+    if (h.queue.count == 0 && !h.have_nxt) atomic_store(&s.end, atomic_load(&s.write, MO_RELAXED), MO_RELEASE);
+}
+
+// A flush or a jump: everything this render has goes, and a new one starts, empty, in a
+// slot the callback is not reading. With a device open, the callback is asked to join
+// it; a request still waiting from an earlier jump is taken back first, and its slot
+// used again. With none open, there is nothing to join: the new render is the heard one.
+void start_render(Hifi& h, u32 epoch, bool fade) {
+    release_cur(h);
+    release_nxt(h);
+    HifiSource s;
+    while (h.queue.pop(&s)) { note(h, HifiEventKind::Released, s.id); forget_starved(h, s.id); }
+    h.draining = false;
+    h.render_epoch = epoch;
+    if (!h.device) {
+        Slot& w = h.slot[h.wslot];
+        atomic_store(&w.base, atomic_load(&h.read, MO_RELAXED), MO_RELEASE);
+        atomic_store(&w.write, (u64)0, MO_RELEASE);
+        atomic_store(&w.read, (u64)0, MO_RELEASE);
+        atomic_store(&w.end, (u64)0, MO_RELEASE);
+        atomic_store(&h.heard_slot, h.wslot, MO_RELEASE);
+        h.pending_epoch = 0;
+    } else {
+        u32 b = h.wslot ^ 1u;  // the heard slot is this render's: the other is free
+        if (h.pending_epoch) {
+            u32 expect = h.pending_epoch;
+            if (atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) b = h.wslot; // taken back: its slot is free again
+            // else the callback joined it just now: it is heard, and the other slot is free
+        }
+        Slot& w = h.slot[b];
+        atomic_store(&w.write, (u64)0, MO_RELEASE);
+        atomic_store(&w.read, (u64)0, MO_RELEASE);
+        atomic_store(&w.end, (u64)0, MO_RELEASE);   // nothing yet, and nothing expected until a source says
+        atomic_store(&h.join_slot, b, MO_RELAXED);
+        atomic_store(&h.join_fade, fade ? 1u : 0u, MO_RELAXED);
+        h.wslot = b;
+        h.pending_epoch = epoch;
+        atomic_store(&h.join_pending, epoch, MO_RELEASE);
+    }
+    atomic_store(&h.flushes_done, epoch, MO_RELEASE);
 }
 
 // Takes the commands waiting. Returns false on Quit.
@@ -458,17 +616,8 @@ bool take_commands(Hifi& h) {
                 format(h.starved[h.nstarved].reason, sizeof h.starved[0].reason, "%s", c.reason);
                 ++h.nstarved;
             }
-        } else { // Flush: everything queued and everything in the lead goes
-            release_cur(h);
-            release_nxt(h);
-            HifiSource s;
-            while (h.queue.pop(&s)) { note(h, HifiEventKind::Released, s.id, 0); forget_starved(h, s.id); }
-            h.draining = false;
-            h.render_epoch = c.epoch;
-            u64 w = atomic_load(&h.write, MO_RELAXED);
-            atomic_store(&h.end_frame, w, MO_RELEASE);   // nothing more is expected...
-            atomic_store(&h.skip_to, w, MO_RELEASE);     // ...and what is there is to be stepped over
-            atomic_store(&h.flushes_done, c.epoch, MO_RELEASE);
+        } else { // Flush or Jump: everything this render has goes, and a new one starts
+            start_render(h, c.epoch, c.kind == CmdKind::Jump);
         }
     }
 }
@@ -492,15 +641,18 @@ void release_hold(Hifi& h) {
 
 // With nothing to do: holds the device once it has played out what it was given (all of
 // it, or up to the pause), followed by its delay's worth of silence. True when it is held,
-// or there is no device: the render thread may then wait for a command.
+// or there is no device: the render thread may then wait for a command. A join waiting
+// keeps the device going: the callback must take it up.
 bool try_hold(Hifi& h) {
     os_mutex_lock(&h.lock);
     bool done = !h.device || h.held;
     if (!done) {
         u32 delay = hifi_device_delay(h.device);
         bool paused = atomic_load(&h.want_pause, MO_RELAXED) != 0;
-        bool empty  = atomic_load(&h.read, MO_ACQUIRE) == atomic_load(&h.write, MO_RELAXED);
-        if ((paused || empty) && atomic_load(&h.silent_run, MO_ACQUIRE) >= (delay ? delay : 1)) {
+        const Slot& s = h.slot[atomic_load(&h.heard_slot, MO_ACQUIRE)];
+        bool empty  = atomic_load(&s.read, MO_ACQUIRE) == atomic_load(&s.write, MO_ACQUIRE);
+        bool joining = atomic_load(&h.join_pending, MO_ACQUIRE) != 0;
+        if ((paused || (empty && !joining)) && atomic_load(&h.silent_run, MO_ACQUIRE) >= (delay ? delay : 1)) {
             hifi_device_hold(h.device, true);
             h.held = true;
             done = true;
@@ -513,14 +665,16 @@ bool try_hold(Hifi& h) {
 // One step of work. Returns how long to sleep before the next: 0 to go straight on, a
 // negative number to wait for a command.
 f64 render_step(Hifi& h) {
+    check_joined(h);
+    Slot& s = h.slot[h.wslot];
     if (!h.have_cur) {
         prepare_next(h);
         if (!h.have_nxt || h.nxt.opening) {
             // Nothing to play. If sources failed just now, the stream ends where it is.
-            atomic_store(&h.end_frame, atomic_load(&h.write, MO_RELAXED), MO_RELEASE);
-            if (!h.have_nxt) return -1.0;
-            try_hold(h); // its bytes are on their way: the device need not play silence meanwhile
-            return kWantNap;
+            atomic_store(&s.end, atomic_load(&s.write, MO_RELAXED), MO_RELEASE);
+            if (h.have_nxt) { try_hold(h); return kWantNap; } // its bytes are on their way: look again shortly, the device held meanwhile
+            if (h.pending_epoch) return try_hold(h) ? -1.0 : kWantNap; // a flush the callback is to take up; held, it will when it is let go
+            return -1.0;
         }
         h.cur = h.nxt; h.nxt = Playing{};
         h.have_cur = true; h.have_nxt = false;
@@ -530,11 +684,13 @@ f64 render_step(Hifi& h) {
     }
 
     if (h.draining) {
-        // The device must change. Wait for what is in the lead to be taken and for the
-        // device to have played it out (its delay's worth of silence since), then close it.
-        u64 w = atomic_load(&h.write, MO_RELAXED);
-        atomic_store(&h.end_frame, w, MO_RELEASE);
-        bool empty = atomic_load(&h.read, MO_ACQUIRE) == w;
+        // The device must change. Wait for what is in the lead to be taken (a jump to be
+        // joined first) and for the device to have played it out (its delay's worth of
+        // silence since), then close it.
+        u64 w = atomic_load(&s.write, MO_RELAXED);
+        atomic_store(&s.end, w, MO_RELEASE);
+        if (h.pending_epoch) { release_hold(h); return kWantNap; }
+        bool empty = atomic_load(&s.read, MO_ACQUIRE) == w;
         if (!empty || atomic_load(&h.silent_run, MO_ACQUIRE) < hifi_device_delay(h.device))
             return atomic_load(&h.want_pause, MO_RELAXED) ? -1.0 : 0.002;
         close_device(h);
@@ -568,15 +724,18 @@ f64 render_step(Hifi& h) {
         }
     }
 
-    u64 w = atomic_load(&h.write, MO_RELAXED);
+    u64 w = atomic_load(&s.write, MO_RELAXED);
     u32 left = h.scratch_frames - h.scratch_at;
     if (left) {
-        u64 used = w - atomic_load(&h.read, MO_ACQUIRE);
+        u64 used = w - atomic_load(&s.read, MO_ACQUIRE);
         u32 room = h.ring_frames - (u32)used;
         if (room == 0) return atomic_load(&h.want_pause, MO_RELAXED) ? -1.0 : 0.005; // the lead is full
         u32 n = left < room ? left : room;
         convert_in(h, h.scratch + (usize)h.scratch_at * h.format.channels, w, n);
-        if (!h.cur_marked) { note(h, HifiEventKind::Started, h.cur.src.id, w); h.cur_marked = true; }
+        if (!h.cur_marked) {
+            mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
+            h.cur_marked = true;
+        }
         // If these are the stream's last frames for now, say so before they can be seen:
         // the callback must not take the end of the music for a lead running dry.
         // The stream goes on only if another source is ready that this device can take:
@@ -588,19 +747,19 @@ f64 render_step(Hifi& h) {
             prepare_next(h);
             // The next source is still waiting for its first bytes: hold these frames
             // back while the lead lasts, so the stream can go on into it without a gap.
-            if (h.have_nxt && h.nxt.opening && w - atomic_load(&h.read, MO_ACQUIRE) > h.start_frames && !atomic_load(&h.want_pause, MO_RELAXED))
+            if (h.have_nxt && h.nxt.opening && w - atomic_load(&s.read, MO_ACQUIRE) > h.start_frames && !atomic_load(&h.want_pause, MO_RELAXED))
                 return kWantNap;
         }
         bool goes_on = !last || (h.have_nxt && !h.nxt.opening && device_fits(h, h.nxt.info.format));
-        atomic_store(&h.end_frame, goes_on ? kNever : w + n, MO_RELEASE);
-        atomic_store(&h.write, w + n, MO_RELEASE);
+        atomic_store(&s.end, goes_on ? kNever : w + n, MO_RELEASE);
+        atomic_store(&s.write, w + n, MO_RELEASE);
         if (h.device_bits < h.cur.info.format.bits) { os_mutex_lock(&h.lock); h.device_bits = h.cur.info.format.bits; os_mutex_unlock(&h.lock); }
         h.scratch_at += n;
         w += n;
     }
     if (h.cur_done && h.scratch_at == h.scratch_frames) {
-        if (!h.cur_marked) { note(h, HifiEventKind::Started, h.cur.src.id, w); h.cur_marked = true; } // a source with no frames at all
-        note(h, HifiEventKind::Ended, h.cur.src.id, w, h.cur_reason);
+        if (!h.cur_marked) { mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w); h.cur_marked = true; } // a source with no frames at all
+        mark(h, HifiEventKind::Ended, w, h.cur_reason);
         release_cur(h);
     }
     return 0.0;
@@ -674,7 +833,7 @@ void hifi_destroy(Hifi* h) {
     os_thread_join(&h->thread);
     os_cond_destroy(&h->wake);
     os_mutex_destroy(&h->lock);
-    mem_free(h->ring);
+    for (Slot& s : h->slot) mem_free(s.data);
     mem_free(h->scratch);
     mem_free(h);
 }
@@ -694,13 +853,24 @@ void hifi_play(Hifi* h) {
     os_mutex_unlock(&h->lock);
 }
 
-void hifi_flush(Hifi* h) {
+// A flush and a jump, from the caller: the marks not yet reached never will be, and
+// nothing is being heard until the new render's first mark is.
+void begin_render(Hifi* h, CmdKind kind, const HifiSource* sources, u32 n) {
     ++h->epoch;
-    h->pending.count = 0; // marks not yet reached never will be
+    h->pending.count = 0;
     h->cur_source = 0;
-    Cmd c; c.kind = CmdKind::Flush; c.epoch = h->epoch;
-    send(*h, c);
+    os_mutex_lock(&h->lock);
+    Cmd c; c.kind = kind; c.epoch = h->epoch;
+    bool ok = h->cmds.push(c);
+    for (u32 i = 0; i < n && ok; ++i) { Cmd a; a.kind = CmdKind::Add; a.source = sources[i]; ok = h->cmds.push(a); }
+    if (!ok) KV_ERROR("hifi", "the command list is full: a command is lost");
+    os_cond_signal(&h->wake);
+    os_mutex_unlock(&h->lock);
 }
+
+void hifi_flush(Hifi* h) { begin_render(h, CmdKind::Flush, nullptr, 0); }
+
+void hifi_jump(Hifi* h, const HifiSource* sources, u32 n) { begin_render(h, CmdKind::Jump, sources, n); }
 
 void hifi_starve(Hifi* h, u64 id, const char* reason) {
     Cmd c; c.kind = CmdKind::Starve; c.source.id = id;
@@ -723,7 +893,7 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
     u32 delay = h->device ? hifi_device_delay(h->device) : 0;
     while (h->notes.count) {
         Note& x = h->notes.at(0);
-        bool mark = x.event.kind == HifiEventKind::Started || x.event.kind == HifiEventKind::Ended;
+        bool mark = x.event.kind == HifiEventKind::Started || x.event.kind == HifiEventKind::Seeked || x.event.kind == HifiEventKind::Ended;
         if (mark) {
             if (x.epoch == h->epoch && !h->pending.push(x)) break; // full: leave it for the next poll
         } else {
@@ -744,9 +914,15 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
 
     while (h->pending.count && n < cap) {
         Note& x = h->pending.at(0);
-        bool reached = x.event.kind == HifiEventKind::Started ? h->heard > x.frame : h->heard >= x.frame;
+        if (x.relative) {
+            if (atomic_load(&h->joined, MO_ACQUIRE) != x.epoch) break; // its place in the stream is not known yet
+            x.frame += atomic_load(&h->slot[x.slot].base, MO_ACQUIRE);
+            x.relative = false;
+        }
+        bool start = x.event.kind != HifiEventKind::Ended;
+        bool reached = start ? h->heard > x.frame : h->heard >= x.frame;
         if (!reached) break;
-        if (x.event.kind == HifiEventKind::Started) { h->cur_source = x.event.source; h->cur_frame = x.frame; }
+        if (start) { h->cur_source = x.event.source; h->cur_frame = x.frame; h->cur_first = x.event.frames; }
         else if (h->cur_source == x.event.source) h->cur_source = 0;
         out[n++] = x.event;
         h->pending.remove(0);
@@ -772,13 +948,19 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     os_mutex_unlock(&h->lock);
     s.flushing = atomic_load(&h->flushes_done, MO_ACQUIRE) != h->epoch;
     s.paused  = atomic_load(&h->want_pause, MO_RELAXED) != 0;
+    s.joining = atomic_load(&h->join_pending, MO_ACQUIRE) != 0;
     s.taken   = atomic_load(&h->read, MO_ACQUIRE);
-    s.written = atomic_load(&h->write, MO_ACQUIRE);
-    s.lead_frames = s.written > s.taken ? (u32)(s.written - s.taken) : 0;
+    const Slot& hs = h->slot[atomic_load(&h->heard_slot, MO_ACQUIRE)];
+    s.written = atomic_load(&hs.base, MO_ACQUIRE) + atomic_load(&hs.write, MO_ACQUIRE);
+    // The lead that will be heard: a jump's, while it waits to be joined (what is left of
+    // the heard one is on its way out).
+    const Slot& ls = s.joining ? h->slot[atomic_load(&h->join_slot, MO_RELAXED)] : hs;
+    u64 lw = atomic_load(&ls.write, MO_ACQUIRE), lr = atomic_load(&ls.read, MO_ACQUIRE);
+    s.lead_frames = lw > lr ? (u32)(lw - lr) : 0;
     s.underruns = atomic_load(&h->underruns, MO_RELAXED);
     s.heard    = h->heard;
     s.source   = h->cur_source;
-    s.position = h->cur_source && h->heard > h->cur_frame ? h->heard - h->cur_frame : 0;
+    s.position = h->cur_source && h->heard > h->cur_frame ? h->cur_first + (h->heard - h->cur_frame) : 0;
     *out = s;
 }
 

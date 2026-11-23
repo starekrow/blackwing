@@ -97,6 +97,13 @@ struct Rig {
         while (status().written < frames) { if (time_now() > until) return false; time_sleep(0.0005); }
         return true;
     }
+    // Waits for the lead that will be heard to hold `frames`: after a flush or a jump,
+    // the new audio's, whose place in the stream is fixed only when it is joined.
+    bool wait_lead(u64 frames) {
+        f64 until = time_now() + 2.0;
+        while (status().lead_frames < frames) { if (time_now() > until) return false; time_sleep(0.0005); }
+        return true;
+    }
     // Waits for an event of a kind about a source; polls as it goes.
     // Waits for the render thread to have carried out the last flush.
     bool wait_flushed() {
@@ -415,7 +422,7 @@ void test_hifi_flush(TestCtx& c) {
     hifi_flush(r.h);
     hifi_add_source(r.h, {3, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, r.wait_flushed() && r.wait_event(HifiEventKind::Released, 2) && r.has(HifiEventKind::Released, 1));
-    KV_CHECK(c, r.wait_written(a.frames * 3));
+    KV_CHECK(c, r.wait_lead(a.frames));
     KV_CHECK(c, r.status().source == 0);
     u64 pulled = 6000;
     while (pulled < a.frames + 12000) pulled += r.pull(1024);
@@ -459,7 +466,7 @@ void test_hifi_flush(TestCtx& c) {
     w.pull(5000);
     hifi_flush(w.h);
     hifi_add_source(w.h, {3, &k_flac_decoder, sparse_whole(fb.bytes())});
-    KV_CHECK(c, w.wait_flushed() && w.wait_written(a.frames * 3));
+    KV_CHECK(c, w.wait_flushed() && w.wait_lead(a.frames));
     w.pull(2000);
     KV_CHECK(c, w.has(HifiEventKind::Started, 3) && w.status().source == 3);
     hifi_flush(w.h);
@@ -468,7 +475,7 @@ void test_hifi_flush(TestCtx& c) {
     w.pull(1000);
     KV_CHECK(c, w.status().source == 0 && w.status().lead_frames == 0);
     hifi_add_source(w.h, {4, &k_flac_decoder, sparse_whole(fb.bytes())});
-    KV_CHECK(c, w.wait_written(a.frames * 4));
+    KV_CHECK(c, w.wait_lead(a.frames));
     u64 before = w.status().taken;
     w.pull(100);
     KV_CHECK(c, w.status().taken == before + 100);
@@ -753,4 +760,173 @@ void test_hifi_starved(TestCtx& c) {
     r.free();
     da.free(); db.free();
     drop(a); drop(fa); drop(fb);
+}
+
+namespace {
+
+// The first captured frame at or after `from` where `pcm` from `pcm_frame` begins, for
+// `frames` frames exactly; ~0 when there is none before `to`.
+u64 find_run(const u8* data, const HifiDeviceFormat& f, u64 from, u64 to, const Pcm& pcm, u64 pcm_frame, u64 frames) {
+    for (u64 k = from; k + frames <= to; ++k) if (same(data, f, k, pcm, pcm_frame, frames)) return k;
+    return ~0ull;
+}
+
+// Pulls in device-sized pieces until `frames` have been, polling as it goes.
+u64 pull_all(Rig& r, u64 frames) {
+    u64 n = 0;
+    while (n < frames) { time_sleep(0.0003); n += r.pull(frames - n < 512 ? (u32)(frames - n) : 512u); }
+    return n;
+}
+
+} // namespace
+
+// A seek within the source being heard, through a jump: the old audio fades out at once,
+// the source goes on from the frame asked for, fading in, exact after the fade; it is
+// Seeked, not Started again, and its position counts from the target, at the frame heard.
+void test_hifi_seek(TestCtx& c) {
+    c.begin("hifi seek");
+    File fa = read_data("tone_16_2ch_48000.flac");   // 24000 frames
+    Pcm a = decode(fa);
+    const u32 fade = 480;                             // 10 ms at 48 kHz
+    Rig r; r.make(0, 1.0);
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    KV_CHECK(c, r.wait_written(a.frames));
+    u64 pulled = pull_all(r, 6000);
+    KV_CHECK(c, r.status().source == 1 && r.status().position == 6000);
+    const u64 target = 15000;
+    HifiSource s{1, &k_flac_decoder, sparse_whole(fa.bytes()), target, true};
+    hifi_jump(r.h, &s, 1);
+    KV_CHECK(c, r.wait_flushed());
+    KV_CHECK(c, r.status().source == 0);              // nothing being heard until the target is
+    KV_CHECK(c, r.wait_lead(a.frames - target));
+    pulled += pull_all(r, 3000);
+    HifiStatus st = r.status();
+    KV_CHECK(c, r.has(HifiEventKind::Seeked, 1) && r.count(HifiEventKind::Started) == 1);
+    const HifiEvent* e = r.find(HifiEventKind::Seeked, 1);
+    KV_CHECK(c, e && e->frames == target);
+
+    HifiCaptureSegment seg[2];
+    KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 1);
+    const u8* data = hifi_capture_data(r.cap);
+    const HifiDeviceFormat& f = seg[0].format;
+    KV_CHECK(c, same(data, f, 0, a, 0, 6000));
+    // The new audio: exact from the end of its fade in on. Where it began is that, less the fade.
+    u64 after = find_run(data, f, 6000, pulled, a, target + fade, 64);
+    KV_CHECK(c, after != ~0ull);
+    u64 joined = after - fade;
+    KV_CHECK(c, after != ~0ull && same(data, f, after, a, target + fade, pulled - after));
+    KV_CHECK(c, after != ~0ull && joined + 1 >= 6000 + fade && joined <= 6000 + fade + 1024); // the fade out, and less than a callback of silence
+    KV_CHECK(c, after != ~0ull && silent(data, f, 6000 + fade - 1, joined + 1 - 6000 - fade));
+    // The position: the target, and every frame heard since.
+    KV_CHECK(c, after != ~0ull && st.source == 1 && st.position == target + (pulled - joined));
+    // No step at either side bigger than the music's own.
+    i32 music = largest_step(data, f, 0, 6000);
+    KV_CHECK(c, largest_step(data, f, 5990, fade + 20) <= music && largest_step(data, f, joined - 1, fade + 20) <= music);
+    // And the fades are fades: never louder than the music they scale.
+    bool quieter = true;
+    for (u64 k = 0; k < fade && after != ~0ull; ++k)
+        for (u32 ch = 0; ch < 2; ++ch) {
+            i32 got = sample_at(data, f, (6000 + k) * 2 + ch), was = a.s[(6000 + k) * 2 + ch];
+            i32 in = sample_at(data, f, (joined + k) * 2 + ch), src = a.s[(target + k) * 2 + ch];
+            if ((got < 0 ? -got : got) > (was < 0 ? -was : was) || (in < 0 ? -in : in) > (src < 0 ? -src : src)) quieter = false;
+        }
+    KV_CHECK(c, quieter);
+    pulled += pull_all(r, a.frames);
+    KV_CHECK(c, r.has(HifiEventKind::Ended, 1) && r.status().underruns == 0 && r.count(HifiEventKind::Released) == 2);
+    r.free();
+    drop(a); drop(fa);
+}
+
+// A skip to a file whose bytes are slow: the old audio fades out at once, and nothing is
+// heard ("starting") until the new one's first pieces come; then it plays from its start.
+// A second jump before the first was heard takes its place: the first is never heard.
+void test_hifi_jump(TestCtx& c) {
+    c.begin("hifi jump");
+    File fa = read_data("tone_16_2ch_48000.flac"), fb = read_data("tone_16_2ch_48000.flac"), fc = read_data("tone_16_2ch_48000.flac");
+    Pcm a = decode(fa);
+    const u32 fade = 480;
+    {
+        Rig r; r.make(0, 1.0);
+        Fed db; db.make(fb, 12);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(a.frames));
+        u64 pulled = pull_all(r, 4000);
+        HifiSource s{2, &k_flac_decoder, db.span()};
+        hifi_jump(r.h, &s, 1);
+        KV_CHECK(c, r.wait_flushed());
+        u32 seen = 0;
+        f64 until = time_now() + 0.2;
+        while (time_now() < until) { pulled += r.pull(256); r.poll(); time_sleep(0.001); } // a fifth of a second with nothing to give
+        KV_CHECK(c, r.status().source == 0 && !r.has(HifiEventKind::Started, 2) && r.status().joining == false);
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        KV_CHECK(c, same(hifi_capture_data(r.cap), seg[0].format, 0, a, 0, 4000) && silent(hifi_capture_data(r.cap), seg[0].format, 4000 + fade, pulled - 4000 - fade));
+        u64 quiet_from = pulled;
+        until = time_now() + 3.0;
+        while (!r.has(HifiEventKind::Ended, 2) && time_now() < until) {
+            serve(r, &seen, db, 2);
+            HifiStatus st = r.status();
+            if (st.lead_frames > 3000 || r.has(HifiEventKind::Released, 2)) pulled += r.pull(512);
+            time_sleep(0.0003);
+        }
+        KV_CHECK(c, r.has(HifiEventKind::Started, 2) && r.has(HifiEventKind::Ended, 2));
+        hifi_capture_segments(r.cap, seg, 2);
+        const u8* data = hifi_capture_data(r.cap);
+        u64 after = find_run(data, seg[0].format, quiet_from, pulled, a, fade, 64);
+        KV_CHECK(c, after != ~0ull && same(data, seg[0].format, after, a, fade, a.frames - fade));
+        KV_CHECK(c, after != ~0ull && silent(data, seg[0].format, 4000 + fade, after - fade - 4000 - fade)); // silence from the fade out to the fade in
+        KV_CHECK(c, r.status().underruns == 0);
+        r.free();
+        db.free();
+    }
+    {
+        // Two jumps: to B, whose bytes never come, then to C. Only C is heard.
+        Rig r; r.make(0, 1.0);
+        Fed db; db.make(fb, 12);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(a.frames));
+        pull_all(r, 3000);
+        HifiSource sb{2, &k_flac_decoder, db.span()};
+        hifi_jump(r.h, &sb, 1);
+        pull_all(r, 1000);
+        HifiSource sc{3, &k_flac_decoder, sparse_whole(fc.bytes())};
+        hifi_jump(r.h, &sc, 1);
+        KV_CHECK(c, r.wait_flushed() && r.wait_lead(a.frames));
+        u64 pulled = 4000 + pull_all(r, a.frames + 2000);
+        KV_CHECK(c, r.has(HifiEventKind::Started, 3) && r.has(HifiEventKind::Ended, 3));
+        KV_CHECK(c, !r.has(HifiEventKind::Started, 2) && r.wait_event(HifiEventKind::Released, 2));
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        const u8* data = hifi_capture_data(r.cap);
+        u64 after = find_run(data, seg[0].format, 3000, pulled, a, fade, 64);
+        KV_CHECK(c, after != ~0ull && same(data, seg[0].format, after, a, fade, a.frames - fade));
+        r.free();
+        db.free();
+    }
+    {
+        // A jump while paused: nothing is heard until play, and then the new audio, from
+        // its start, fading in.
+        Rig r; r.make(0, 1.0);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(a.frames));
+        pull_all(r, 3000);
+        hifi_pause(r.h);
+        pull_all(r, 2000);
+        HifiSource s{3, &k_flac_decoder, sparse_whole(fc.bytes())};
+        hifi_jump(r.h, &s, 1);
+        KV_CHECK(c, r.wait_flushed() && r.wait_lead(a.frames));
+        pull_all(r, 2000);
+        KV_CHECK(c, !r.has(HifiEventKind::Started, 3));
+        hifi_play(r.h);
+        u64 pulled = 7000 + pull_all(r, a.frames + 1000);
+        KV_CHECK(c, r.has(HifiEventKind::Started, 3) && r.has(HifiEventKind::Ended, 3) && !r.has(HifiEventKind::Ended, 1));
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        const u8* data = hifi_capture_data(r.cap);
+        u64 after = find_run(data, seg[0].format, 3000, pulled, a, fade, 64);
+        KV_CHECK(c, after != ~0ull && same(data, seg[0].format, after, a, fade, a.frames - fade));
+        KV_CHECK(c, after != ~0ull && after - fade >= 7000);  // not before play
+        r.free();
+    }
+    drop(a); drop(fa); drop(fb); drop(fc);
 }

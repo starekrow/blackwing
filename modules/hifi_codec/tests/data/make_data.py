@@ -13,6 +13,9 @@ Broken files (broken/): made from the good ones by cutting and patching bytes.
 A file with a seek table (GStreamer's flacenc writes none, so seeking in the good files is
 searching): one good file with a SEEKTABLE block put in, a point at every frame. Made
 from the committed file by itself: `make_data.py --seektable` needs no encoder.
+
+A longer file, four seconds at 8 kHz, for what needs a track to last past a few seconds
+(the player's previous): `make_data.py --long`, which encodes only it.
 """
 import hashlib, math, os, struct, subprocess, sys, tempfile
 
@@ -115,6 +118,16 @@ def seektable():
     open(name, "wb").write(out)
     print("%-28s %7d bytes, %d seek points" % (name, len(out), n))
 
+def long_file():
+    bits, channels, rate, seconds = 16, 2, 8000, 4.0
+    raw, n = pcm(bits, channels, rate, seconds)
+    name = "tone_16_2ch_8000_long.flac"
+    encode(raw, bits, channels, rate, name)
+    si = streaminfo(open(name, "rb").read())
+    assert (si["rate"], si["channels"], si["bits"], si["total"]) == (rate, channels, bits, n), (name, si)
+    assert si["md5"] == hashlib.md5(raw).digest(), name + ": STREAMINFO MD5 is not the PCM's"
+    print("%-28s %7d bytes, %6d frames, md5 %s" % (name, os.path.getsize(name), n, si["md5"].hex()))
+
 def main():
     names = []
     for bits, channels, rate, seconds in GOOD:
@@ -153,7 +166,10 @@ def main():
     wild[18:26] = packed.to_bytes(8, "big")
     put("lying_format.flac", bytes(wild))
     seektable()
+    long_file()
 
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    seektable() if sys.argv[1:] == ["--seektable"] else main()
+    if sys.argv[1:] == ["--seektable"]: seektable()
+    elif sys.argv[1:] == ["--long"]: long_file()
+    else: main()

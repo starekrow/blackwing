@@ -31,6 +31,7 @@
 #include "korvid/hifi_codec/decoder.h"
 #include "korvid/platform/io.h"
 #include "korvid/platform/module.h"
+#include <stdlib.h>
 #include <string.h>
 
 namespace kv {
@@ -67,7 +68,9 @@ struct Item {
     u32    front   = 0;       // where read-ahead looks next; nothing before it from the floor is Absent
     u32    want_lo = kNone, want_hi = 0; // the pieces hifi last said a decoder waits for
     char   broken[96] = "";   // why a piece could not be read
-    bool   lent    = false;   // hifi may be reading its span: added, and not yet Released
+    u32    lends   = 0;       // hifi may be reading its span: added, and not yet Released (a jump can lend it again before the last lend is let go)
+    u64    start   = 0;       // the frame its next lend begins at (a seek, or a jump to it)
+    bool   seek    = false;   // and that lend goes on from elsewhere in it: Seeked, not Started
     bool   in_play = false;   // hifi is to play it: added, and neither ended, failed nor flushed
     PlayerItemState state = PlayerItemState::Waiting;
 };
@@ -84,6 +87,8 @@ struct Player {
     bool   paused    = false;
     bool   ended_said = true; // PlayerQueueEnded has been emitted for this run of the queue
     u32    seq = 0;           // the last notification's number
+    u64    seek_item  = 0;    // a seek on its way to the ear: the row, and the frame it was sent to
+    u64    seek_frame = 0;
     u32    shift = 18;        // a piece is 1 << shift bytes
     u64    committed = 0;     // bytes of pieces committed, across every item: there, being read, or being given back
     u64    returning = 0;     // of those, being given back: gone once hifi's fence has passed
@@ -150,7 +155,7 @@ void decommit(Player& p, Item& it, u32 i) {
 // cleared now, and the memory goes when hifi's fence has passed (take_returns).
 bool give_back(Player& p, Item& it, u32 i) {
     if (it.piece[i] != Piece::There) return false;
-    if (!it.lent) { decommit(p, it, i); return true; }
+    if (!it.lends) { decommit(p, it, i); return true; }
     if (p.nreturns == kMaxReturns) return false;
     atomic_store(&it.have[i], (u8)0, MO_SEQ_CST);
     it.piece[i] = Piece::Returning;
@@ -195,7 +200,7 @@ void cancel_reads(Player& p, IoQueue* io, Item& it) {
 // Everything the item holds goes: its reads, its pieces, its address space. Only when
 // hifi does not have it.
 void drop_span(Player& p, IoQueue* io, Item& it) {
-    if (it.lent) return;
+    if (it.lends) return;
     cancel_reads(p, io, it);
     if (!it.base) return;
     for (u32 i = 0; i < it.pieces; ++i)
@@ -213,6 +218,13 @@ void drop_span(Player& p, IoQueue* io, Item& it) {
     it.base = nullptr; it.have = nullptr; it.piece = nullptr;
     it.reserved = 0; it.pieces = 0; it.bytes_there = 0; it.head = 0;
     it.want_lo = kNone;
+    it.sized = false; // if it comes back (previous, a jump), it is looked at again
+}
+
+// The state an item not in play and not finished is in, by what it holds: ready, with its
+// head read; reading, with its span made; waiting, with nothing.
+PlayerItemState resting(const Item& it) {
+    return it.base && it.head ? PlayerItemState::Ready : it.base ? PlayerItemState::Reading : PlayerItemState::Waiting;
 }
 
 void fail(TickContext& ctx, Player& p, KTable* queue, Item& it, const char* reason) {
@@ -226,19 +238,98 @@ void fail(TickContext& ctx, Player& p, KTable* queue, Item& it, const char* reas
     drop_span(p, platform_io(*ctx.engine), it);
 }
 
-// Everything out of hifi, and the playhead held nowhere: after a stop or a next. What
-// was in play and is not finished is ready again, with what it has read.
-void flush(Player& p, KTable* queue) {
-    hifi_flush(p.hifi);
-    for (u32 k = p.cursor; k < p.count; ++k) {
+// The item as a source for hifi, from where its next lend begins.
+HifiSource source_of(const Player& p, const Item& it) {
+    HifiSource s;
+    s.id = it.id;
+    s.file = span_of(p, it);
+    s.decoder = decoder_for(Span<const u8>(it.base, (u32)it.head));
+    s.start = it.start;
+    s.seek = it.seek;
+    return s;
+}
+
+// Lends a ready item to hifi: added after what it has, or, given `out`, kept there for
+// a jump to take.
+void lend(Player& p, Item& it, HifiSource* out) {
+    HifiSource s = source_of(p, it);
+    if (out) *out = s; else hifi_add_source(p.hifi, s);
+    ++it.lends;
+    it.in_play = true;
+    it.start = 0;
+    it.seek = false;
+}
+
+// Nothing in play any more: what was, and is not finished, is ready again with what it
+// has read. hifi may still be letting go of it.
+void out_of_play(Player& p, KTable* queue) {
+    for (u32 k = 0; k < p.count; ++k) {
         Item& it = p.items[k];
         it.want_lo = kNone;
         if (!it.in_play) continue;
         it.in_play = false;
-        if (!finished(it)) set_state(queue, it, PlayerItemState::Ready);
+        if (!finished(it)) set_state(queue, it, resting(it));
     }
     p.transport.item = 0;
     p.transport.position = 0;
+}
+
+// Everything out of hifi, and the playhead held nowhere: after a stop.
+void flush(Player& p, KTable* queue) {
+    hifi_flush(p.hifi);
+    out_of_play(p, queue);
+    for (u32 k = p.cursor; k < p.count; ++k) { p.items[k].start = 0; p.items[k].seek = false; }
+    p.seek_item = 0;
+}
+
+// Moves the place in the queue to item index k, from its frame `frame` (`seek`: within
+// the item heard, so Seeked rather than Started), and, if playing, jumps hifi there: what
+// is sounding fades out at once, and what is ready from k on goes in its place. What is
+// not ready yet follows as it becomes so (advance). What is before k is done; what is
+// from k on, and was done, is to come again.
+void jump_to(Player& p, KTable* queue, u32 k, u64 frame, bool seek) {
+    if (k > p.count) k = p.count;
+    for (u32 j = 0; j < p.count; ++j) {
+        Item& it = p.items[j];
+        if (it.state == PlayerItemState::Failed) continue;
+        if (j < k && !finished(it)) set_state(queue, it, PlayerItemState::Done);       // skipped
+        if (j >= k && it.state == PlayerItemState::Done) {                             // to come again
+            row_of(queue, it).damaged = 0;
+            set_state(queue, it, resting(it), "");
+        }
+    }
+    out_of_play(p, queue);
+    p.cursor = k;
+    p.seek_item = 0;
+    if (k < p.count) {
+        Item& it = p.items[k];
+        it.start = frame;
+        it.seek = seek;
+        if (seek) { p.seek_item = it.id; p.seek_frame = frame; }
+        // Read from the target on: where it is in the file, by its length in frames.
+        u64 frames = row_of(queue, it).frames;
+        if (it.base && frames && frame) it.front = (u32)((u64)((f64)it.size * ((f64)frame / (f64)frames)) >> p.shift);
+    }
+    if (!p.want_play) return;
+    HifiSource srcs[2];
+    u32 n = 0;
+    for (u32 j = k; j < p.count && n < 2; ++j) {
+        Item& it = p.items[j];
+        if (it.state == PlayerItemState::Failed) continue;
+        if (it.state != PlayerItemState::Ready) break; // the rest follow when they are
+        lend(p, it, &srcs[n++]);
+    }
+    hifi_jump(p.hifi, srcs, n);
+}
+
+// Whether a move within the item is a seek: it is the one being heard, or a seek to it is
+// on its way (a second command in the same tick, before anything is heard).
+bool heard_now(const Player& p, const Item& it) { return p.transport.item == it.id || p.seek_item == it.id; }
+
+// The index of the first item at or after k that is not Failed; count when there is none.
+u32 playable_from(const Player& p, u32 k) {
+    while (k < p.count && p.items[k].state == PlayerItemState::Failed) ++k;
+    return k;
 }
 
 void commands(TickContext& ctx, Player& p, KTable* queue) {
@@ -267,17 +358,58 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         (void)x;
         if (p.cursor < p.count) {
             Item& it = p.items[p.cursor];
-            set_state(queue, it, PlayerItemState::Done); // skipped: done, with nothing said of how it ended
             // Its reads still out are cancelled. Left to run, they would hold the disk
             // while the next item's waited behind them: on slow media, each skip added
             // reads, and none finished.
             IoQueue* io = platform_io(*ctx.engine);
             if (!it.stat.is_null() && io) io->cancel(it.stat);
             cancel_reads(p, io, it);
-            it.in_play = false;
+            jump_to(p, queue, playable_from(p, p.cursor + 1), 0, false); // skipped: done, with nothing said of how it ended
             drop_span(p, io, it);
-            flush(p, queue);
         }
+    }
+    for (const PlayerPrevious& x : ctx.received<PlayerPrevious>()) {
+        (void)x;
+        if (p.cursor >= p.count) { // past the end: the last row that will play
+            u32 k = p.count;
+            while (k > 0 && p.items[k - 1].state == PlayerItemState::Failed) --k;
+            if (k > 0) jump_to(p, queue, k - 1, 0, false);
+            continue;
+        }
+        Item& it = p.items[p.cursor];
+        const PlayerItem& r = row_of(queue, it);
+        bool heard_it = p.transport.item == it.id;
+        u64 at = p.seek_item == it.id ? p.seek_frame : heard_it ? p.transport.position : 0;
+        u32 before = p.cursor;
+        while (before > 0 && p.items[before - 1].state == PlayerItemState::Failed) --before;
+        // Within the first three seconds, the row before; later, the start of this one.
+        if (before > 0 && (!r.rate || at < (u64)r.rate * 3)) jump_to(p, queue, before - 1, 0, false);
+        else jump_to(p, queue, p.cursor, 0, heard_now(p, it));
+    }
+    for (const PlayerJump& x : ctx.received<PlayerJump>()) {
+        Item* it = find(p, x.item);
+        if (!it || it->state == PlayerItemState::Failed) { KV_ERROR("player", "there is no row %llu to play", (unsigned long long)x.item); continue; }
+        jump_to(p, queue, (u32)(it - p.items), 0, false);
+        if (!p.want_play) { p.want_play = true; p.ended_said = false; } // play this row now
+    }
+    for (const PlayerSeek& x : ctx.received<PlayerSeek>()) {
+        Item* it = x.item ? find(p, x.item) : (p.cursor < p.count ? &p.items[p.cursor] : nullptr);
+        if (!it || it->state == PlayerItemState::Failed) continue;
+        u64 frames = row_of(queue, *it).frames, to = frames && x.frame > frames ? frames : x.frame;
+        u32 k = (u32)(it - p.items);
+        jump_to(p, queue, k, to, k == p.cursor && heard_now(p, *it));
+    }
+    for (const PlayerSeekBy& x : ctx.received<PlayerSeekBy>()) {
+        if (p.cursor >= p.count) continue;
+        Item& it = p.items[p.cursor];
+        const PlayerItem& r = row_of(queue, it);
+        if (!r.rate) continue; // not heard yet: nothing to count from
+        // From wherever the last seek was going, so repeats add up.
+        f64 from = p.seek_item == it.id ? (f64)p.seek_frame : p.transport.item == it.id ? (f64)p.transport.position : 0.0;
+        f64 to = from + x.seconds * (f64)r.rate;
+        if (to < 0.0) to = 0.0;
+        if (r.frames && to > (f64)r.frames) to = (f64)r.frames;
+        jump_to(p, queue, p.cursor, (u64)to, heard_now(p, it));
     }
     for (const PlayerPause& x : ctx.received<PlayerPause>()) {
         (void)x;
@@ -303,12 +435,15 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
             Item* it = find(p, e.source);
             if (!it) continue;
             switch (e.kind) {
-            case HifiEventKind::Started: {
+            case HifiEventKind::Started:
+            case HifiEventKind::Seeked: {
                 if (finished(*it) || !it->in_play) break; // skipped or stopped while its start was on its way
                 set_state(queue, *it, PlayerItemState::Playing);
                 PlayerItem& r = row_of(queue, *it);
                 r.rate = e.info.format.rate; r.channels = e.info.format.channels; r.bits = e.info.format.bits; r.frames = e.info.frames;
-                ctx.emit(PlayerTrackStarted{it->id, r.rate, r.channels, r.bits, r.frames, ++p.seq});
+                if (p.seek_item == it->id) p.seek_item = 0; // the seek has reached the ear
+                if (e.kind == HifiEventKind::Seeked) ctx.emit(PlayerSeeked{it->id, e.frames, ++p.seq});
+                else ctx.emit(PlayerTrackStarted{it->id, r.rate, r.channels, r.bits, r.frames, ++p.seq});
             } break;
             case HifiEventKind::Ended: {
                 if (finished(*it) || !it->in_play) break;
@@ -326,12 +461,12 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
                 if (!finished(*it)) fail(ctx, p, queue, *it, e.reason);
                 break;
             case HifiEventKind::Released:
-                it->lent = false;
+                if (it->lends) --it->lends;
                 it->want_lo = kNone;
                 if (finished(*it)) drop_span(p, io, *it);
                 break;
             case HifiEventKind::Want: {
-                if (!it->lent || !it->base || e.need.len == 0) break;
+                if (!it->lends || !it->base || e.need.len == 0) break;
                 u64 last = e.need.at + e.need.len - 1;
                 it->want_lo = (u32)(e.need.at >> p.shift);
                 it->want_hi = (u32)((last < it->size ? last : it->size - 1) >> p.shift);
@@ -407,8 +542,8 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
             os_decommit(it.base + ((usize)r.piece << p.shift), piece_commit(p, it, r.piece));
             if (done.status == IoStatus::Done) format(it.broken, sizeof it.broken, "the file was cut short while it was read");
             else format(it.broken, sizeof it.broken, "the file could not be read: %s", done.error ? strerror(done.error) : "unknown error");
-            if (it.lent && it.want_lo != kNone && r.piece >= it.want_lo && r.piece <= it.want_hi) hifi_starve(p.hifi, it.id, it.broken);
-            if (!it.lent && !it.in_play && !finished(it)) fail(ctx, p, queue, it, it.broken);
+            if (it.lends && it.want_lo != kNone && r.piece >= it.want_lo && r.piece <= it.want_hi) hifi_starve(p.hifi, it.id, it.broken);
+            if (!it.lends && !it.in_play && !finished(it)) fail(ctx, p, queue, it, it.broken);
         }
         free_bytes(done.data, done.size);
     }
@@ -436,13 +571,13 @@ bool make_room(Player& p, KTable* queue, u64 need, bool urgent) {
     // Items hifi does not read, the last first.
     for (u32 k = p.count; k-- > 0 && over();) {
         Item& it = p.items[k];
-        if (it.lent || !it.base) continue;
+        if (it.lends || !it.base) continue;
         for (u32 i = it.pieces; i-- > 0 && over();) give_back(p, it, i);
     }
     // The item playing, behind the frame heard.
     for (u32 k = p.cursor; k < p.count && over(); ++k) {
         Item& it = p.items[k];
-        if (!it.lent || !it.base) continue;
+        if (!it.lends || !it.base) continue;
         u32 floor = heard_floor(p, it, queue);
         for (u32 i = 0; i < floor && over(); ++i) give_back(p, it, i);
     }
@@ -450,7 +585,7 @@ bool make_room(Player& p, KTable* queue, u64 need, bool urgent) {
         // Read ahead, the farthest first, but never what is wanted.
         for (u32 k = p.count; k-- > p.cursor && over();) {
             Item& it = p.items[k];
-            if (!it.lent || !it.base) continue;
+            if (!it.lends || !it.base) continue;
             for (u32 i = it.pieces; i-- > 0 && over();) {
                 if (it.want_lo != kNone && i >= it.want_lo && i <= it.want_hi) continue;
                 if (give_back(p, it, i) && i < it.front) it.front = i;
@@ -504,7 +639,7 @@ void schedule_reads(Player& p, IoQueue* io, KTable* queue, Item** ahead, u32 nah
     }
     for (u32 a = 0; a < nahead; ++a) {
         Item& it = *ahead[a];
-        if (!it.base || !it.lent) continue; // read ahead only of what hifi has
+        if (!it.base || !it.lends) continue; // read ahead only of what hifi has
         u32 floor = heard_floor(p, it, queue);
         if (it.front < floor) it.front = floor;
         for (;;) {
@@ -549,14 +684,7 @@ void advance(TickContext& ctx, Player& p, KTable* queue) {
             }
         }
         ahead[nahead++] = &it;
-        if (it.state == PlayerItemState::Ready && !it.in_play && !it.lent && !gap) {
-            HifiSource s;
-            s.id = it.id;
-            s.file = span_of(p, it);
-            s.decoder = decoder_for(Span<const u8>(it.base, (u32)it.head));
-            hifi_add_source(p.hifi, s);
-            it.lent = it.in_play = true;
-        }
+        if (it.state == PlayerItemState::Ready && !it.in_play && !gap) lend(p, it, nullptr);
         if (!it.in_play) gap = true;
     }
     if (io) schedule_reads(p, io, queue, ahead, nahead);
@@ -573,9 +701,12 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     t.frames   = cur ? row_of(queue, *cur).frames : 0;
     t.rate     = cur ? row_of(queue, *cur).rate : 0;
     t.queued   = p.count;
+    t.place    = p.cursor < p.count ? p.items[p.cursor].id : 0;
+    t.seek_item  = p.seek_item;
+    t.seek_frame = p.seek_item ? p.seek_frame : 0;
     u32 left = 0;
     bool busy = false; // anything of ours still in hifi's hands
-    for (u32 k = 0; k < p.count; ++k) { left += !finished(p.items[k]); busy = busy || p.items[k].lent || p.items[k].in_play; }
+    for (u32 k = 0; k < p.count; ++k) { left += !finished(p.items[k]); busy = busy || p.items[k].lends || p.items[k].in_play; }
     for (u32 k = p.cursor; k < p.count; ++k) row_of(queue, p.items[k]).bytes_read = p.items[k].bytes_there;
     t.left = left;
 
@@ -639,7 +770,7 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
             io->cancel(it.stat);
             for (const IoCompletion& c : io->completions()) if (c.request == it.stat) { io->reap(it.stat); break; }
         }
-        it.lent = false;
+        it.lends = 0;
         drop_span(*p, io, it);
     }
     // Reads still out: cancelled above; take their bytes if they landed anyway.
@@ -672,6 +803,37 @@ void cmd_play(CliContext& ctx, Span<const char* const> args)  { if (args.len) { 
 void cmd_pause(CliContext& ctx, Span<const char* const> args) { if (args.len) { ctx.fail("player pause"); return; } ctx.engine->events.emit(PlayerPause{}); }
 void cmd_stop(CliContext& ctx, Span<const char* const> args)  { if (args.len) { ctx.fail("player stop"); return; } ctx.engine->events.emit(PlayerStop{}); }
 void cmd_next(CliContext& ctx, Span<const char* const> args)  { if (args.len) { ctx.fail("player next"); return; } ctx.engine->events.emit(PlayerNext{}); }
+void cmd_previous(CliContext& ctx, Span<const char* const> args) { if (args.len) { ctx.fail("player previous"); return; } ctx.engine->events.emit(PlayerPrevious{}); }
+
+// A number from the command line; false when it is not one.
+bool number(const char* a, f64* out) {
+    char* end = nullptr;
+    f64 v = strtod(a, &end);
+    if (!a[0] || !end || *end) return false;
+    *out = v;
+    return true;
+}
+
+void cmd_jump(CliContext& ctx, Span<const char* const> args) {
+    f64 row = 0.0;
+    if (args.len != 1 || !number(args[0], &row) || row < 1.0) { ctx.fail("player jump <row>"); return; }
+    ctx.engine->events.emit(PlayerJump{(u64)row});
+}
+void cmd_seek(CliContext& ctx, Span<const char* const> args) {
+    f64 at = 0.0;
+    if (args.len != 1 || !number(args[0], &at) || at < 0.0) { ctx.fail("player seek <seconds>"); return; }
+    Player* p = state(*ctx.engine);
+    if (!p || p->cursor >= p->count) { ctx.fail("nothing to seek in"); return; }
+    KTable* queue = engine_ktable(*ctx.engine, g_queue_ktable);
+    u32 rate = queue ? queue->rows_of<PlayerItem>()[p->items[p->cursor].row.index()].rate : 0;
+    if (!rate) { ctx.fail("the row has not been heard yet: its rate is not known"); return; }
+    ctx.engine->events.emit(PlayerSeek{0, (u64)(at * rate)});
+}
+void cmd_seekby(CliContext& ctx, Span<const char* const> args) {
+    f64 by = 0.0;
+    if (args.len != 1 || !number(args[0], &by)) { ctx.fail("player seekby <seconds>"); return; }
+    ctx.engine->events.emit(PlayerSeekBy{by});
+}
 
 void cmd_status(CliContext& ctx, Span<const char* const> args) {
     if (args.len) { ctx.fail("player status"); return; }
@@ -702,6 +864,10 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "player pause",  .help = "holds the playhead", .fn = cmd_pause},
     {.name = "player stop",   .help = "stops; the item playing starts over next time", .fn = cmd_stop},
     {.name = "player next",   .help = "ends the item playing and goes on to the next", .fn = cmd_next},
+    {.name = "player previous", .help = "the row before, within three seconds of a start; otherwise this one from its start", .fn = cmd_previous},
+    {.name = "player jump",   .help = "<row> plays that row now", .fn = cmd_jump},
+    {.name = "player seek",   .help = "<seconds> goes to that point of the row playing", .fn = cmd_seek},
+    {.name = "player seekby", .help = "<seconds> goes that far on (or back, negative) from where the last seek was going", .fn = cmd_seekby},
     {.name = "player status", .help = "the transport, the device and the queue", .fn = cmd_status},
 };
 
@@ -712,14 +878,15 @@ constinit const KTableDesc k_ktables[] = {
 };
 constinit const EventTypeDesc k_events[] = {
     KV_EVENT(PlayerEnqueue), KV_EVENT(PlayerPlay), KV_EVENT(PlayerPause), KV_EVENT(PlayerStop), KV_EVENT(PlayerNext),
+    KV_EVENT(PlayerPrevious), KV_EVENT(PlayerJump), KV_EVENT(PlayerSeek), KV_EVENT(PlayerSeekBy), KV_EVENT(PlayerSeeked),
     KV_EVENT(PlayerTrackStarted), KV_EVENT(PlayerTrackEnded), KV_EVENT(PlayerTrackFailed), KV_EVENT(PlayerQueueEnded), KV_EVENT(HifiUnderrun),
 };
 constinit const ResourceDesc k_resources[] = {{".transport"}, {".output"}};
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = player_pump,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy",
      .writes = ".queue, .transport, .output",
-     .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, HifiUnderrun",
+     .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, PlayerSeeked, HifiUnderrun",
      .main_thread = true, .runs = RunWhen::Always},
 };
 

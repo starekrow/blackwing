@@ -139,3 +139,67 @@ every track played, no underrun) is met with a margin of forty.
 
 Skips here are still slice 1's (a flush, then the next item added); the jump is
 milestone 3.
+
+## Milestone 3, the jump
+
+Nov 23, 2026. Linux laptop, `linux-dev`.
+
+**As planned**, with these particulars:
+
+- `hifi` keeps two slots, each a ring and its counters (`write`, `end`, `read`, `base`).
+  A render writes one; the callback hears one. `hifi_jump` starts a new render in the
+  slot not heard and posts a join request (its epoch); the callback fades the heard ring
+  out over 10 ms, takes the request with a compare-exchange once the new ring has 50 ms
+  (or all it will have), sets that slot's `base` to the stream frame it is at, and fades
+  it in. A newer jump takes a waiting request back with a compare-exchange of its own:
+  whichever thread wins, the other knows which slot is free.
+- `hifi_flush` is a jump to nothing, ramped over slice 1's 5 ms rather than faded, and
+  what follows starts clean. Slice 1's `skip_to` and `end_frame` are gone.
+- A source carries where it starts (`start`) and whether it was being heard (`seek`):
+  its first mark is then `Seeked`, with the frame, and `position` counts from it.
+- The new render's marks are made before anyone knows where its frame 0 will fall in the
+  stream. They carry the slot's frame, and `hifi_poll` places them once the callback's
+  `joined` names their epoch. (First built holding them on the render thread, which
+  lost them when that thread was asleep by the time the join happened.)
+- The player: `PlayerSeek`, `PlayerSeekBy`, `PlayerPrevious`, `PlayerJump`, `PlayerNext`
+  all move its place and call `hifi_jump` with what is ready from there; what is not
+  ready follows as it is. An item can be lent twice (the old render letting go while the
+  new one has it), so the player counts lends. `player.transport` gained `place`,
+  `seek_item` and `seek_frame`. The CLI gained `player previous`, `jump`, `seek`,
+  `seekby` (BR26's part for these).
+- `player.output`'s `lead_frames` is now the lead that will be heard: a jump's new render
+  while it waits to be joined.
+
+**Found by the tests:**
+
+- A race: if the callback joined the new render just before the render thread looked,
+  the render thread could hold the device and sleep while the next source was still
+  waiting for its first bytes, and nothing woke it. A source waiting for bytes now
+  always means "look again in 2 ms".
+- Two seek-bys in one tick: the first took the row out of play, so the second saw it as
+  not playing and made it a fresh start. "Is this a seek" is now "is this row the one
+  heard, or is a seek to it on its way".
+- Going back to a row that was done: its file had been let go of, but it was marked as
+  already looked at, so it was never read again. A row that comes back returns to the
+  state its pieces allow.
+
+**Tests.** `hifi`: a seek lands on its frame, exact from the end of the 10 ms fade in,
+the old audio faded at once and no silence on a warm file, no step at either fade larger
+than the music's own, `Seeked` (not `Started`) with the frame, the position the target
+plus every frame heard since; a skip to a file whose pieces are slow is silence and no
+source until they come, then the file from its start; a jump to a file that never gets
+its bytes, then another, plays only the second; a jump while paused waits for play. The
+player: the same seek through events, two seek-bys in a tick adding up, previous past
+and within three seconds, a jump to row 3. Slice 1's next test now expects a jump's
+fades (10 ms out, 10 ms in) instead of a flush's 5 ms ramp. Clean under ThreadSanitizer
+and AddressSanitizer with UBSan.
+
+**Through PipeWire**, driven from the terminal: seek to 100 s, seek by -30 s (heard at
+71.5 s), previous at 72.9 s (back to 0.0), next, previous within three seconds (the row
+before), jump to row 2: each as asked, 0 underruns.
+
+**Not done here, and noted:**
+
+- Control-to-ear through PipeWire for a seek and a skip is for the close.
+- A source that fails its seek (a damaged file) fails, rather than playing from where
+  the decoder could get to.

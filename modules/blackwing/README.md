@@ -20,16 +20,17 @@ blackwing help                       the commands the engine knows
 | `--trace-events` | every event as it is delivered, with who emitted it (dev builds) |
 
 With a terminal on stdin, the engine's command line is live while it plays: `player
-pause`, `player play`, `player next`, `player stop`, `player status`, `quit`. Ctrl-C
+pause`, `player play`, `player next`, `player previous`, `player jump ROW`, `player seek
+SECONDS`, `player seekby SECONDS`, `player stop`, `player status`, `quit`. Ctrl-C
 stops cleanly. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
 a bad command line, 3 if a dev build leaked.
 
 ## How it works
 
 `play` is sugar: it runs `player add` for each file and `player play`, the player's own
-commands, which emit the player's events. The module (`blackwing_module`) has five
-handlers on the player's notifications: four print a line, and `PlayerQueueEnded` asks
-the engine to quit.
+commands, which emit the player's events. The module (`blackwing_module`) has six
+handlers on the player's notifications: five print a line ("at 71.5 s of 1" for a
+seek), and `PlayerQueueEnded` asks the engine to quit.
 
 The loop is this executable's own, not `tool_main`'s. It runs the engine's ticks at the
 clock's rate while something is playing or about to, and four times a second otherwise.
