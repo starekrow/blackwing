@@ -280,3 +280,39 @@ is full (5 ms at most, for want of a timed wait: KR10) and the wait for the call
 
 - The equalizer, and with it an IIR recut and a non-zero run-in (milestone 5).
 - The tick's and the device's share of control to ear, for the close.
+
+## Milestone 5, the equalizer
+
+Nov 23, 2026. Linux laptop, `linux-dev`.
+
+**As planned**, with these particulars:
+
+- Ten RBJ-cookbook biquads in f64, transposed direct form II: peaks, a low shelf at
+  31.25 Hz and a high shelf at 16 kHz, octaves between, all at 0 dB. Forty parameters,
+  four a band (kind, frequency, gain, Q). Flat is every gain at 0.
+- The attenuation ahead of the bands is the peak of the combined magnitude response,
+  found on a 1024-point log grid from 10 Hz to Nyquist and refined by golden-section
+  search. It and the coefficients are worked out on the first `process` after a change:
+  a recut opens a chain and sets forty values, and that is one design, not forty.
+- The run-in is twelve time constants (Q / (pi f)) of the lowest band that is not flat,
+  at most half a second, which is what the source ring keeps behind the frame heard.
+- Seven presets as data, one of them (`extreme`, every band +24 dB, some narrow) only to
+  prove the attenuation. `player eq preset NAME` sends forty values in one tick: one
+  recut.
+
+**Numbers.** The measured response within 0.03 dB of the design at worst, over six band
+settings alone and with a second band, at ten frequencies each (the criterion is 0.1).
+No preset raises a full-scale sine past full scale at any of sixty frequencies from
+20 Hz to 20 kHz: `extreme` comes out at exactly 1.00000. With the rock preset left
+unchanged, six recuts in the path leave 23 of 48 000 samples a bit off a straight render
+and none further: the run-in settles the filters to well under the dither, but they do
+not forget, so a recut with an equalizer is close rather than bit for bit. Through
+PipeWire, presets switched from the terminal were heard 2.7 to 11.5 ms after reaching
+the path, 0 underruns.
+
+**Not done here, and noted:**
+
+- The attenuation is for sines; a full-scale square through a boost can still go over,
+  and is clipped at the device's word.
+- Matched designs near Nyquist and coefficients from the engine's transcendentals, as
+  the PRD defers.

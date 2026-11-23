@@ -106,12 +106,13 @@ Header `korvid/blackwing_player/module.h`: `blackwing_player_module`, the record
 What the module registers with the engine, as module `player`:
 
 - the ktable `player.queue` (component `PlayerItem`, cosmetic, 4096 rows);
-- the ktable `player.chain` (component `PlayerStage`, cosmetic, a row per stage: `gain`);
+- the ktable `player.chain` (component `PlayerStage`, cosmetic, a row per stage: `gain`,
+  `eq`);
 - the resources `player.transport` and `player.output`;
 - the seventeen event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
-  `seekby`, `volume`, `mute`, `set`, `status`.
+  `seekby`, `volume`, `mute`, `set`, `eq`, `status`.
 
 ## Behaviour worth knowing
 
@@ -131,6 +132,8 @@ What the module registers with the engine, as module `player`:
   that fades in. A seek within the row heard says `PlayerSeeked`, not a new start, and
   `position` counts from its target. `seek_item` and `seek_frame` say what a seek is on
   its way to; a `PlayerSeekBy` counts from there, so repeats add up.
+- **The equalizer is stage 1**: band b's gain is parameter `b * 4 + 2`. `player eq preset
+  NAME` sends a preset's forty values in one tick, which is one recut.
 - **Volume is a parameter like any other**: `PlayerSetParam` sends it to `hifi`, which
   renders the lead again with it and crossfades (a recut), and `PlayerParamChanged`
   comes when it is heard. A control dragged faster than recuts are heard is said once,
@@ -175,7 +178,7 @@ value above 0 dB kept at 0, mute as silence.
 ## Not in this module
 
 The audio path (`hifi`). Decoders (`hifi_codec`). The stages (`hifi_eq`). Tags and the
-library. The EQ and queue edits (slice 2, milestones 5 and 6). Playlists and a saved session (later in P0).
+library. Queue edits (slice 2, milestone 6). Playlists and a saved session (later in P0).
 
 ## See also
 

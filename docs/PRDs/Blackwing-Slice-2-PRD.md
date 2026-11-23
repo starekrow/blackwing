@@ -497,3 +497,11 @@ waveform's peak is at least the level change spread over the fade), so the test 
 it by that slope too; and dither on an exact zero made mute noise, so a zero is now
 left undithered.
 
+**Milestone 5, the equalizer** (Nov 23, 2026; BR15). As planned: ten cookbook biquads in
+f64 after an attenuation by the peak of their combined response, worked out once per
+change; seven presets as data; a run-in of twelve time constants of the lowest band in
+use. The measured response is within 0.03 dB of the design; no preset raises a
+full-scale sine past full scale; a recut with the equalizer unchanged is within a bit
+of a straight render (23 samples in 48 000), which is as exact as a filter that never
+forgets can be.
+

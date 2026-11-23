@@ -49,8 +49,8 @@ constinit PlayerConfig g_config = {};
 constinit u32 g_queue_ktable = 0;
 constinit u32 g_chain_ktable = 0;
 
-// The chain, fixed in this slice: gain, then (milestone 5) the equalizer.
-constinit const StageDesc* const k_chain[] = {&k_gain_stage};
+// The chain, fixed in this slice: gain, then the equalizer.
+constinit const StageDesc* const k_chain[] = {&k_gain_stage, &k_eq_stage};
 constexpr u32 kStages = sizeof(k_chain) / sizeof(k_chain[0]);
 
 // What the player knows of one piece of a file.
@@ -918,6 +918,32 @@ void cmd_set(CliContext& ctx, Span<const char* const> args) {
     if (args.len != 3 || !number(args[0], &st) || !number(args[1], &pa) || !number(args[2], &v)) { ctx.fail("player set <stage> <param> <value>"); return; }
     ctx.engine->events.emit(PlayerSetParam{(u32)st, (u32)pa, v});
 }
+// player eq <band> <dB>; player eq preset <name>; player eq presets.
+void cmd_eq(CliContext& ctx, Span<const char* const> args) {
+    if (args.len == 1 && strcmp(args[0], "presets") == 0) {
+        for (const EqPreset& p : eq_presets()) ctx.print("%s", p.name);
+        return;
+    }
+    if (args.len == 2 && strcmp(args[0], "preset") == 0) {
+        const EqPreset* p = eq_preset(args[1]);
+        if (!p) { ctx.fail("there is no preset '%s' (player eq presets)", args[1]); return; }
+        // Forty changes in one tick: one recut renders them all.
+        for (u32 b = 0; b < kEqBands; ++b) {
+            EqBand band = eq_preset_band(*p, b);
+            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 0, (f64)band.kind});
+            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 1, band.freq});
+            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 2, band.gain_db});
+            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 3, band.q});
+        }
+        return;
+    }
+    f64 band = 0.0, db = 0.0;
+    if (args.len != 2 || !number(args[0], &band) || !number(args[1], &db) || band < 0.0 || band >= kEqBands) {
+        ctx.fail("player eq <band 0-9> <dB> | player eq preset <name> | player eq presets");
+        return;
+    }
+    ctx.engine->events.emit(PlayerSetParam{1, (u32)band * 4 + 2, db});
+}
 void cmd_seekby(CliContext& ctx, Span<const char* const> args) {
     f64 by = 0.0;
     if (args.len != 1 || !number(args[0], &by)) { ctx.fail("player seekby <seconds>"); return; }
@@ -942,8 +968,13 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
     for (u32 i = 0; i < kStages; ++i) {
         char line[256];
         usize len = (usize)format(line, sizeof line, "chain %u %s:", i, k_chain[i]->name);
-        for (u32 j = 0; j < k_chain[i]->params.len && len + 32 < sizeof line; ++j)
+        u32 shown = 0;
+        for (u32 j = 0; j < k_chain[i]->params.len && len + 32 < sizeof line; ++j) {
+            if (p->heard_value[i][j] == k_chain[i]->params[j].initial) continue; // only what has been changed
             len += (usize)format(line + len, sizeof line - len, " %s %g", k_chain[i]->params[j].name, p->heard_value[i][j]);
+            ++shown;
+        }
+        if (!shown) format(line + len, sizeof line - len, " as it starts");
         ctx.print("%s", line);
     }
     KTable* queue = engine_ktable(*ctx.engine, g_queue_ktable);
@@ -968,6 +999,7 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "player volume", .help = "<dB> the volume: 0 at most", .fn = cmd_volume},
     {.name = "player mute",   .help = "on|off", .fn = cmd_mute},
     {.name = "player set",    .help = "<stage> <param> <value> a parameter of the chain", .fn = cmd_set},
+    {.name = "player eq",     .help = "<band> <dB>, preset <name>, presets: the equalizer", .fn = cmd_eq},
     {.name = "player status", .help = "the transport, the device and the queue", .fn = cmd_status},
 };
 
