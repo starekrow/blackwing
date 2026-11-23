@@ -203,3 +203,80 @@ before), jump to row 2: each as asked, 0 underruns.
 - Control-to-ear through PipeWire for a seek and a skip is for the close.
 - A source that fails its seek (a damaged file) fails, rather than playing from where
   the decoder could get to.
+
+## Milestone 4, stages and the aligned recut
+
+Nov 23, 2026. Linux laptop, `linux-dev`.
+
+**Two decisions first**, made at the start of the milestone: the path is always ready
+(the source is always kept, and no recut ever seeks or decodes), and the 20 ms target
+counts from the change reaching `hifi` to the join's first frame leaving the callback,
+leaving the engine's tick and the device out as platform latency.
+
+**As built:**
+
+- The stage contract is `korvid/hifi/stage.h`: `open`, `set`, `process` (f64, in place,
+  full scale +-1), `flat`, `run_in`, `reset`, over memory handed in. The gain stage is
+  `hifi_eq`'s first code; the chain (gain, and the equalizer next) is the player's,
+  handed to `hifi_create`.
+- The source ring: every decoded frame, in the decoder's integers, keyed by programme
+  frame (a count of frames rendered that never resets), with a list of where each
+  source began in it. It holds the lead and half a second behind the frame heard. Every
+  slot's ring, the first render's too, is `render_frames` over it: the integer path when
+  every stage is flat (the slice 1 conversion, unchanged), otherwise f64 through the
+  chain and back with TPDF dither from a hash of the source frame and the channel. A
+  source's first frame resets the chain.
+- The recut: when the heard chain's parameter generation is not the one wanted, the
+  render thread opens the other slot's chain fresh, takes the next frame the callback
+  will take as the start, runs in (the longest stage's run-in, not past its source's
+  start), renders the first two chunks and posts the request, then renders the rest of
+  the lead behind it a chunk at a time. From then on new frames are decoded into it.
+  The callback joins when the new ring holds the frame it is at and a fade more:
+  linear, 10 ms, frame for frame in double, rounded, no dither. Paused, it switches
+  with no fade at play. A jump that comes while a recut's fade is under way waits for
+  it, at most a fade.
+- One recut in flight: changes that arrive meanwhile update what is wanted, and the
+  next recut renders the newest. `ParamsHeard` names the generation heard; the player
+  says `PlayerParamChanged` once per parameter at the value heard.
+- `hifi_status` gained `flat`, `params_heard`, `recuts`, `recut_seconds` (the last
+  recut's change-to-join time); `exact` now also needs a flat chain and no join. The
+  player gained `PlayerSetParam`, `PlayerParamChanged`, `player.chain`, `joining`,
+  `recut_seconds` and `recuts` in `player.output`, and `player volume`, `mute`, `set`.
+
+**Found:**
+
+- The step criterion ("no step larger than the larger of the two renders' own steps
+  there") cannot hold as worded at a change of level. A linear crossfade's step is
+  (1-t) of the old one's, t of the new one's, plus the difference between them spread
+  over the fade; at a waveform's peak both renders' steps are near zero and the third
+  term is not. The test bounds the step by the larger of the two and that slope (plus
+  a bit for rounding), which is what "no click" means for a fade between levels.
+- Dither on an exact zero turned mute into noise of one bit. An exact zero now stays
+  zero.
+- The first recut through PipeWire took up to 19.5 ms: the whole five-second lead was
+  rendered before the join was asked for. Asking after the first chunk and rendering
+  the rest behind it brought every change under 13 ms.
+- Under ThreadSanitizer the render thread is slow enough that tests which drained the
+  lead after 20 ms without growth took it for the end of the stream and underran. The
+  player tests' pacing now waits a fifth of a second, and slice 1's `play_until` paces
+  the same way.
+
+**Tests.** `hifi`, with a gain stage of the tests' own: thirteen recuts with nothing
+changed, flat, give the file's MD5; a dozen at -6 dB give a straight -6 dB render bit
+for bit; a change from -6 to -12 dB is the first render to the join, the fade's mix of
+the two to the sample, then the second, with no step past the bound above; 200 changes
+dragged over four seconds of audio take about twenty recuts and end exactly at the last
+value, with no underrun; a change while paused is heard from the resume with no fade.
+`hifi_eq`: the gain stage alone. The player: volume and mute through events, the row,
+`exact`. Clean under ThreadSanitizer and AddressSanitizer with UBSan.
+
+**Through PipeWire** (44.1 kHz, PipeWire's 512-frame quantum at 48 kHz): 20 volume
+changes from the terminal, each heard 2.2 to 12.9 ms after it reached the path, 8.6 ms
+on average, 0 underruns. What is left in that is the render thread's nap when the lead
+is full (5 ms at most, for want of a timed wait: KR10) and the wait for the callback
+(a period, about 11 ms here). The tick before it and the device after it are not in it.
+
+**Not done here, and noted:**
+
+- The equalizer, and with it an IIR recut and a non-zero run-in (milestone 5).
+- The tick's and the device's share of control to ear, for the close.

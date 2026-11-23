@@ -85,6 +85,9 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerPrevious`, `PlayerJump` | event type | in: the row before (or this one again); `item`, a row now |
 | `PlayerSeek`, `PlayerSeekBy` | event type | in: `item` (0: the one playing) and `frame`; `seconds` on from the last seek |
 | `PlayerSeeked` | event type | out: `item`, `frame`, `seq`; a seek's target was heard |
+| `PlayerSetParam` | event type | in: `stage`, `param`, `value`; volume is stage 0, param 0 (dB), mute param 1 |
+| `PlayerParamChanged` | event type | out: `stage`, `param`, `value`, `seq`; the value is what is heard |
+| `PlayerStage` | component | `index`, `flat`, `params_len`, `name`, `param_names`, `params` (the values heard) |
 | `PlayerTrackStarted` | event type | out: `item`, `rate`, `channels`, `bits`, `frames`, `seq`; the first frame was heard |
 | `PlayerTrackEnded` | event type | out: `item`, `frames`, `seq`, `damaged`, `reason`; the last frame was heard |
 | `PlayerTrackFailed` | event type | out: `item`, `seq`, `reason`; it could not be played |
@@ -93,7 +96,7 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerItem` | component | `id`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
 | `PlayerItemState`, `PlayerState` | enum | an item's state; the transport's |
 | `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `seek_item`, `seek_frame` |
-| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `bytes_held` |
+| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts` |
 | `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
 | `player_item_state_name(s)`, `player_state_name(s)` | functions | "waiting", "playing"...; "stopped", "paused"... |
@@ -103,11 +106,12 @@ Header `korvid/blackwing_player/module.h`: `blackwing_player_module`, the record
 What the module registers with the engine, as module `player`:
 
 - the ktable `player.queue` (component `PlayerItem`, cosmetic, 4096 rows);
+- the ktable `player.chain` (component `PlayerStage`, cosmetic, a row per stage: `gain`);
 - the resources `player.transport` and `player.output`;
-- the fifteen event types above;
+- the seventeen event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
-  `seekby`, `status`.
+  `seekby`, `volume`, `mute`, `set`, `status`.
 
 ## Behaviour worth knowing
 
@@ -127,6 +131,11 @@ What the module registers with the engine, as module `player`:
   that fades in. A seek within the row heard says `PlayerSeeked`, not a new start, and
   `position` counts from its target. `seek_item` and `seek_frame` say what a seek is on
   its way to; a `PlayerSeekBy` counts from there, so repeats add up.
+- **Volume is a parameter like any other**: `PlayerSetParam` sends it to `hifi`, which
+  renders the lead again with it and crossfades (a recut), and `PlayerParamChanged`
+  comes when it is heard. A control dragged faster than recuts are heard is said once,
+  at the value heard. `player.output`'s `exact` is off while any stage is not flat, or a
+  join is under way.
 - **Previous** goes to the row before within the first three seconds of a row, and to
   this row's start after them (or when there is no row before).
 - **Going back reopens what was done**: a row before the place that comes back (a
@@ -159,12 +168,14 @@ seek-by, previous and jump over a four-second file: the seek exact from its targ
 after the fade, the old audio unchanged until the jump reaches the device and then
 only its fade and silence, `PlayerSeeked` with the frame, the position from the target;
 two seek-bys in one tick added up; previous past three seconds a restart, within them a
-row back; a jump to the third row.
+row back; a jump to the third row. Volume and mute through events: the change said when
+heard, the chain's row showing it and whether it is flat, `exact` off and on again, a
+value above 0 dB kept at 0, mute as silence.
 
 ## Not in this module
 
-The audio path (`hifi`). Decoders (`hifi_codec`). Tags and the library. Volume, the EQ
-and queue edits (slice 2, milestones 4 to 6). Playlists and a saved session (later in P0).
+The audio path (`hifi`). Decoders (`hifi_codec`). The stages (`hifi_eq`). Tags and the
+library. The EQ and queue edits (slice 2, milestones 5 and 6). Playlists and a saved session (later in P0).
 
 ## See also
 

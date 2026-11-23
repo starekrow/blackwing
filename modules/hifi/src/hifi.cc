@@ -6,7 +6,13 @@
 // starts a new render in the other slot, and the callback joins it: it fades the heard
 // ring out at once, then switches to the new one when it has a short lead, and fades
 // that in. The new render's frames count on in the same stream from wherever the
-// callback switched, so a mark the new render makes is held until that frame is known.
+// callback switched, so a mark the new render makes is placed (by the caller, in
+// hifi_poll) once that frame is known.
+//
+// Every frame decoded is also kept, before any stage, in a source ring keyed by programme
+// frame. A slot's ring is its chain run over that, so a change of parameters (an aligned
+// recut) is a new render in the other slot of the same music in the same stream frames,
+// from the next frame the callback takes, and the callback crossfades into it.
 //
 // What is shared, and how:
 //
@@ -55,8 +61,34 @@ constexpr u32 kMaxPending  = 256;  // commands, and events, in flight
 constexpr u32 kMaxStarved  = 16;   // sources told their bytes will not come, remembered
 constexpr f64 kWantNap     = 0.002; // how soon a decoder waiting for bytes, or a join, is looked at again
 
-enum class CmdKind : u8 { Add, Flush, Jump, Starve, Quit };
-struct Cmd { CmdKind kind = CmdKind::Add; HifiSource source; u32 epoch = 0; char reason[96] = ""; };
+enum class CmdKind : u8 { Add, Flush, Jump, Starve, Param, Quit };
+struct Cmd {
+    CmdKind    kind = CmdKind::Add;
+    HifiSource source;
+    u32        epoch = 0;              // a flush or jump's; a parameter's generation
+    u32        stage = 0, param = 0;   // a parameter
+    f64        value = 0.0;
+    u64        sent_ns = 0;            // when the caller sent it
+    char       reason[96] = "";
+};
+
+constexpr u32 kAligned     = 0x80000000u; // a join request's id: an aligned recut's, not a caller's epoch
+constexpr u32 kMaxSegments = 64;          // sources begun within what the source ring holds
+constexpr u64 kDitherSeed  = 0x6A09E667F3BCC909ull;
+
+// Where a source begins in the programme: the source ring's frames from `p` on are its,
+// starting at its frame `first`, at its depth.
+struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; };
+
+// A render's chain: its stages' states, the parameters they were opened with.
+struct Chain {
+    u8*   mem[kHifiMaxStages]   = {};
+    void* state[kHifiMaxStages] = {};
+    bool  flat = true;
+    u32   gen  = 0;                  // the parameters' generation
+};
+
+u64 time_ns() { return (u64)(time_now() * 1e9); }
 
 // What the render thread tells the caller. A mark carries the stream frame it becomes
 // true at; the others are true at once. A mark of a render not yet joined carries its
@@ -98,6 +130,9 @@ struct Slot {
     u64 end   = kNever;            // atomic, render -> callback: the slot's stream ends here for now
     u64 read  = 0;                 // atomic, callback -> anyone: frames taken
     u64 base  = 0;                 // atomic: the stream frame of the slot's frame 0, once it is heard
+    u32 gen   = 0;                 // atomic, render -> caller: the generation of the parameters it was rendered with
+    u32 flat  = 1;                 // atomic, render -> caller: every stage of its chain is flat
+    u64 heard_from = 0;            // atomic: the stream frame from which it is the one heard
 };
 
 } // namespace
@@ -123,6 +158,8 @@ struct Hifi {
     u64 cur_source    = 0;
     u64 cur_frame     = 0;             // the stream frame the source being heard started at
     u64 cur_first     = 0;             // the frame of it heard there
+    u32 param_gen     = 0;             // the last parameter change's generation
+    u32 gen_said      = 0;             // the last ParamsHeard given out
     OsThread thread;
 
     // ---- render <-> callback ----
@@ -137,7 +174,13 @@ struct Hifi {
     u32  join_pending = 0;             // atomic: the epoch of a render waiting to be joined; 0: none
     u32  join_slot    = 0;             // atomic: its slot, written before join_pending
     u32  join_fade    = 0;             // atomic: 1 to fade it in (a jump), 0 for a clean start (a flush)
-    u32  joined       = 0;             // atomic: the last epoch the callback joined
+    u32  joined       = 0;             // atomic: the last request the callback joined (an epoch, or an aligned recut's id)
+    u32  join_kind    = 0;             // atomic: 1 for an aligned recut (crossfaded), 0 for a flush or a jump
+    u32  xfading      = 0;             // atomic, callback -> anyone: an aligned join's fade is under way
+    u32  recuts       = 0;             // atomic: aligned joins done
+    u64  req_sent_ns  = 0;             // atomic: when the newest change in the request was sent
+    u64  join_ns      = 0;             // atomic: when the callback began the last aligned join
+    u64  joined_sent_ns = 0;           // atomic: req_sent_ns of that join
 
     // ---- callback -> anyone ----
     u64 read         = 0;              // atomic: stream frames taken
@@ -155,6 +198,8 @@ struct Hifi {
     bool fresh    = true;              // the next start is a clean one: full gain from its first frame
     bool by_join  = false;             // the next start is a joined jump's: at once, fading in
     bool fading   = false;             // the ramp under way is a jump's fade
+    bool xf       = false;             // crossfading from slot xf_from to the other
+    u32  xf_from  = 0, xf_pos = 0, xf_id = 0;
     f32  gain     = 1.0f;
 
     // ---- the render thread's alone ----
@@ -176,6 +221,24 @@ struct Hifi {
     u32          nstarved = 0;
     i32*         scratch = nullptr;    // kChunkFrames * 8 decoded samples
     u32          scratch_frames = 0, scratch_at = 0;
+    // The chain, and the source: every decoded frame, kept from a little behind the
+    // frame heard to the front of the lead, keyed by programme frame (a count of the
+    // frames rendered, never reset), so a recut is the chain run again over it.
+    Span<const StageDesc* const> stages;
+    f64          desired[kHifiMaxStages][kHifiMaxParams] = {};
+    u32          desired_gen = 0;
+    u64          desired_sent_ns = 0;
+    Chain        chain[2];
+    u64          p0[2] = {};           // the programme frame of each slot's frame 0
+    i32*         src = nullptr;        // src_frames * channels
+    u32          src_frames = 0;
+    u32          keep_behind = 1;      // frames kept behind the frame heard, for a run-in
+    u64          p_valid = 0;          // the first programme frame the source ring holds
+    Segment      segs[kMaxSegments];
+    u32          nsegs = 0;
+    u32          req_id = 0;           // the join request outstanding: a jump's epoch, or an aligned recut's id
+    u32          recut_seq = 0;
+    f64*         fbuf = nullptr;       // kChunkFrames * 8
 };
 
 namespace {
@@ -216,10 +279,93 @@ bool try_join(Hifi& h, u32 epoch, u64 stream) {
     if (!atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) return false; // taken back
     atomic_store(&s.base, stream, MO_RELEASE);
     atomic_store(&h.heard_slot, b, MO_RELEASE);
+    atomic_store(&s.heard_from, stream, MO_RELEASE);
     atomic_store(&h.joined, epoch, MO_RELEASE);
     h.by_join = fade != 0;
     h.fresh   = fade == 0;
     return true;
+}
+
+// An aligned recut: the same music in the same stream frames, rendered again. Joined
+// when its ring holds the frame the callback is at and a fade's worth after it: then the
+// callback crossfades into it from there (or, with nothing sounding, switches). Frames of
+// it already in the past are dropped. Until then the heard ring plays on.
+bool try_align(Hifi& h, u32 id, u64 stream) {
+    u32 b = atomic_load(&h.join_slot, MO_RELAXED);
+    Slot& nb = h.slot[b];
+    Slot& na = h.slot[b ^ 1u];
+    u64 from = atomic_load(&nb.base, MO_ACQUIRE);
+    if (stream < from) return false;
+    u64 at = stream - from;                      // its frame for where the callback is
+    u64 w = atomic_load(&nb.write, MO_ACQUIRE), endf = atomic_load(&nb.end, MO_ACQUIRE);
+    u64 fade = h.running ? h.fade_frames : 0;
+    u64 left_a = atomic_load(&na.write, MO_ACQUIRE) - atomic_load(&na.read, MO_RELAXED);
+    if (left_a < fade) fade = 0;                 // the old one has not a fade's worth left: switch
+    bool ready = w >= at + (fade ? fade : 1) || (w == endf && w >= at);
+    if (!ready) return false;
+    u32 expect = id;
+    if (!atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) return false; // taken back
+    atomic_store(&nb.read, at, MO_RELEASE);
+    atomic_store(&nb.heard_from, stream, MO_RELEASE);
+    atomic_store(&h.join_ns, time_ns(), MO_RELAXED);
+    atomic_store(&h.joined_sent_ns, atomic_load(&h.req_sent_ns, MO_RELAXED), MO_RELAXED);
+    if (!fade) {
+        atomic_store(&h.heard_slot, b, MO_RELEASE);
+        atomic_fetch_add(&h.recuts, 1u, MO_RELAXED);
+        atomic_store(&h.joined, id, MO_RELEASE);
+        return true;
+    }
+    h.xf = true; h.xf_from = b ^ 1u; h.xf_pos = 0; h.xf_id = id;
+    atomic_store(&h.xfading, 1u, MO_RELEASE);
+    return true;
+}
+
+inline f64 sample_of(const Hifi& h, const u8* frame, u32 c) {
+    switch (h.format.sample) {
+    case HifiSampleFormat::S16: return ((const i16*)frame)[c];
+    case HifiSampleFormat::F32: return ((const f32*)frame)[c];
+    default:                    return ((const i32*)frame)[c];
+    }
+}
+inline void put_sample(const Hifi& h, u8* frame, u32 c, f64 v) {
+    switch (h.format.sample) {
+    case HifiSampleFormat::S16: ((i16*)frame)[c] = (i16)llrint(v); break;
+    case HifiSampleFormat::F32: ((f32*)frame)[c] = (f32)v; break;
+    default:                    ((i32*)frame)[c] = (i32)llrint(v); break;
+    }
+}
+
+// The aligned join's fade: old and new, frame for frame, linear over fade_frames, in
+// double and rounded, with no dither: two renders that are the same samples join to
+// those samples. Returns the frames written; at its end the new ring is the heard one.
+u32 crossfade(Hifi& h, u8* dst, u32 frames, u64* stream) {
+    Slot& a = h.slot[h.xf_from];
+    Slot& b = h.slot[h.xf_from ^ 1u];
+    u64 ra = atomic_load(&a.read, MO_RELAXED), rb = atomic_load(&b.read, MO_RELAXED);
+    u32 n = h.fade_frames - h.xf_pos < frames ? h.fade_frames - h.xf_pos : frames;
+    const u32 fb = h.frame_bytes, ch = h.format.channels;
+    for (u32 k = 0; k < n; ++k) {
+        const u8* fa = a.data + (usize)((ra + k) % h.ring_frames) * fb;
+        const u8* fbm = b.data + (usize)((rb + k) % h.ring_frames) * fb;
+        f64 t = (f64)(h.xf_pos + k + 1) / (f64)h.fade_frames;
+        u8* o = dst + (usize)k * fb;
+        for (u32 c = 0; c < ch; ++c) {
+            f64 v = (1.0 - t) * sample_of(h, fa, c) + t * sample_of(h, fbm, c);
+            put_sample(h, o, c, h.gain == 1.0f ? v : v * (f64)h.gain);
+        }
+    }
+    h.xf_pos += n;
+    atomic_store(&a.read, ra + n, MO_RELEASE);
+    atomic_store(&b.read, rb + n, MO_RELEASE);
+    *stream += n;
+    if (h.xf_pos == h.fade_frames) {
+        h.xf = false;
+        atomic_store(&h.heard_slot, h.xf_from ^ 1u, MO_RELEASE);
+        atomic_store(&h.xfading, 0u, MO_RELEASE);
+        atomic_fetch_add(&h.recuts, 1u, MO_RELAXED);
+        atomic_store(&h.joined, h.xf_id, MO_RELEASE);
+    }
+    return n;
 }
 
 // The device's callback, on its realtime thread. Takes from the heard ring; writes
@@ -230,13 +376,20 @@ void hifi_callback(void* user, void* out_v, u32 frames) {
     u8*   out = (u8*)out_v;
     const u32 fb = h.frame_bytes;
     const bool pause = atomic_load(&h.want_pause, MO_RELAXED) != 0;
-    u32 pend = atomic_load(&h.join_pending, MO_ACQUIRE);
+    const u32 req = atomic_load(&h.join_pending, MO_ACQUIRE);
+    bool aligned = req && atomic_load(&h.join_kind, MO_RELAXED) == 1;
+    u32 pend = aligned ? 0 : req; // a flush or a jump waiting: what is heard fades out for it
     u64 stream = atomic_load(&h.read, MO_RELAXED); // only this thread writes it
     u32 produced = 0;
 
     // A few passes: playing; then, if that faded out for a jump, the joined render, in
-    // this same callback when it is ready.
-    for (u32 pass = 0; pass < 4 && produced < frames; ++pass) {
+    // this same callback when it is ready; or an aligned join's crossfade, and after it.
+    for (u32 pass = 0; pass < 6 && produced < frames; ++pass) {
+        if (h.xf) {
+            produced += crossfade(h, out + (usize)produced * fb, frames - produced, &stream);
+            continue;
+        }
+        if (aligned && !(pause && h.running) && try_align(h, req, stream)) { aligned = false; continue; }
         Slot& s = h.slot[atomic_load(&h.heard_slot, MO_RELAXED)];
         u64 r = atomic_load(&s.read, MO_RELAXED);
         u64 w    = atomic_load(&s.write, MO_ACQUIRE);
@@ -351,7 +504,7 @@ void mark(Hifi& h, HifiEventKind kind, u64 at, const char* reason = "") {
 
 // Whether the callback has joined this render: from then on its slot is the heard one.
 void check_joined(Hifi& h) {
-    if (h.pending_epoch && atomic_load(&h.joined, MO_ACQUIRE) == h.pending_epoch) h.pending_epoch = 0;
+    if (h.req_id && atomic_load(&h.joined, MO_ACQUIRE) == h.req_id) { h.req_id = 0; h.pending_epoch = 0; }
 }
 
 // Forgets that a source was starved, once it is gone.
@@ -468,6 +621,8 @@ bool device_fits(const Hifi& h, const AudioFormat& f) {
     return h.device && h.format.rate == f.rate && h.format.channels == f.channels && f.bits <= hifi_sample_bits(h.format.sample);
 }
 
+void setup_chain(Hifi& h, u32 b, const HifiDeviceFormat& df);
+
 // Opens the device for the current source's format, with rings to match. False, with
 // the reason, when it cannot.
 bool open_device(Hifi& h, const char** reason) {
@@ -510,14 +665,26 @@ bool open_device(Hifi& h, const char** reason) {
     u64 w = atomic_load(&s.write, MO_RELAXED);
     atomic_store(&s.base, atomic_load(&h.read, MO_RELAXED) - w, MO_RELEASE); // the frames this render has written still count from where they would have
     atomic_store(&s.read, w, MO_RELEASE);
+    atomic_store(&s.heard_from, atomic_load(&h.read, MO_RELAXED), MO_RELEASE);
     atomic_store(&h.heard_slot, h.wslot, MO_RELEASE);
     atomic_store(&h.join_pending, 0u, MO_RELEASE);
+    atomic_store(&h.xfading, 0u, MO_RELEASE);
+    h.xf = false;
+    // The source ring, and the chain, for this format. What the old ring held was all heard.
+    h.keep_behind = frames_of(0.5);
+    mem_free(h.src);
+    h.src_frames = h.ring_frames + h.keep_behind;
+    h.src = (i32*)mem_alloc((usize)h.src_frames * o.format.channels * 4);
+    h.p_valid = h.p0[h.wslot] + w;
+    setup_chain(h, h.wslot, o.format);
+    if (h.req_id && h.req_id != h.pending_epoch) h.req_id = 0; // an aligned recut has no callback to join it: the new chain is the heard one
     atomic_store(&h.silent_run, (u64)0, MO_RELEASE);
     check_joined(h);
     if (h.pending_epoch) { // a jump that was never joined: there is no callback to join it, so it is the heard render now
         atomic_store(&h.joined, h.pending_epoch, MO_RELEASE);
         check_joined(h);
     }
+    h.req_id = 0;
     os_mutex_lock(&h.lock);
     h.device = o.device;
     h.held   = false;
@@ -529,20 +696,130 @@ bool open_device(Hifi& h, const char** reason) {
     return true;
 }
 
-// Scratch samples (i32 at the source's depth) into this render's ring at its frame `at`.
-void convert_in(Hifi& h, const i32* src, u64 at, u32 frames) {
-    const u32 channels = h.format.channels, bits = h.cur.info.format.bits;
-    u8* ring = h.slot[h.wslot].data;
-    for (u32 i = 0; i < frames; ++i) {
-        u8* dst = ring + (usize)((at + i) % h.ring_frames) * h.frame_bytes;
-        const i32* s = src + (usize)i * channels;
-        switch (h.format.sample) {
-        case HifiSampleFormat::S16: { i16* o = (i16*)dst; for (u32 c = 0; c < channels; ++c) o[c] = (i16)((u32)s[c] << (16 - bits)); } break;
-        case HifiSampleFormat::S24: { i32* o = (i32*)dst; for (u32 c = 0; c < channels; ++c) o[c] = (i32)((u32)s[c] << (24 - bits)); } break;
-        case HifiSampleFormat::S32: { i32* o = (i32*)dst; for (u32 c = 0; c < channels; ++c) o[c] = (i32)((u32)s[c] << (32 - bits)); } break;
-        case HifiSampleFormat::F32: { f32* o = (f32*)dst; f32 k = 1.0f / (f32)((u64)1 << (bits - 1)); for (u32 c = 0; c < channels; ++c) o[c] = (f32)s[c] * k; } break;
-        case HifiSampleFormat::Count: break;
+// ---- the chain and the source ---------------------------------------------------------
+
+// Opens slot b's chain fresh, for the device's format, at the parameters wanted now.
+void setup_chain(Hifi& h, u32 b, const HifiDeviceFormat& df) {
+    Chain& c = h.chain[b];
+    AudioFormat f{df.rate, df.channels, (u16)hifi_sample_bits(df.sample)};
+    c.flat = true;
+    for (u32 i = 0; i < h.stages.len; ++i) {
+        const StageDesc& d = *h.stages[i];
+        if (!c.mem[i]) c.mem[i] = (u8*)mem_alloc(d.memory_bytes ? d.memory_bytes : 1);
+        c.state[i] = d.open(f, Span<u8>(c.mem[i], d.memory_bytes ? d.memory_bytes : 1));
+        for (u32 j = 0; j < d.params.len && j < kHifiMaxParams; ++j) d.set(c.state[i], j, h.desired[i][j]);
+        c.flat = c.flat && d.flat(c.state[i]);
+    }
+    c.gen = h.desired_gen;
+    atomic_store(&h.slot[b].gen, c.gen, MO_RELEASE);
+    atomic_store(&h.slot[b].flat, c.flat ? 1u : 0u, MO_RELEASE);
+}
+
+u32 chain_run_in(const Hifi& h, u32 b) {
+    u32 n = 0;
+    for (u32 i = 0; i < h.stages.len; ++i) { u32 r = h.stages[i]->run_in(h.chain[b].state[i]); if (r > n) n = r; }
+    return n;
+}
+
+// The segment programme frame p is in: the last begun at or before it.
+u32 segment_of(const Hifi& h, u64 p) {
+    u32 k = 0;
+    while (k + 1 < h.nsegs && h.segs[k + 1].p <= p) ++k;
+    return k;
+}
+
+// A source begins at programme frame p. Segments wholly behind what the source ring
+// keeps are let go.
+void begin_segment(Hifi& h, u64 p, u64 first, u32 bits) {
+    const Slot& hs = h.slot[atomic_load(&h.heard_slot, MO_ACQUIRE)];
+    u64 heard_p = h.p0[atomic_load(&h.heard_slot, MO_ACQUIRE)] + atomic_load(&hs.read, MO_ACQUIRE);
+    u64 oldest = heard_p > h.keep_behind ? heard_p - h.keep_behind : 0;
+    while (h.nsegs >= 2 && (h.segs[1].p <= oldest || h.nsegs == kMaxSegments)) {
+        for (u32 k = 1; k < h.nsegs; ++k) h.segs[k - 1] = h.segs[k];
+        --h.nsegs;
+    }
+    if (h.nsegs && h.segs[h.nsegs - 1].p == p) --h.nsegs; // a source that gave nothing: replaced
+    h.segs[h.nsegs++] = Segment{p, first, bits};
+}
+
+// Decoded samples into the source ring at programme frame p.
+void put_source(Hifi& h, const i32* in, u64 p, u32 frames) {
+    const u32 ch = h.format.channels;
+    u32 at = (u32)(p % h.src_frames);
+    u32 first = h.src_frames - at < frames ? h.src_frames - at : frames;
+    memcpy(h.src + (usize)at * ch, in, (usize)first * ch * 4);
+    memcpy(h.src, in + (usize)first * ch, (usize)(frames - first) * ch * 4);
+}
+
+// TPDF dither, a function of the source's frame and the channel rather than a running
+// generator, so two renders of the same frames are the same bits wherever they began:
+// two uniform values, their difference, triangular over (-1, 1) of the last bit.
+inline u64 mix64(u64 x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+inline f64 tpdf(u64 frame, u32 channel) {
+    u64 r = mix64(kDitherSeed ^ (frame * 8 + channel));
+    return (f64)(r & 0xFFFFFFFFull) * (1.0 / 4294967296.0) - (f64)(r >> 32) * (1.0 / 4294967296.0);
+}
+
+// Programme frames [p, p + n) from the source ring, through slot b's chain, into its
+// ring at its frame w; or, `discard`, through the chain and nowhere (a run-in). Each
+// segment's first frame resets the chain: a source is run in from nothing. A flat chain
+// takes the integers through, widened and nothing else, and makes no float.
+void render_frames(Hifi& h, u32 b, u64 p, u64 n, u64 w, bool discard = false) {
+    const Chain& c = h.chain[b];
+    const u32 ch = h.format.channels, fb = h.frame_bytes;
+    const u32 dev_bits = hifi_sample_bits(h.format.sample);
+    u8* ring = h.slot[b].data;
+    while (n) {
+        u32 k = segment_of(h, p);
+        const Segment& sg = h.segs[k];
+        u64 seg_end = k + 1 < h.nsegs ? h.segs[k + 1].p : ~0ull;
+        u64 m64 = seg_end - p < n ? seg_end - p : n;
+        u32 m = m64 < kChunkFrames ? (u32)m64 : kChunkFrames;
+        if (p == sg.p) for (u32 i = 0; i < h.stages.len; ++i) h.stages[i]->reset(c.state[i]);
+        if (c.flat) {
+            if (!discard)
+                for (u32 i = 0; i < m; ++i) {
+                    const i32* sv = h.src + (usize)((p + i) % h.src_frames) * ch;
+                    u8* dst = ring + (usize)((w + i) % h.ring_frames) * fb;
+                    switch (h.format.sample) {
+                    case HifiSampleFormat::S16: { i16* o = (i16*)dst; for (u32 q = 0; q < ch; ++q) o[q] = (i16)((u32)sv[q] << (16 - sg.bits)); } break;
+                    case HifiSampleFormat::S24: { i32* o = (i32*)dst; for (u32 q = 0; q < ch; ++q) o[q] = (i32)((u32)sv[q] << (24 - sg.bits)); } break;
+                    case HifiSampleFormat::S32: { i32* o = (i32*)dst; for (u32 q = 0; q < ch; ++q) o[q] = (i32)((u32)sv[q] << (32 - sg.bits)); } break;
+                    case HifiSampleFormat::F32: { f32* o = (f32*)dst; f32 kq = 1.0f / (f32)((u64)1 << (sg.bits - 1)); for (u32 q = 0; q < ch; ++q) o[q] = (f32)sv[q] * kq; } break;
+                    case HifiSampleFormat::Count: break;
+                    }
+                }
+        } else {
+            f64* x = h.fbuf;
+            const f64 in_scale = 1.0 / (f64)((u64)1 << (sg.bits - 1));
+            for (u32 i = 0; i < m; ++i) {
+                const i32* sv = h.src + (usize)((p + i) % h.src_frames) * ch;
+                for (u32 q = 0; q < ch; ++q) x[(usize)i * ch + q] = (f64)sv[q] * in_scale;
+            }
+            for (u32 i = 0; i < h.stages.len; ++i) h.stages[i]->process(c.state[i], x, m);
+            if (!discard) {
+                const f64 full = (f64)((u64)1 << (dev_bits - 1));
+                for (u32 i = 0; i < m; ++i) {
+                    u8* dst = ring + (usize)((w + i) % h.ring_frames) * fb;
+                    u64 frame = sg.first + (p + i - sg.p);
+                    for (u32 q = 0; q < ch; ++q) {
+                        f64 y = x[(usize)i * ch + q];
+                        if (h.format.sample == HifiSampleFormat::F32) { ((f32*)dst)[q] = (f32)y; continue; }
+                        // An exact zero (mute, a stage's silence) stays digital silence, undithered.
+                        f64 v = y == 0.0 ? 0.0 : floor(y * full + tpdf(frame, q) + 0.5);
+                        if (v > full - 1.0) v = full - 1.0;
+                        if (v < -full) v = -full;
+                        if (h.format.sample == HifiSampleFormat::S16) ((i16*)dst)[q] = (i16)v; else ((i32*)dst)[q] = (i32)v;
+                    }
+                }
+            }
         }
+        p += m; w += m; n -= m;
     }
 }
 
@@ -566,6 +843,7 @@ void start_render(Hifi& h, u32 epoch, bool fade) {
     while (h.queue.pop(&s)) { note(h, HifiEventKind::Released, s.id); forget_starved(h, s.id); }
     h.draining = false;
     h.render_epoch = epoch;
+    u64 front = h.p0[h.wslot] + atomic_load(&h.slot[h.wslot].write, MO_RELAXED); // the new programme goes on from here
     if (!h.device) {
         Slot& w = h.slot[h.wslot];
         atomic_store(&w.base, atomic_load(&h.read, MO_RELAXED), MO_RELEASE);
@@ -573,25 +851,94 @@ void start_render(Hifi& h, u32 epoch, bool fade) {
         atomic_store(&w.read, (u64)0, MO_RELEASE);
         atomic_store(&w.end, (u64)0, MO_RELEASE);
         atomic_store(&h.heard_slot, h.wslot, MO_RELEASE);
+        h.p0[h.wslot] = front;
         h.pending_epoch = 0;
+        h.req_id = 0;
     } else {
         u32 b = h.wslot ^ 1u;  // the heard slot is this render's: the other is free
-        if (h.pending_epoch) {
-            u32 expect = h.pending_epoch;
-            if (atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) b = h.wslot; // taken back: its slot is free again
-            // else the callback joined it just now: it is heard, and the other slot is free
+        if (h.req_id) {
+            u32 expect = h.req_id;
+            if (atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) {
+                b = h.wslot;   // taken back: its slot is free again, and the heard one is what it was
+            } else {
+                // The callback took it: a jump is joined at once; an aligned recut's fade
+                // may still be reading the old ring, a fade's length at most.
+                for (u32 i = 0; i < 400 && atomic_load(&h.joined, MO_ACQUIRE) != h.req_id; ++i) time_sleep(0.0005);
+            }
+            h.req_id = 0;
         }
         Slot& w = h.slot[b];
         atomic_store(&w.write, (u64)0, MO_RELEASE);
         atomic_store(&w.read, (u64)0, MO_RELEASE);
         atomic_store(&w.end, (u64)0, MO_RELEASE);   // nothing yet, and nothing expected until a source says
+        setup_chain(h, b, h.format);
+        h.p0[b] = front;
         atomic_store(&h.join_slot, b, MO_RELAXED);
         atomic_store(&h.join_fade, fade ? 1u : 0u, MO_RELAXED);
+        atomic_store(&h.join_kind, 0u, MO_RELAXED);
+        atomic_store(&h.req_sent_ns, h.desired_sent_ns, MO_RELAXED);
         h.wslot = b;
         h.pending_epoch = epoch;
+        h.req_id = epoch;
         atomic_store(&h.join_pending, epoch, MO_RELEASE);
     }
     atomic_store(&h.flushes_done, epoch, MO_RELEASE);
+}
+
+// The aligned recut. The heard render's chain no longer has the parameters wanted: a new
+// render in the other slot takes over from the next frame the callback will take, the
+// same programme in the same stream frames, the chain run again over the source ring
+// (after a run-in from before it), and from the front of the lead on it is the render
+// written. The callback crossfades into it when it has its first frames. One recut is in
+// flight at a time; a change that comes meanwhile waits for it, and then the newest
+// parameters are the next one's.
+void start_recut(Hifi& h) {
+    const u32 a = h.wslot, b = a ^ 1u;
+    Slot& sa = h.slot[a];
+    Slot& sb = h.slot[b];
+    u64 ra = atomic_load(&sa.read, MO_ACQUIRE), wa = atomic_load(&sa.write, MO_RELAXED);
+    if (ra > wa) ra = wa;
+    u64 ps = h.p0[a] + ra, pf = h.p0[a] + wa;
+    setup_chain(h, b, h.format);
+    atomic_store(&sb.read, (u64)0, MO_RELEASE);
+    atomic_store(&sb.write, (u64)0, MO_RELEASE);
+    atomic_store(&sb.base, atomic_load(&sa.base, MO_ACQUIRE) + ra, MO_RELEASE);
+    if (!h.chain[b].flat) {
+        // A run-in: the frames before it, through the chain, to settle it; never back past
+        // where its source began, or what the source ring still holds.
+        u64 back = chain_run_in(h, b);
+        u64 floor_p = h.nsegs ? h.segs[segment_of(h, ps)].p : ps;
+        if (floor_p < h.p_valid) floor_p = h.p_valid;
+        u64 from = ps - (ps - floor_p < back ? ps - floor_p : back);
+        if (from < ps) render_frames(h, b, from, ps - from, 0, true);
+    }
+    // The first chunk, and the request: the callback can join as soon as it has a fade's
+    // worth past where it is. The rest of the lead is rendered behind it, each chunk
+    // published as it is done; the callback reads nothing past what is.
+    u64 total = pf - ps, first = total < 2 * kChunkFrames ? total : 2 * kChunkFrames;
+    render_frames(h, b, ps, first, 0);
+    u64 ea = atomic_load(&sa.end, MO_RELAXED);
+    u64 eb = ea == kNever ? kNever : ea > ra ? ea - ra : 0;
+    atomic_store(&sb.end, first == total ? eb : kNever, MO_RELEASE);
+    atomic_store(&sb.write, first, MO_RELEASE);
+    h.p0[b] = ps;
+    h.wslot = b;
+    h.req_id = kAligned | (++h.recut_seq & 0x7FFFFFFFu);
+    atomic_store(&h.join_slot, b, MO_RELAXED);
+    atomic_store(&h.join_kind, 1u, MO_RELAXED);
+    atomic_store(&h.req_sent_ns, h.desired_sent_ns, MO_RELAXED);
+    atomic_store(&h.join_pending, h.req_id, MO_RELEASE);
+    for (u64 done = first; done < total;) {
+        u64 m = total - done < kChunkFrames ? total - done : kChunkFrames;
+        render_frames(h, b, ps + done, m, done);
+        done += m;
+        if (done == total) atomic_store(&sb.end, eb, MO_RELEASE);
+        atomic_store(&sb.write, done, MO_RELEASE);
+    }
+}
+
+bool wants_recut(const Hifi& h) {
+    return h.device && !h.draining && !h.req_id && h.chain[h.wslot].gen != h.desired_gen;
 }
 
 // Takes the commands waiting. Returns false on Quit.
@@ -609,6 +956,12 @@ bool take_commands(Hifi& h) {
                 format(n.event.reason, sizeof n.event.reason, "too many sources are queued");
                 Note rel; rel.event.kind = HifiEventKind::Released; rel.event.source = c.source.id; rel.epoch = h.render_epoch;
                 os_mutex_lock(&h.lock); h.notes.push(n); h.notes.push(rel); os_mutex_unlock(&h.lock);
+            }
+        } else if (c.kind == CmdKind::Param) {
+            if (c.stage < h.stages.len && c.param < h.stages[c.stage]->params.len && c.param < kHifiMaxParams) {
+                h.desired[c.stage][c.param] = c.value;
+                h.desired_gen = c.epoch;
+                h.desired_sent_ns = c.sent_ns;
             }
         } else if (c.kind == CmdKind::Starve) {
             if (!starved_reason(h, c.source.id) && h.nstarved < kMaxStarved) {
@@ -666,6 +1019,7 @@ bool try_hold(Hifi& h) {
 // negative number to wait for a command.
 f64 render_step(Hifi& h) {
     check_joined(h);
+    if (wants_recut(h)) start_recut(h);
     Slot& s = h.slot[h.wslot];
     if (!h.have_cur) {
         prepare_next(h);
@@ -731,11 +1085,6 @@ f64 render_step(Hifi& h) {
         u32 room = h.ring_frames - (u32)used;
         if (room == 0) return atomic_load(&h.want_pause, MO_RELAXED) ? -1.0 : 0.005; // the lead is full
         u32 n = left < room ? left : room;
-        convert_in(h, h.scratch + (usize)h.scratch_at * h.format.channels, w, n);
-        if (!h.cur_marked) {
-            mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
-            h.cur_marked = true;
-        }
         // If these are the stream's last frames for now, say so before they can be seen:
         // the callback must not take the end of the music for a lead running dry.
         // The stream goes on only if another source is ready that this device can take:
@@ -750,6 +1099,14 @@ f64 render_step(Hifi& h) {
             if (h.have_nxt && h.nxt.opening && w - atomic_load(&s.read, MO_ACQUIRE) > h.start_frames && !atomic_load(&h.want_pause, MO_RELAXED))
                 return kWantNap;
         }
+        if (!h.cur_marked) {
+            mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
+            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits);
+            h.cur_marked = true;
+        }
+        u64 p = h.p0[h.wslot] + w;
+        put_source(h, h.scratch + (usize)h.scratch_at * h.format.channels, p, n);
+        render_frames(h, h.wslot, p, n, w);
         bool goes_on = !last || (h.have_nxt && !h.nxt.opening && device_fits(h, h.nxt.info.format));
         atomic_store(&s.end, goes_on ? kNever : w + n, MO_RELEASE);
         atomic_store(&s.write, w + n, MO_RELEASE);
@@ -758,7 +1115,11 @@ f64 render_step(Hifi& h) {
         w += n;
     }
     if (h.cur_done && h.scratch_at == h.scratch_frames) {
-        if (!h.cur_marked) { mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w); h.cur_marked = true; } // a source with no frames at all
+        if (!h.cur_marked) { // a source with no frames at all
+            mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
+            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits);
+            h.cur_marked = true;
+        }
         mark(h, HifiEventKind::Ended, w, h.cur_reason);
         release_cur(h);
     }
@@ -818,9 +1179,14 @@ Hifi* hifi_create(const HifiConfig& config) {
     os_mutex_init(&h->lock);
     os_cond_init(&h->wake);
     h->scratch = (i32*)mem_alloc((usize)kChunkFrames * 8 * sizeof(i32));
+    h->fbuf = (f64*)mem_alloc((usize)kChunkFrames * 8 * sizeof(f64));
+    h->stages = config.stages;
+    if (h->stages.len > kHifiMaxStages) h->stages.len = kHifiMaxStages;
+    for (u32 i = 0; i < h->stages.len; ++i)
+        for (u32 j = 0; j < h->stages[i]->params.len && j < kHifiMaxParams; ++j) h->desired[i][j] = h->stages[i]->params[j].initial;
     if (!os_thread_start(&h->thread, render_thread, h)) {
         os_cond_destroy(&h->wake); os_mutex_destroy(&h->lock);
-        mem_free(h->scratch); mem_free(h);
+        mem_free(h->scratch); mem_free(h->fbuf); mem_free(h);
         return nullptr;
     }
     return h;
@@ -834,6 +1200,9 @@ void hifi_destroy(Hifi* h) {
     os_cond_destroy(&h->wake);
     os_mutex_destroy(&h->lock);
     for (Slot& s : h->slot) mem_free(s.data);
+    for (Chain& ch : h->chain) for (u8* m : ch.mem) mem_free(m);
+    mem_free(h->src);
+    mem_free(h->fbuf);
     mem_free(h->scratch);
     mem_free(h);
 }
@@ -871,6 +1240,14 @@ void begin_render(Hifi* h, CmdKind kind, const HifiSource* sources, u32 n) {
 void hifi_flush(Hifi* h) { begin_render(h, CmdKind::Flush, nullptr, 0); }
 
 void hifi_jump(Hifi* h, const HifiSource* sources, u32 n) { begin_render(h, CmdKind::Jump, sources, n); }
+
+u32 hifi_set_param(Hifi* h, u32 stage, u32 param, f64 value) {
+    Cmd c; c.kind = CmdKind::Param; c.stage = stage; c.param = param; c.value = value;
+    c.epoch = ++h->param_gen;
+    c.sent_ns = time_ns();
+    send(*h, c);
+    return c.epoch;
+}
 
 void hifi_starve(Hifi* h, u64 id, const char* reason) {
     Cmd c; c.kind = CmdKind::Starve; c.source.id = id;
@@ -928,6 +1305,15 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
         h->pending.remove(0);
     }
 
+    // The parameters heard: the heard ring's, once its first frame has reached the ear.
+    const Slot& hs = h->slot[atomic_load(&h->heard_slot, MO_ACQUIRE)];
+    u32 gen = atomic_load(&hs.gen, MO_ACQUIRE);
+    if (gen != h->gen_said && h->heard >= atomic_load(&hs.heard_from, MO_ACQUIRE) && n < cap) {
+        HifiEvent e; e.kind = HifiEventKind::ParamsHeard; e.frames = gen;
+        h->gen_said = gen;
+        out[n++] = e;
+    }
+
     u32 under = atomic_load(&h->underruns, MO_RELAXED);
     if (under != h->seen_underruns && n < cap) {
         HifiEvent e; e.kind = HifiEventKind::Underrun; e.frames = under - h->seen_underruns;
@@ -948,7 +1334,7 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     os_mutex_unlock(&h->lock);
     s.flushing = atomic_load(&h->flushes_done, MO_ACQUIRE) != h->epoch;
     s.paused  = atomic_load(&h->want_pause, MO_RELAXED) != 0;
-    s.joining = atomic_load(&h->join_pending, MO_ACQUIRE) != 0;
+    s.joining = atomic_load(&h->join_pending, MO_ACQUIRE) != 0 || atomic_load(&h->xfading, MO_ACQUIRE) != 0;
     s.taken   = atomic_load(&h->read, MO_ACQUIRE);
     const Slot& hs = h->slot[atomic_load(&h->heard_slot, MO_ACQUIRE)];
     s.written = atomic_load(&hs.base, MO_ACQUIRE) + atomic_load(&hs.write, MO_ACQUIRE);
@@ -958,6 +1344,12 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     u64 lw = atomic_load(&ls.write, MO_ACQUIRE), lr = atomic_load(&ls.read, MO_ACQUIRE);
     s.lead_frames = lw > lr ? (u32)(lw - lr) : 0;
     s.underruns = atomic_load(&h->underruns, MO_RELAXED);
+    s.flat = atomic_load(&hs.flat, MO_ACQUIRE) != 0;
+    s.params_heard = h->gen_said;
+    s.recuts = atomic_load(&h->recuts, MO_RELAXED);
+    u64 jn = atomic_load(&h->join_ns, MO_RELAXED), sn = atomic_load(&h->joined_sent_ns, MO_RELAXED);
+    s.recut_seconds = jn > sn && sn ? (f64)(jn - sn) * 1e-9 : 0.0;
+    s.exact = s.exact && s.flat && !s.joining;
     s.heard    = h->heard;
     s.source   = h->cur_source;
     s.position = h->cur_source && h->heard > h->cur_frame ? h->cur_first + (h->heard - h->cur_frame) : 0;

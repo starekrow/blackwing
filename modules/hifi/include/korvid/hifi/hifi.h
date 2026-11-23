@@ -25,6 +25,7 @@
 // hifi does no I/O. A source is a sparse span its caller fills; when a decoder needs bytes
 // that are not there yet, hifi says so with a Want, and looks again shortly.
 #pragma once
+#include "korvid/hifi/stage.h"
 #include "korvid/hifi_codec/decoder.h"
 #include "korvid/hifi_platform/device.h"
 
@@ -40,6 +41,9 @@ struct HifiConfig {
     f64 ramp_seconds  = 0.005; // the fade to and from silence on pause, resume, flush and underrun
     f64 fade_seconds  = 0.010; // a jump's fade: the old audio out at once, the new in
     f64 join_seconds  = 0.050; // the lead a jump's new audio must have before it is heard
+    // The chain every render runs, in order, at most kHifiMaxStages: fixed for the
+    // path's life. Its parameters change through hifi_set_param.
+    Span<const StageDesc* const> stages;
 };
 
 // One thing to play: a decoder and the file it reads. The span's bytes and map must stay
@@ -61,6 +65,7 @@ enum class HifiEventKind : u8 {
     Released, // the path will not touch the source's bytes again. Once per source, whatever became of it
     Underrun, // the lead ran dry while more was expected: `frames` is how many times since the last poll
     Want,     // the source's decoder is waiting for `need`, a range of its file. Said once per wait
+    ParamsHeard, // the chain's parameters as of generation `frames` (hifi_set_param's) are what is heard now
     Count
 };
 
@@ -78,11 +83,15 @@ struct HifiStatus {
     bool             device_open = false;
     HifiDeviceFormat format;         // what the device granted
     bool             shared      = false;
-    bool             exact       = false; // every sample reaching the device is the source's own: the format carries its bits, unshared
+    bool             exact       = false; // every sample reaching the device is the source's own: the format carries its bits, unshared, the chain flat, no join under way
     bool             paused      = false;
     bool             held        = false; // the device is held: nothing to play, and what it had was heard
     bool             flushing    = false; // a hifi_flush or hifi_jump has not reached the render thread yet
-    bool             joining     = false; // a jump's new audio is waiting to be joined
+    bool             joining     = false; // a jump's or a recut's new audio is waiting to be joined, or being faded in
+    bool             flat        = true;  // every stage of the heard render's chain passes audio unchanged
+    u32              params_heard = 0;    // the generation of the parameters heard
+    u32              recuts      = 0;     // aligned joins done, ever
+    f64              recut_seconds = 0.0; // the last one: from its newest change reaching hifi to the join's first frame in the callback
     u64              written     = 0; // stream frames the render thread has put in the lead being heard, ever (a jump's count once it is joined)
     u64              taken       = 0; // stream frames the device has taken (or skipped past, after a flush)
     u64              heard       = 0; // stream frames the listener has heard
@@ -119,6 +128,13 @@ void hifi_jump(Hifi* h, const HifiSource* sources, u32 n);
 // decode ends there, Damaged with `reason`, or it Fails if it had not opened yet. What
 // was decoded before plays.
 void hifi_starve(Hifi* h, u64 id, const char* reason);
+
+// Sets a parameter of the chain's stage `stage`, by index. What is heard changes by a
+// recut: a new render of the same music from the next frame the callback takes, run
+// through the chain with the new value, crossfaded in over fade_seconds. Returns the
+// change's generation, which a ParamsHeard event names once it is heard. Changes that
+// come faster than recuts are taken together: the next recut renders the newest.
+u32  hifi_set_param(Hifi* h, u32 stage, u32 param, f64 value);
 
 // Giving a piece back. A decoder may have seen a piece's byte set just before it was
 // cleared, and still be reading it. Clear the byte, then take a fence; once

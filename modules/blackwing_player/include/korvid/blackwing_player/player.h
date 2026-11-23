@@ -44,6 +44,11 @@ struct PlayerSeek    { u64 item; u64 frame; };
 // Goes `seconds` on (negative: back) from wherever the last seek was going, or from the
 // frame heard, so repeats add up.
 struct PlayerSeekBy  { f64 seconds; };
+// Sets a parameter of a stage of the chain (player.chain's rows, by index): volume is
+// stage 0, parameter 0, in dB (0 at most); its parameter 1 is mute. What is heard changes
+// by a recut, within a callback or two; PlayerParamChanged says when it is heard. A
+// control that is dragged may send one per tick: only the newest value is rendered.
+struct PlayerSetParam { u32 stage; u32 param; f64 value; };
 
 // ---- notifications: events the player emits --------------------------------------------
 // Each carries `seq`, which counts up by one across all of them. Events of different types
@@ -55,6 +60,9 @@ struct PlayerSeekBy  { f64 seconds; };
 struct PlayerTrackStarted { u64 item; u32 rate; u16 channels; u16 bits; u64 frames; u32 seq; };
 // A seek's target frame has been heard. Not a new PlayerTrackStarted: the item goes on.
 struct PlayerSeeked       { u64 item; u64 frame; u32 seq; };
+// A parameter's new value is what is heard. Changes that came faster than they could
+// each be rendered are said once, at the value heard.
+struct PlayerParamChanged { u32 stage; u32 param; f64 value; u32 seq; };
 // Its last frame has been heard. `damaged`: the file was cut short or spoiled, and
 // `reason` says how; what was heard was good.
 struct PlayerTrackEnded   { u64 item; u64 frames; u32 seq; bool damaged; char reason[96]; };
@@ -121,19 +129,35 @@ struct PlayerTransport {
     u64  seek_frame = 0;
 };
 
+// A row of the ktable "player.chain": the component PlayerStage, one row per stage of the
+// chain, in order, fixed at startup. Its parameters are the values heard.
+struct PlayerStage {
+    u32  index;
+    u8   flat;          // with these parameters it passes audio unchanged
+    u8   params_len;
+    u16  pad;
+    char name[32];
+    char param_names[48][16];
+    f64  params[48];
+};
+
 // The resource "player.output": the device and the lead, as hifi reports them.
 struct PlayerOutput {
     u8   open      = 0; // a device is open
     u8   shared    = 0; // it mixes other streams in, or converts on the way
-    u8   exact     = 0; // every sample reaching it is the file's own
+    u8   exact     = 0; // every sample reaching it is the file's own: unshared, its bits held, every stage flat, no join under way
     u8   sample    = 0; // a HifiSampleFormat
     u16  channels  = 0;
     u16  pad       = 0;
     u32  rate      = 0;
     u32  lead_frames = 0; // decoded and ready, not yet taken by the device
     u32  underruns = 0;   // ever
-    u32  pad2      = 0;
-    u64  bytes_held = 0;  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
+    u8   joining   = 0;   // a recut or a jump is being joined
+    u8   pad3[3]   = {};
+    u64  bytes_held = 0;
+    f64  recut_seconds = 0.0; // the last recut: from the change reaching hifi to the join's first frame leaving the callback
+    u32  recuts    = 0;   // ever
+    u32  pad4      = 0;  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
 };
 
 // ---- setting up ----------------------------------------------------------------------------

@@ -47,6 +47,38 @@ callback has said where that slot's frame 0 fell. A flush is the same with nothi
 it, ramped (`ramp_seconds`) rather than faded, and what is added afterwards starts clean
 at full level.
 
+**The source ring.** Every frame decoded is kept, before any stage, in a ring of the
+decoder's own integers keyed by programme frame (a count of frames rendered, never
+reset): from half a second behind the frame heard to the front of the lead. With it,
+each slot's ring is the chain run over the source ring, and the path is always "ready":
+a change of parameters never seeks or decodes again. A source's first frame resets the
+chain, so a source is run in from nothing, at a gapless boundary too.
+
+**Stages** (`stage.h`): a record of functions over memory they are handed (`open`, `set`,
+`process` in f64 in place, `flat`, `run_in`, `reset`), the decoder contract's sibling. The
+chain is fixed at `hifi_create` (`HifiConfig::stages`); each slot has its own instances.
+With every stage flat the slot takes the decoder's integers through, widened and nothing
+else, and makes no float. Otherwise samples go to f64 at full scale +-1, through the
+chain, and back to the device's word with TPDF dither that is a function of the source's
+frame and the channel, not a running generator: two renders of the same frames with the
+same parameters are the same bits wherever they began. An exact zero stays zero,
+undithered, so mute is digital silence. Into a float device, no dither.
+
+**The aligned recut.** `hifi_set_param` changes what the render thread wants. When the
+heard render's parameters are not that, the render thread starts a new render in the
+other slot from the next frame the callback will take, in the same stream frames: a
+run-in from before it (the longest a stage asks for, not past its source's start),
+then the chain over the source ring to the front of the lead, published a chunk at a
+time, and the join requested after the first chunk. From then on it is the render
+decoded into. The callback, once the new ring holds the frame it is at and a fade's
+worth more, crossfades old into new over `fade_seconds`, frame for frame: the two
+samples mixed linearly in double and rounded, without dither, so two renders that are
+the same samples join to those samples. Frames of the new one already in the past are
+dropped. Until then the old one plays on, so a slow recut is a later change and never
+silence. Paused or held, it switches with no fade when play lets it go. One recut is in
+flight at a time; changes that arrive meanwhile wait, and the next recut renders the
+newest. `ParamsHeard` says which generation of parameters is being heard.
+
 **A source can start anywhere.** `HifiSource::start` is the frame it begins at (the
 decoder seeks there, waiting for bytes like any other read), and `seek` says it was
 being heard already: its first mark is `Seeked`, not `Started`. The status's `position`
@@ -153,14 +185,20 @@ Header `korvid/hifi/hifi.h`:
 | name | kind | what |
 |---|---|---|
 | `HifiConfig` | record | `device`, `device_backend`, `lead_seconds` (5), `start_seconds` (0.25), `ramp_seconds` (0.005), `fade_seconds` (0.010), `join_seconds` (0.050) |
+| `HifiConfig::stages` | span | the chain, fixed for the path's life |
 | `HifiSource` | record | `id`, `decoder`, `file` (a `SparseSpan`), `start`, `seek` |
-| `HifiEventKind` | enum | `Started`, `Seeked`, `Ended`, `Failed`, `Released`, `Underrun`, `Want` |
+| `HifiEventKind` | enum | `Started`, `Seeked`, `Ended`, `Failed`, `Released`, `Underrun`, `Want`, `ParamsHeard` |
 | `HifiEvent` | record | `kind`, `source`, `info`, `status`, `frames`, `need`, `reason` |
-| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
+| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `flat`, `params_heard`, `recuts`, `recut_seconds`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
 | `hifi_create(config)`, `hifi_destroy(h)` | functions | the path and its render thread |
 | `hifi_add_source(h, source)` | function | queue a source |
 | `hifi_pause(h)`, `hifi_play(h)`, `hifi_flush(h)` | functions | hold, let go, drop everything |
 | `hifi_jump(h, sources, n)` | function | everything replaced by these: the old fades out, the new fades in |
+| `hifi_set_param(h, stage, param, value)` | function | a parameter of the chain, heard by a recut; returns its generation |
+
+Header `korvid/hifi/stage.h`: `StageDesc` (`name`, `memory_bytes`, `params`, `open`,
+`set`, `process`, `flat`, `run_in`, `reset`), `StageParam` (`name`, `initial`, `lo`,
+`hi`), `kHifiMaxStages` (4), `kHifiMaxParams` (48).
 | `hifi_starve(h, id, reason)` | function | a source's bytes will not come |
 | `hifi_read_fence(h)`, `hifi_read_passed(h, fence)` | functions | when a piece given back is no longer read |
 | `hifi_poll(h, out, cap)`, `hifi_status(h, out)` | functions | events since last time; where things stand |
@@ -185,7 +223,20 @@ and publish what it says.
   `source` and `position` in the status are as of the last poll.
 - **Exact means untouched.** With no pause, flush or underrun, every frame that reaches
   the device is the decoder's sample, shifted up into the device's word. `exact` in the
-  status says the device's format holds the source's bits and the device is not shared.
+  status says the device's format holds the source's bits, the device is not shared,
+  every stage of the heard chain is flat, and no join is under way.
+- **The source ring costs a copy of every frame decoded**, and its memory: the lead and
+  half a second, in the decoder's integers (7.7 MB at 192 kHz stereo with a five-second
+  lead). It is always kept.
+- **A recut changes what is heard within a callback or two**: through PipeWire at 44.1
+  kHz, 2 to 13 ms from the change reaching the path to the join's first frame leaving
+  the callback. What is left is the render thread's nap when the lead is full (5 ms at
+  most) and the callback's period. The tick before the change reaches the path, and the
+  device after the callback, are not in it.
+- **A recut is exact when the chain has no history.** A gain has none. An IIR stage
+  (the equalizer, milestone 5) is settled by its run-in but never forgets entirely, so a
+  recut with it unchanged is expected to come close to a straight render, not to match
+  it bit for bit.
 - **The first and last frames of a ramp are not exact.** A pause costs `ramp_seconds` of
   changed samples each side.
 - **An underrun is a ramp, not a cut**, and playback does not restart until the lead is
@@ -213,13 +264,18 @@ starved half way ends `Damaged` with the reason, exact up to there, and one star
 before it opened fails. A seek within a source fades out at once, lands on its frame
 (exact after the fade in), says `Seeked` and counts its position from the target; a
 jump to a source whose bytes are slow is silence until they come; a jump that takes the
-place of one never joined; a jump while paused waits for play.
+place of one never joined; a jump while paused waits for play. With a gain stage of the
+tests' own: a dozen recuts with nothing changed give the file's MD5 (flat), or a
+straight -6 dB render bit for bit (not flat); a change from -6 to -12 dB is the -6
+render to the join, the fade's mix of the two renders to the sample, then the -12
+render, with no step larger than the two renders' own and the fade's slope; 200 changes
+dragged over four seconds end at the last value in about twenty recuts, no underrun; a
+change while paused is heard from the resume with no fade.
 
 ## Not in this module
 
 Reading files, the queue and what plays next (`blackwing_player`). Devices
-(`hifi_platform`). Decoders (`hifi_codec`). Seek, volume, the EQ and the recut (slice 2,
-milestones 3 to 6).
+(`hifi_platform`). Decoders (`hifi_codec`). The stages themselves (`hifi_eq`).
 
 ## See also
 

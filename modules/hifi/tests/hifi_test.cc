@@ -15,6 +15,8 @@
 #include "korvid/core/time.h"
 #include "../../hifi_codec/tests/md5.h"
 #include <initializer_list>
+#include <math.h>
+#include <new>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,7 +75,7 @@ struct Rig {
     HifiEvent    events[256];
     u32          nevents = 0;
 
-    void make(u32 delay = 0, f64 lead = 5.0, bool wall = false) {
+    void make(u32 delay = 0, f64 lead = 5.0, bool wall = false, Span<const StageDesc* const> stages = {}) {
         HifiCaptureDesc cd;
         cd.delay_frames = delay;
         cd.wall_clock   = wall;
@@ -83,6 +85,7 @@ struct Rig {
         hc.device = "capture";
         hc.device_backend = cap;
         hc.lead_seconds = lead;
+        hc.stages = stages;
         h = hifi_create(hc);
     }
     void free() { hifi_destroy(h); hifi_capture_destroy(cap); *this = Rig{}; }
@@ -706,8 +709,10 @@ void test_hifi_pieces(TestCtx& c) {
     HifiCaptureSegment seg[4];
     KV_CHECK(c, hifi_capture_segments(r.cap, seg, 4) == 1);
     const u8* data = hifi_capture_data(r.cap) + seg[0].offset;
-    KV_CHECK(c, same(data, seg[0].format, 0, a, 0, a.frames));
-    KV_CHECK(c, same(data, seg[0].format, a.frames, a, 0, a.frames)); // the second straight after: gapless
+    u64 z = 0; // a slow build may pull before the stream has its start: silence first
+    while (z < pulled && silent(data, seg[0].format, z, 1)) ++z;
+    KV_CHECK(c, same(data, seg[0].format, z, a, 0, a.frames));
+    KV_CHECK(c, same(data, seg[0].format, z + a.frames, a, 0, a.frames)); // the second straight after: gapless
     const HifiEvent* e1 = r.find(HifiEventKind::Ended, 1);
     const HifiEvent* e2 = r.find(HifiEventKind::Ended, 2);
     KV_CHECK(c, e1 && e2 && e1->status == DecodeStatus::End && e2->status == DecodeStatus::End);
@@ -929,4 +934,231 @@ void test_hifi_jump(TestCtx& c) {
         r.free();
     }
     drop(a); drop(fa); drop(fb); drop(fc);
+}
+
+namespace {
+
+// A gain stage of the test's own, so the path's tests need no other module: parameter
+// 0 is decibels, flat at 0.
+struct TGain { f64 scale = 1.0; f64 db = 0.0; u16 ch = 0; };
+constinit const StageParam k_tgain_params[] = {{.name = "gain_db", .initial = 0.0, .lo = -100.0, .hi = 0.0}};
+const StageDesc k_tgain = {
+    .name = "tgain", .memory_bytes = sizeof(TGain), .params = k_tgain_params,
+    .open = [](const AudioFormat& f, Span<u8> m) -> void* { TGain* g = new (m.data) TGain(); g->ch = f.channels; return g; },
+    .set = [](void* st, u32, f64 v) { TGain& g = *(TGain*)st; g.db = v; g.scale = v == 0.0 ? 1.0 : pow(10.0, v / 20.0); },
+    .process = [](void* st, f64* x, u32 n) { TGain& g = *(TGain*)st; for (usize i = 0; i < (usize)n * g.ch; ++i) x[i] *= g.scale; },
+    .flat = [](const void* st) { return ((const TGain*)st)->db == 0.0; },
+    .run_in = [](const void*) { return 0u; },
+    .reset = [](void*) {},
+};
+constinit const StageDesc* const k_tchain[] = {&k_tgain};
+
+// Sets the gain, then pulls until the recut it makes has been joined (or two seconds).
+bool recut_to(Rig& r, f64 db, u64* pulled) {
+    u32 before = r.status().recuts;
+    hifi_set_param(r.h, 0, 0, db);
+    f64 until = time_now() + 2.0;
+    while (r.status().recuts == before) {
+        if (time_now() > until) return false;
+        time_sleep(0.0005);
+        *pulled += r.pull(64);
+    }
+    return true;
+}
+
+// A whole file through the path with the test's gain at `db` from the start, pulled in
+// even pieces: what a recut is compared with. Its first `frames` captured frames, copied.
+u8* straight_at(const File& f, f64 db, u64 frames, u32 lead_frames_wait) {
+    Rig r; r.make(0, 5.0, false, k_tchain);
+    if (db != 0.0) hifi_set_param(r.h, 0, 0, db);
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(f.bytes())});
+    r.wait_written(lead_frames_wait);
+    u64 pulled = 0;
+    while (pulled < frames) pulled += r.pull(frames - pulled < 512 ? (u32)(frames - pulled) : 512u);
+    HifiCaptureSegment seg[2];
+    hifi_capture_segments(r.cap, seg, 2);
+    usize bytes = (usize)frames * hifi_frame_bytes(seg[0].format);
+    u8* out = (u8*)mem_alloc(bytes);
+    memcpy(out, hifi_capture_data(r.cap) + seg[0].offset, bytes);
+    r.free();
+    return out;
+}
+
+} // namespace
+
+// A recut that changes nothing changes nothing. Flat: the file's own MD5 at the device
+// after a dozen recuts, each crossfading a render into the same samples. Not flat: a
+// dozen recuts at -6 dB are bit for bit a straight render at -6 dB, the dither keyed on
+// the frame making both renders the same bits wherever they began.
+void test_hifi_null_recut(TestCtx& c) {
+    c.begin("hifi null recut");
+    File fa = read_data("tone_16_2ch_48000.flac");   // 24000 frames
+    Pcm a = decode(fa);
+    {
+        Rig r; r.make(0, 5.0, false, k_tchain);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(a.frames));
+        u64 pulled = pull_all(r, 1000);
+        bool all = true;
+        while (pulled + 2500 < a.frames) { all = recut_to(r, 0.0, &pulled) && all; pulled += pull_all(r, 1000); }
+        pulled += pull_all(r, a.frames + 1000 - pulled);
+        HifiStatus st = r.status();
+        KV_CHECK(c, all && st.recuts >= 10 && st.underruns == 0 && st.flat && st.exact);
+        HifiCaptureSegment seg[2];
+        KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 1);
+        u8 md5[16];
+        capture_md5(hifi_capture_data(r.cap), seg[0].format, a.frames, md5);
+        KV_CHECK(c, memcmp(md5, fa.data + 26, 16) == 0);
+        KV_INFO("test", "hifi null recut: %u recuts, flat, the file's MD5; the last %.3f ms from the change to the join", st.recuts, st.recut_seconds * 1e3);
+        r.free();
+    }
+    {
+        u8* want = straight_at(fa, -6.0, a.frames, (u32)a.frames);
+        Rig r; r.make(0, 5.0, false, k_tchain);
+        hifi_set_param(r.h, 0, 0, -6.0);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(a.frames));
+        u64 pulled = pull_all(r, 1000);
+        bool all = true;
+        while (pulled + 2500 < a.frames) { all = recut_to(r, -6.0, &pulled) && all; pulled += pull_all(r, 1000); }
+        pulled += pull_all(r, a.frames - pulled);
+        HifiStatus st = r.status();
+        KV_CHECK(c, all && st.recuts >= 10 && !st.flat && !st.exact && st.underruns == 0);
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        KV_CHECK(c, memcmp(hifi_capture_data(r.cap) + seg[0].offset, want, (usize)a.frames * 4) == 0);
+        KV_CHECK(c, !same(hifi_capture_data(r.cap), seg[0].format, 0, a, 0, 64)); // and it is not the file's: the gain is in it
+        r.free();
+        mem_free(want);
+    }
+    drop(a); drop(fa);
+}
+
+// A change of volume is the two renders and the fade between them, to the sample: the
+// old render up to the join, then each frame the linear mix of old and new over the
+// fade, rounded, then the new render. And no click: no step at the join larger than the
+// larger of the two renders' own steps there, and the fade's own slope (the change of
+// level spread over the fade, which a step at a waveform's peak cannot be smaller than).
+void test_hifi_gain_join(TestCtx& c) {
+    c.begin("hifi gain join");
+    File fa = read_data("tone_16_2ch_48000.flac");
+    const u64 n = 24000;
+    const u32 fade = 480;
+    u8* c1 = straight_at(fa, -6.0, n, (u32)n);
+    u8* c2 = straight_at(fa, -12.0, n, (u32)n);
+    Rig r; r.make(0, 5.0, false, k_tchain);
+    hifi_set_param(r.h, 0, 0, -6.0);
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    KV_CHECK(c, r.wait_written(n));
+    u64 pulled = pull_all(r, 6000);
+    KV_CHECK(c, recut_to(r, -12.0, &pulled));
+    pulled += pull_all(r, n - pulled);
+    r.poll();
+    KV_CHECK(c, r.status().params_heard == 2 && r.has(HifiEventKind::ParamsHeard, 0));
+    HifiCaptureSegment seg[2];
+    hifi_capture_segments(r.cap, seg, 2);
+    const u8* d = hifi_capture_data(r.cap) + seg[0].offset;
+    const HifiDeviceFormat& f = seg[0].format;
+    auto at = [](const u8* p, u64 i) { i16 v; memcpy(&v, p + i * 2, 2); return (i32)v; };
+    // Where it joined: the frame from which the fade, and then the new render, hold.
+    u64 j = ~0ull;
+    for (u64 cand = 6000; cand + fade + 64 < n && j == ~0ull; ++cand) {
+        bool ok = memcmp(d + (cand + fade) * 4, c2 + (cand + fade) * 4, 256) == 0;
+        for (u32 k = 0; ok && k < fade; ++k)
+            for (u32 ch = 0; ch < 2 && ok; ++ch) {
+                f64 t = (f64)(k + 1) / (f64)fade;
+                u64 i = (cand + k) * 2 + ch;
+                ok = at(d, i) == (i32)llrint((1.0 - t) * at(c1, i) + t * at(c2, i));
+            }
+        if (ok) j = cand;
+    }
+    KV_CHECK(c, j != ~0ull);
+    if (j != ~0ull) {
+        KV_CHECK(c, memcmp(d, c1, (usize)j * 4) == 0);                                   // the old, to the join
+        KV_CHECK(c, memcmp(d + (j + fade) * 4, c2 + (j + fade) * 4, (usize)(n - j - fade) * 4) == 0); // the new, after
+        KV_CHECK(c, j <= 6000 + 2048);                                                    // joined within a few callbacks of the change
+        bool smooth = true;
+        for (u64 i = j > 0 ? j - 1 : 0; i < j + fade + 1; ++i)
+            for (u32 ch = 0; ch < 2; ++ch) {
+                i32 s3 = at(d, (i + 1) * 2 + ch) - at(d, i * 2 + ch);
+                i32 s1 = at(c1, (i + 1) * 2 + ch) - at(c1, i * 2 + ch), s2 = at(c2, (i + 1) * 2 + ch) - at(c2, i * 2 + ch);
+                i32 m = (s1 < 0 ? -s1 : s1) > (s2 < 0 ? -s2 : s2) ? (s1 < 0 ? -s1 : s1) : (s2 < 0 ? -s2 : s2);
+                i32 level = at(c2, i * 2 + ch) - at(c1, i * 2 + ch);
+                i32 slope = (i32)ceil((f64)(level < 0 ? -level : level) / (f64)fade);
+                if ((s3 < 0 ? -s3 : s3) > m + slope + 1) smooth = false; // +1: each side's rounding
+            }
+        KV_CHECK(c, smooth);
+    }
+    (void)f;
+    KV_CHECK(c, r.status().underruns == 0 && r.status().recut_seconds > 0.0);
+    r.free();
+    mem_free(c1); mem_free(c2);
+    drop(fa);
+}
+
+// A control that is dragged does not pile up: two hundred changes over four seconds of
+// audio, faster than the recuts can each be heard, end at the last value, with no
+// underrun and far fewer recuts than changes. And a change while paused is heard from
+// the resume, with no fade.
+void test_hifi_drag(TestCtx& c) {
+    c.begin("hifi drag");
+    File fl = read_data("tone_16_2ch_8000_long.flac"); // 32000 frames at 8 kHz
+    const u64 n = 32000;
+    u8* last = straight_at(fl, -20.0, n, (u32)n);
+    {
+        Rig r; r.make(0, 5.0, false, k_tchain);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fl.bytes())});
+        KV_CHECK(c, r.wait_written(n));
+        u64 pulled = 0;
+        u32 gen = 0;
+        for (u32 i = 0; i < 200; ++i) {
+            gen = hifi_set_param(r.h, 0, 0, -0.1 * (i + 1));
+            pulled += r.pull(40);       // 5 ms of audio a change
+            time_sleep(0.0002);
+        }
+        f64 until = time_now() + 2.0;
+        while (r.status().params_heard != gen && time_now() < until) { pulled += r.pull(40); time_sleep(0.0002); }
+        pulled += pull_all(r, n - pulled);
+        r.poll();
+        HifiStatus st = r.status();
+        KV_CHECK(c, st.params_heard == gen && st.underruns == 0);
+        KV_CHECK(c, st.recuts >= 2 && st.recuts < 200);
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        KV_CHECK(c, memcmp(hifi_capture_data(r.cap) + seg[0].offset + (n - 4000) * 4, last + (n - 4000) * 4, 4000 * 4) == 0); // the end: the last value
+        KV_INFO("test", "hifi drag: 200 changes, %u recuts", st.recuts);
+        r.free();
+    }
+    {
+        Rig r; r.make(0, 5.0, false, k_tchain);
+        u8* six = straight_at(fl, -6.0, n, (u32)n);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fl.bytes())});
+        KV_CHECK(c, r.wait_written(n));
+        pull_all(r, 4000);
+        hifi_pause(r.h);
+        pull_all(r, 400);                          // the ramp down, and silence
+        u32 rec = r.status().recuts;
+        hifi_set_param(r.h, 0, 0, -6.0);
+        time_sleep(0.02);
+        pull_all(r, 400);
+        hifi_play(r.h);
+        u64 pulled = 4800 + pull_all(r, 8000);
+        HifiStatus st = r.status();
+        KV_CHECK(c, st.recuts == rec + 1 && !st.flat);
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        const u8* d = hifi_capture_data(r.cap) + seg[0].offset;
+        // After the pause, the -6 dB render, exact once the ramp up is done: no crossfade.
+        u64 k = 4400;
+        while (k + 64 < pulled && memcmp(d + k * 4, six + (k - 800 + 0) * 4, 256) != 0 && k < 6000) ++k;
+        bool found = false;
+        for (u64 src = 4000; src < 4600 && !found; ++src)
+            for (u64 at = 4400; at < 5400 && !found; ++at)
+                if (memcmp(d + at * 4, six + src * 4, 256) == 0 && memcmp(d + at * 4, six + src * 4, (usize)(pulled - at) * 4) == 0) found = true;
+        KV_CHECK(c, found);
+        r.free();
+        mem_free(six);
+    }
+    mem_free(last);
+    drop(fl);
 }

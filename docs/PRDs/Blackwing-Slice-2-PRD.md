@@ -410,9 +410,23 @@ Nov 23, 2026, in review of the first draft.
   from nothing at a gapless boundary; `player.chain`; the resampler proposed for
   slice 5; `BR` for this slice's requirements.
 
+Nov 23, 2026, at milestone 4.
+
+- **Always ready.** The path keeps the source (every decoded frame, from half a second
+  behind the frame heard to the front of the lead) all the time, and every recut is the
+  chain run again over it. No recut seeks or decodes; nothing times out. This replaces
+  "it ends after about five seconds without a change", and closes the open question
+  below about whether ready should end. The first change is as fast as the rest.
+- **The 20 ms leaves out the platform.** It is counted from the change reaching `hifi`
+  to the join's first frame leaving the callback. The tick before (the engine's) and the
+  device after (PipeWire's) are platform latency: measured and reported beside it, not
+  in it. So the player keeps acting on commands in the tick after they are emitted,
+  which closes the open question below about the tick.
+
 ## Open
 
-- **The tick is most of 20 ms.** A command emitted in one tick is acted on in the next,
+- **The tick is most of 20 ms.** *(Decided at milestone 4: platform latency, outside
+  the target.)* A command emitted in one tick is acted on in the next,
   and the loop ticks at the clock's rate while playing. Sixteen milliseconds can pass
   before `hifi` hears of a change, which the criterion above does not count and the
   listener does. Either the player takes parameter commands in the tick they are
@@ -426,7 +440,7 @@ Nov 23, 2026, in review of the first draft.
   jump on a warm file), the aligned fade (10 ms, linear, since the two sides are the
   same music?), the jump's fades (10 ms out, 10 ms in?), the piece size (256 KB?), the
   cap on committed bytes (256 MB?).
-- **Whether ready should end at all.** It costs 8 MB at the worst and a copy per frame
+- **Whether ready should end at all.** *(Decided at milestone 4: it never ends.)* It costs 8 MB at the worst and a copy per frame
   decoded. Five idle seconds is the decision; if the copy does not show in the
   numbers, staying ready is simpler and makes the first change as fast as the rest.
 - **What `Wait` costs a decoder that is not ours.** dr_flac reads by pulling; the
@@ -468,4 +482,18 @@ says where it joined. Seek, seek-by, previous, jump and next are jumps; stop is
 thread asleep with a source waiting for bytes, and two bugs in the player's place
 (seek-bys in one tick; a done row coming back). The aligned recut, the other kind of
 join, is milestone 4.
+
+**Milestone 4, stages and the aligned recut** (Nov 23, 2026; BR9 to BR10a, BR12 to BR14,
+BR16). Built always ready, per the decision above, which took the second decoder, the
+seek and the ready timer out of the design: the render thread keeps every decoded
+frame in a source ring, each slot's ring is its chain run over it, and a recut is a new
+render from the next frame the callback takes, posted after its first chunk and
+crossfaded in over 10 ms. Stages in f64, TPDF dither keyed on the source's frame, the
+integers untouched when every stage is flat. Volume and mute through `PlayerSetParam`,
+`player.chain`, `joining` and `exact`. Through PipeWire, a change is heard 2 to 13 ms
+after it reaches the path (20 changes). Found: the "no step larger than the two renders'
+own" criterion cannot hold as worded at a change of level (a crossfade's step at a
+waveform's peak is at least the level change spread over the fade), so the test bounds
+it by that slope too; and dither on an exact zero made mute noise, so a zero is now
+left undithered.
 

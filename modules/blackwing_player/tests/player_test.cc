@@ -47,6 +47,8 @@ void on_failed(TickContext&, Span<const PlayerTrackFailed> ev)   { for (auto& e 
 void on_queue_ended(TickContext&, Span<const PlayerQueueEnded> ev) { for (auto& e : ev) put(e.seq, 'Q', 0); }
 void on_underrun(TickContext&, Span<const HifiUnderrun> ev)      { for (auto& e : ev) put(e.seq, 'U', e.count); }
 void on_seeked(TickContext&, Span<const PlayerSeeked> ev)        { for (auto& e : ev) put(e.seq, 'K', e.item, e.frame); }
+constinit f64 g_param_value = 0.0;
+void on_param(TickContext&, Span<const PlayerParamChanged> ev)   { for (auto& e : ev) { put(e.seq, 'P', e.param); g_param_value = e.value; } }
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".started", KV_ON(PlayerTrackStarted, on_started), .phase = Phase::PostSim},
@@ -55,6 +57,7 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".queue",   KV_ON(PlayerQueueEnded, on_queue_ended), .phase = Phase::PostSim},
     {.name = ".under",   KV_ON(HifiUnderrun, on_underrun),      .phase = Phase::PostSim},
     {.name = ".seeked",  KV_ON(PlayerSeeked, on_seeked),        .phase = Phase::PostSim},
+    {.name = ".param",   KV_ON(PlayerParamChanged, on_param),   .phase = Phase::PostSim},
 };
 KV_MODULE_DEFINE(k_listener) = {.name = "listener", .handlers = k_handlers};
 
@@ -152,25 +155,25 @@ struct Rig {
     // Paces a device against a small lead: pulls what is surely there, keeping back more
     // than the callback's ramp (which would fade a lead about to run dry), and the rest
     // only once the lead has stopped growing (the stream's end).
+    // "Stopped growing" is a fifth of a second unchanged, so a slow build (a sanitizer's)
+    // is not taken for the end.
     void pace(u32* still) {
         time_sleep(0.0005);
         step();
         u32 lead = o().lead_frames;
-        if (lead > 1200) { pull(lead - 1000 > 1024 ? 1024 : lead - 1000); *still = 0; }
-        else if (++*still > 40) { pull(lead ? lead : 256); *still = 0; }
+        if (lead > 1200 || lead != last_lead) { if (lead > 1200) pull(lead - 1000 > 1024 ? 1024 : lead - 1000); *still = 0; last_lead = o().lead_frames; return; }
+        if (++*still > 400) { pull(lead ? lead : 256); *still = 0; }
     }
+    u32 last_lead = ~0u;
     // Pulls as a device would, not as fast as a loop can: a driven clock outruns any
     // decoder, and frames taken before the decoder has made the next ones are an underrun
-    // no hardware would cause. A short sleep, then at most what is in the lead (or a
-    // little silence while the next file is on its way). Until an event, or two seconds.
+    // no hardware would cause. Paced (pace), until an event, or ten seconds.
     bool play_until(char kind, u64 item) {
-        f64 until = time_now() + 2.0;
+        f64 until = time_now() + 10.0;
+        u32 still = 0;
         while (!heard(kind, item)) {
             if (time_now() > until) return false;
-            time_sleep(0.001);
-            step();
-            u32 lead = o().lead_frames;
-            pull(lead > 1024 ? 1024 : lead > 0 ? lead : 256);
+            pace(&still);
         }
         return true;
     }
@@ -510,6 +513,41 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, r.o().underruns == 0);
         r.stop();
         mem_free(pcm.s);
+    }
+
+    // Volume and mute: a change is heard by a recut, and said when it is; the chain's row
+    // shows the value heard and whether it is flat; exact is off while the gain is not 0
+    // dB, and on again at 0; mute is silence.
+    c.begin("player volume");
+    {
+        Rig r;
+        KV_CHECK(c, r.start());
+        r.add(data("tone_16_2ch_8000_long.flac"));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(8000));
+        u32 still = 0;
+        while (r.t().position < 2000 && still < 1000) r.pace(&still);
+        KV_CHECK(c, r.o().exact);
+        auto row = [&]() { KTable* q = engine_ktable(r.e, "player.chain"); return q ? q->rows_of<PlayerStage>()[0] : PlayerStage{}; };
+        KV_CHECK(c, strcmp(row().name, "gain") == 0 && row().flat && row().params[0] == 0.0 && strcmp(row().param_names[1], "mute") == 0);
+        r.say(PlayerSetParam{0, 0, -6.0});
+        f64 until = time_now() + 2.0;
+        while (!heard('P', 0) && time_now() < until) r.pace(&still);
+        KV_CHECK(c, heard('P', 0) && g_param_value == -6.0 && row().params[0] == -6.0 && !row().flat && !r.o().exact);
+        r.say(PlayerSetParam{0, 0, 3.0});                // above 0 dB: kept at 0
+        until = time_now() + 2.0;
+        while (count_of('P', 0) < 2 && time_now() < until) r.pace(&still);
+        for (u32 i = 0; i < 20; ++i) r.pace(&still);   // past the join's fade
+        KV_CHECK(c, count_of('P', 0) == 2 && g_param_value == 0.0 && row().flat && r.o().exact && !r.o().joining);
+        r.say(PlayerSetParam{0, 1, 1.0});
+        until = time_now() + 2.0;
+        while (!heard('P', 1) && time_now() < until) r.pace(&still);
+        r.pull(300); r.pull(500);                       // past the join's fade (80 frames), then what is checked
+        HifiDeviceFormat f; u64 frames = 0;
+        const u8* d = r.seg_data(0, &f, &frames);
+        KV_CHECK(c, heard('P', 1) && !row().flat && d && all_zero(d + (frames - 500) * 4, 500 * 4)); // muted: silence
+        KV_CHECK(c, r.o().underruns == 0);
+        r.stop();
     }
 
     // The command line says the same things: its commands emit the same events.
