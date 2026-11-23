@@ -59,3 +59,32 @@ kept every promise of the contract, under ASan and UBSan as well.
 **Not done here**: an MP3's true length by reading it through (the background pass,
 BL23), and the player's head read, which still reads a front tag whole before
 `decoder_for` is asked (the decoder itself steps over it).
+
+## Milestone 2, tags
+
+Nov 23, 2026.
+
+**As planned**, with these particulars:
+
+- The reader is handed the decoders' `SparseSpan`, so the library can give the same
+  pieces to a tag reader and to a decoder's `open`. `blackwing_tags` gains `hifi_codec` as
+  a dependency for the header; nothing else of it.
+- A read is one call over every place a tag can be, restarted from nothing after each
+  wait, like a decoder's `open`. The PRD's "fields, or the range it needs next" is that:
+  one range per call, the first it lacks. Parsing again is nothing next to the read.
+- The ceiling on ranges is the caller's: after its last wait it calls with `last`, and
+  gets what was there and a problem in words. The ceiling on bytes is the reader's, 4 MB
+  asked for in one read, and on items, values and text.
+- Two sources share rank 2, Vorbis comments and ID3v2. The tie goes to Vorbis, the
+  FLAC's own: an ID3v2 tag in front of a FLAC is somebody else's software.
+
+**The numbers.** A hundred megabytes of art between ID3v2 frames, with more frames after
+it and two tags at the back, in pieces of 4 KB: three waits and three pieces read of
+25602; in 64 KB or 256 KB pieces, two. Six hundred spoiled files: every value valid UTF-8,
+227 with a problem said.
+
+**Found by the sanitizers**: the problem's text was kept in the reader's own stack frame
+and returned. It lives in the caller's memory now, with the values.
+
+**Not done here** (they are the library's): the override files, art beside the files,
+and the sort keys.
