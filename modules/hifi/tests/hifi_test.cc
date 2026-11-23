@@ -1162,3 +1162,86 @@ void test_hifi_drag(TestCtx& c) {
     mem_free(last);
     drop(fl);
 }
+
+// A queue edit after the source playing. While it is still being decoded, nothing after
+// it has been rendered: the new next source simply follows it, gapless, and the old one is
+// let go of unheard. When its end is already in the lead, the lead is cut there: what is
+// heard is the same music to the boundary, exact, then the new next source, exact; the
+// old next is never Started. With nothing after it, the stream ends at the boundary.
+void test_hifi_replace(TestCtx& c) {
+    c.begin("hifi replace");
+    File fa = read_data("tone_16_2ch_48000.flac");   // 24000 frames
+    Pcm a = decode(fa);
+    const u64 n = a.frames, cstart = 5000;           // C is A from frame 5000: told apart from B (A from 0)
+    for (u32 late = 0; late < 2; ++late) {
+        Rig r; r.make(0, late ? 5.0 : 0.1);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(late ? 2 * n : 8192)); // a short lead: full, so the stream has its start
+        u64 pulled = pull_all(r, 2000);
+        HifiSource cs{3, &k_flac_decoder, sparse_whole(fa.bytes()), cstart};
+        hifi_replace_after(r.h, 1, &cs, 1);
+        u64 want = n + (n - cstart);
+        f64 until = time_now() + 3.0;
+        while (!r.has(HifiEventKind::Ended, 3) && time_now() < until) {
+            r.poll();
+            HifiStatus st = r.status();
+            if (st.lead_frames > 1500 || r.has(HifiEventKind::Released, 3)) pulled += r.pull(512);
+            time_sleep(0.0003);
+        }
+        pulled += pull_all(r, 1000);
+        KV_CHECK(c, r.has(HifiEventKind::Ended, 1) && r.has(HifiEventKind::Started, 3) && r.has(HifiEventKind::Ended, 3));
+        KV_CHECK(c, !r.has(HifiEventKind::Started, 2) && r.has(HifiEventKind::Released, 2));
+        HifiCaptureSegment seg[2];
+        KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 1);
+        const u8* d = hifi_capture_data(r.cap) + seg[0].offset;
+        KV_CHECK(c, same(d, seg[0].format, 0, a, 0, n));                 // A, exact, through the recut
+        KV_CHECK(c, same(d, seg[0].format, n, a, cstart, n - cstart));   // then C, straight after
+        KV_CHECK(c, silent(d, seg[0].format, want, pulled - want));
+        KV_CHECK(c, r.status().underruns == 0 && (late ? r.status().recuts == 1 : r.status().recuts == 0));
+        r.free();
+    }
+    {
+        // Nothing after it: the stream ends at the boundary, and B is never heard.
+        Rig r; r.make(0, 5.0);
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+        hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fa.bytes())});
+        KV_CHECK(c, r.wait_written(2 * n));
+        pull_all(r, 2000);
+        hifi_replace_after(r.h, 1, nullptr, 0);
+        u64 pulled = 2000 + pull_all(r, 2 * n);
+        KV_CHECK(c, r.has(HifiEventKind::Ended, 1) && !r.has(HifiEventKind::Started, 2) && r.has(HifiEventKind::Released, 2));
+        HifiCaptureSegment seg[2];
+        hifi_capture_segments(r.cap, seg, 2);
+        const u8* d = hifi_capture_data(r.cap) + seg[0].offset;
+        KV_CHECK(c, same(d, seg[0].format, 0, a, 0, n) && silent(d, seg[0].format, n, pulled - n));
+        KV_CHECK(c, r.status().underruns == 0);
+        r.free();
+    }
+    drop(a); drop(fa);
+}
+
+// A jump's marks are made before it is joined, in its slot's frames, and placed when it
+// is. A recut joined after that must not leave them unplaced: the second source of a
+// jump, Started after a recut, is still said.
+void test_hifi_marks_across_joins(TestCtx& c) {
+    c.begin("hifi marks across joins");
+    File fa = read_data("tone_16_2ch_48000.flac");
+    const u64 n = 24000;
+    Rig r; r.make(0, 5.0, false, k_tchain);
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    KV_CHECK(c, r.wait_written(n));
+    pull_all(r, 2000);
+    HifiSource two[2] = {{2, &k_flac_decoder, sparse_whole(fa.bytes())}, {3, &k_flac_decoder, sparse_whole(fa.bytes())}};
+    hifi_jump(r.h, two, 2);
+    KV_CHECK(c, r.wait_flushed() && r.wait_lead(2 * n));   // both decoded, all their marks made, before the join
+    pull_all(r, 3000);                                     // the join
+    KV_CHECK(c, r.has(HifiEventKind::Started, 2));
+    u64 pulled = 0;
+    KV_CHECK(c, recut_to(r, -3.0, &pulled));               // a recut, joined, inside source 2
+    pull_all(r, 2 * n);
+    KV_CHECK(c, r.has(HifiEventKind::Ended, 2) && r.has(HifiEventKind::Started, 3) && r.has(HifiEventKind::Ended, 3));
+    KV_CHECK(c, r.status().underruns == 0);
+    r.free();
+    drop(fa);
+}

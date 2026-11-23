@@ -61,7 +61,7 @@ constexpr u32 kMaxPending  = 256;  // commands, and events, in flight
 constexpr u32 kMaxStarved  = 16;   // sources told their bytes will not come, remembered
 constexpr f64 kWantNap     = 0.002; // how soon a decoder waiting for bytes, or a join, is looked at again
 
-enum class CmdKind : u8 { Add, Flush, Jump, Starve, Param, Quit };
+enum class CmdKind : u8 { Add, Flush, Jump, Replace, Starve, Param, Quit };
 struct Cmd {
     CmdKind    kind = CmdKind::Add;
     HifiSource source;
@@ -78,7 +78,7 @@ constexpr u64 kDitherSeed  = 0x6A09E667F3BCC909ull;
 
 // Where a source begins in the programme: the source ring's frames from `p` on are its,
 // starting at its frame `first`, at its depth.
-struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; };
+struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; u64 source = 0; };
 
 // A render's chain: its stages' states, the parameters they were opened with.
 struct Chain {
@@ -100,6 +100,7 @@ struct Note {
     u32       epoch = 0;
     bool      relative = false;
     u32       slot = 0;
+    bool      cut = false; // not an event: marks at or after `frame` are void, but `event.source`'s
 };
 
 template <class T, u32 N> struct Fifo {
@@ -175,6 +176,8 @@ struct Hifi {
     u32  join_slot    = 0;             // atomic: its slot, written before join_pending
     u32  join_fade    = 0;             // atomic: 1 to fade it in (a jump), 0 for a clean start (a flush)
     u32  joined       = 0;             // atomic: the last request the callback joined (an epoch, or an aligned recut's id)
+    u32  jump_joined  = 0;             // atomic: the last flush or jump joined (recuts leave it), and
+    u64  jump_base    = 0;             // atomic: the stream frame its slot's frame 0 fell at: where its relative marks are placed
     u32  join_kind    = 0;             // atomic: 1 for an aligned recut (crossfaded), 0 for a flush or a jump
     u32  xfading      = 0;             // atomic, callback -> anyone: an aligned join's fade is under way
     u32  recuts       = 0;             // atomic: aligned joins done
@@ -280,6 +283,8 @@ bool try_join(Hifi& h, u32 epoch, u64 stream) {
     atomic_store(&s.base, stream, MO_RELEASE);
     atomic_store(&h.heard_slot, b, MO_RELEASE);
     atomic_store(&s.heard_from, stream, MO_RELEASE);
+    atomic_store(&h.jump_base, stream, MO_RELAXED);
+    atomic_store(&h.jump_joined, epoch, MO_RELEASE);
     atomic_store(&h.joined, epoch, MO_RELEASE);
     h.by_join = fade != 0;
     h.fresh   = fade == 0;
@@ -483,6 +488,8 @@ void note(Hifi& h, HifiEventKind kind, u64 source, const char* reason = "") {
 
 // A mark: true when the frame `at` of this render's slot is heard. While the render
 // waits to be joined, the slot's place in the stream is not known: the caller places it.
+void check_joined(Hifi& h);
+
 void mark(Hifi& h, HifiEventKind kind, u64 at, const char* reason = "") {
     Note n;
     n.event.kind   = kind;
@@ -492,6 +499,7 @@ void mark(Hifi& h, HifiEventKind kind, u64 at, const char* reason = "") {
     format(n.event.reason, sizeof n.event.reason, "%s", reason);
     if (kind == HifiEventKind::Ended) { n.event.status = h.cur_status; n.event.frames = h.cur_frames; }
     else                              n.event.frames = h.cur.src.start;
+    check_joined(h); // joined since the step began: its place is known
     if (h.pending_epoch) {
         n.frame = at;
         n.relative = true;
@@ -681,6 +689,8 @@ bool open_device(Hifi& h, const char** reason) {
     atomic_store(&h.silent_run, (u64)0, MO_RELEASE);
     check_joined(h);
     if (h.pending_epoch) { // a jump that was never joined: there is no callback to join it, so it is the heard render now
+        atomic_store(&h.jump_base, atomic_load(&s.base, MO_RELAXED), MO_RELAXED);
+        atomic_store(&h.jump_joined, h.pending_epoch, MO_RELEASE);
         atomic_store(&h.joined, h.pending_epoch, MO_RELEASE);
         check_joined(h);
     }
@@ -730,7 +740,7 @@ u32 segment_of(const Hifi& h, u64 p) {
 
 // A source begins at programme frame p. Segments wholly behind what the source ring
 // keeps are let go.
-void begin_segment(Hifi& h, u64 p, u64 first, u32 bits) {
+void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source) {
     const Slot& hs = h.slot[atomic_load(&h.heard_slot, MO_ACQUIRE)];
     u64 heard_p = h.p0[atomic_load(&h.heard_slot, MO_ACQUIRE)] + atomic_load(&hs.read, MO_ACQUIRE);
     u64 oldest = heard_p > h.keep_behind ? heard_p - h.keep_behind : 0;
@@ -739,7 +749,7 @@ void begin_segment(Hifi& h, u64 p, u64 first, u32 bits) {
         --h.nsegs;
     }
     if (h.nsegs && h.segs[h.nsegs - 1].p == p) --h.nsegs; // a source that gave nothing: replaced
-    h.segs[h.nsegs++] = Segment{p, first, bits};
+    h.segs[h.nsegs++] = Segment{p, first, bits, source};
 }
 
 // Decoded samples into the source ring at programme frame p.
@@ -941,6 +951,84 @@ bool wants_recut(const Hifi& h) {
     return h.device && !h.draining && !h.req_id && h.chain[h.wslot].gen != h.desired_gen;
 }
 
+// Waits (a fade's length at most) for a join request the callback has taken to be done.
+void wait_joined(Hifi& h) {
+    for (u32 i = 0; i < 400 && h.req_id && atomic_load(&h.joined, MO_ACQUIRE) != h.req_id; ++i) time_sleep(0.0005);
+    check_joined(h);
+}
+
+// What follows source `id` is to be other sources (the Adds after this command): `more`
+// of them. If `id` is still being decoded, nothing after it has been rendered and this
+// costs nothing. If its end is already in the lead, the lead is cut there: a new render
+// of the same music up to that frame (the source ring, through the chain), and of the
+// new sources after it, crossfaded in like any recut; and a cut note voids the marks the
+// old render made past it.
+void replace_after(Hifi& h, u64 id, u32 more) {
+    release_nxt(h);
+    HifiSource q;
+    while (h.queue.pop(&q)) { note(h, HifiEventKind::Released, q.id); forget_starved(h, q.id); }
+    if (h.have_cur && h.cur.src.id == id) return;
+    // Where the next source began after it, in what has been rendered.
+    u32 k = h.nsegs;
+    while (k-- > 0 && h.segs[k].source != id) {}
+    if (k >= h.nsegs || k + 1 >= h.nsegs) { // it ended the stream, or is not in the source ring: nothing after it to cut
+        release_cur(h);
+        return;
+    }
+    const u64 pb = h.segs[k + 1].p;
+    if (h.req_id && !h.pending_epoch) wait_joined(h); // a recut's fade: let it finish
+    if (h.pending_epoch) {
+        // A jump not joined yet: nothing of it is heard. Take it back, cut its slot at
+        // the boundary, and ask again.
+        u32 expect = h.req_id;
+        if (atomic_compare_exchange(&h.join_pending, &expect, 0u, false, MO_ACQ_REL, MO_ACQUIRE)) {
+            release_cur(h);
+            h.nsegs = k + 1;
+            Slot& w = h.slot[h.wslot];
+            u64 at = pb - h.p0[h.wslot];
+            if (atomic_load(&w.write, MO_RELAXED) > at) atomic_store(&w.write, at, MO_RELEASE);
+            atomic_store(&w.end, more ? kNever : at, MO_RELEASE);
+            Note c; c.cut = true; c.event.source = id; c.frame = at; c.relative = true; c.slot = h.wslot; c.epoch = h.render_epoch;
+            push_note(h, c);
+            atomic_store(&h.join_pending, h.req_id, MO_RELEASE);
+            return;
+        }
+        wait_joined(h);
+    }
+    const u32 a = h.wslot, b = a ^ 1u;
+    Slot& sa = h.slot[a];
+    Slot& sb = h.slot[b];
+    u64 ra = atomic_load(&sa.read, MO_ACQUIRE);
+    u64 ps = h.p0[a] + ra;
+    if (pb <= ps) return; // the callback is past the boundary already: what is heard is the next source
+    release_cur(h);
+    h.nsegs = k + 1;
+    setup_chain(h, b, h.format);
+    atomic_store(&sb.read, (u64)0, MO_RELEASE);
+    atomic_store(&sb.write, (u64)0, MO_RELEASE);
+    u64 base = atomic_load(&sa.base, MO_ACQUIRE);
+    atomic_store(&sb.base, base + ra, MO_RELEASE);
+    if (!h.chain[b].flat) {
+        u64 back = chain_run_in(h, b);
+        u64 floor_p = h.segs[segment_of(h, ps)].p;
+        if (floor_p < h.p_valid) floor_p = h.p_valid;
+        u64 from = ps - (ps - floor_p < back ? ps - floor_p : back);
+        if (from < ps) render_frames(h, b, from, ps - from, 0, true);
+    }
+    render_frames(h, b, ps, pb - ps, 0);
+    atomic_store(&sb.end, more ? kNever : pb - ps, MO_RELEASE);
+    atomic_store(&sb.write, pb - ps, MO_RELEASE);
+    h.p0[b] = ps;
+    h.wslot = b;
+    Note c; c.cut = true; c.event.source = id; c.frame = base + (pb - h.p0[a]); c.epoch = h.render_epoch;
+    push_note(h, c);
+    h.req_id = kAligned | (++h.recut_seq & 0x7FFFFFFFu);
+    atomic_store(&h.join_slot, b, MO_RELAXED);
+    atomic_store(&h.join_kind, 1u, MO_RELAXED);
+    atomic_store(&h.req_sent_ns, time_ns(), MO_RELAXED);
+    atomic_store(&h.join_pending, h.req_id, MO_RELEASE);
+}
+
 // Takes the commands waiting. Returns false on Quit.
 bool take_commands(Hifi& h) {
     Cmd c;
@@ -957,6 +1045,8 @@ bool take_commands(Hifi& h) {
                 Note rel; rel.event.kind = HifiEventKind::Released; rel.event.source = c.source.id; rel.epoch = h.render_epoch;
                 os_mutex_lock(&h.lock); h.notes.push(n); h.notes.push(rel); os_mutex_unlock(&h.lock);
             }
+        } else if (c.kind == CmdKind::Replace) {
+            replace_after(h, c.source.id, c.epoch);
         } else if (c.kind == CmdKind::Param) {
             if (c.stage < h.stages.len && c.param < h.stages[c.stage]->params.len && c.param < kHifiMaxParams) {
                 h.desired[c.stage][c.param] = c.value;
@@ -1101,7 +1191,7 @@ f64 render_step(Hifi& h) {
         }
         if (!h.cur_marked) {
             mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
-            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits);
+            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits, h.cur.src.id);
             h.cur_marked = true;
         }
         u64 p = h.p0[h.wslot] + w;
@@ -1117,7 +1207,7 @@ f64 render_step(Hifi& h) {
     if (h.cur_done && h.scratch_at == h.scratch_frames) {
         if (!h.cur_marked) { // a source with no frames at all
             mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
-            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits);
+            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits, h.cur.src.id);
             h.cur_marked = true;
         }
         mark(h, HifiEventKind::Ended, w, h.cur_reason);
@@ -1239,6 +1329,16 @@ void begin_render(Hifi* h, CmdKind kind, const HifiSource* sources, u32 n) {
 
 void hifi_flush(Hifi* h) { begin_render(h, CmdKind::Flush, nullptr, 0); }
 
+void hifi_replace_after(Hifi* h, u64 id, const HifiSource* sources, u32 n) {
+    os_mutex_lock(&h->lock);
+    Cmd c; c.kind = CmdKind::Replace; c.source.id = id; c.epoch = n;
+    bool ok = h->cmds.push(c);
+    for (u32 i = 0; i < n && ok; ++i) { Cmd a; a.kind = CmdKind::Add; a.source = sources[i]; ok = h->cmds.push(a); }
+    if (!ok) KV_ERROR("hifi", "the command list is full: a command is lost");
+    os_cond_signal(&h->wake);
+    os_mutex_unlock(&h->lock);
+}
+
 void hifi_jump(Hifi* h, const HifiSource* sources, u32 n) { begin_render(h, CmdKind::Jump, sources, n); }
 
 u32 hifi_set_param(Hifi* h, u32 stage, u32 param, f64 value) {
@@ -1271,7 +1371,19 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
     while (h->notes.count) {
         Note& x = h->notes.at(0);
         bool mark = x.event.kind == HifiEventKind::Started || x.event.kind == HifiEventKind::Seeked || x.event.kind == HifiEventKind::Ended;
-        if (mark) {
+        if (x.cut) {
+            // The programme past this frame was replaced: its marks never will be, but
+            // the source it follows ends there still.
+            if (x.epoch == h->epoch)
+                for (u32 i = 0; i < h->pending.count;) {
+                    Note& m = h->pending.at(i);
+                    if (m.relative && !x.relative && atomic_load(&h->jump_joined, MO_ACQUIRE) == m.epoch) { // placed now, to compare like with like
+                        m.frame += atomic_load(&h->jump_base, MO_RELAXED);
+                        m.relative = false;
+                    }
+                    if (m.relative == x.relative && m.frame >= x.frame && m.event.source != x.event.source) h->pending.remove(i); else ++i;
+                }
+        } else if (mark) {
             if (x.epoch == h->epoch && !h->pending.push(x)) break; // full: leave it for the next poll
         } else {
             if (n == cap) break;
@@ -1292,8 +1404,10 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
     while (h->pending.count && n < cap) {
         Note& x = h->pending.at(0);
         if (x.relative) {
-            if (atomic_load(&h->joined, MO_ACQUIRE) != x.epoch) break; // its place in the stream is not known yet
-            x.frame += atomic_load(&h->slot[x.slot].base, MO_ACQUIRE);
+            // Placed once its render was joined. A recut joined since does not move the
+            // jump's place; a later jump would have dropped the mark with its epoch.
+            if (atomic_load(&h->jump_joined, MO_ACQUIRE) != x.epoch) break; // its place in the stream is not known yet
+            x.frame += atomic_load(&h->jump_base, MO_RELAXED);
             x.relative = false;
         }
         bool start = x.event.kind != HifiEventKind::Ended;

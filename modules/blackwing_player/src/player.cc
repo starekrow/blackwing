@@ -32,6 +32,7 @@
 #include "korvid/hifi_eq/stages.h"
 #include "korvid/platform/io.h"
 #include "korvid/platform/module.h"
+#include <new>
 #include <stdlib.h>
 #include <string.h>
 
@@ -78,7 +79,10 @@ struct Item {
     u64    start   = 0;       // the frame its next lend begins at (a seek, or a jump to it)
     bool   seek    = false;   // and that lend goes on from elsewhere in it: Seeked, not Started
     bool   in_play = false;   // hifi is to play it: added, and neither ended, failed nor flushed
-    PlayerItemState state = PlayerItemState::Waiting;
+    PlayerItemState state = PlayerItemState::Idle;
+    bool   alive   = false;   // the slot holds an item
+    bool   done    = false;   // it is before the place: heard to its end, or skipped
+    bool   removed = false;   // edited out of the list; its slot goes when hifi lets go of it
 };
 
 struct PieceRead { Handle request; u32 item = kNone; u32 piece = 0; }; // item kNone: let go of; free what comes
@@ -86,9 +90,11 @@ struct Return    { u32 item = 0; u32 piece = 0; u64 fence = 0; };
 
 struct Player {
     Hifi*  hifi = nullptr;
-    Item*  items = nullptr;   // kMaxItems of them
-    u32    count = 0;
-    u32    cursor = 0;        // the first item not Done or Failed: the one playing, or next to
+    Item*  items = nullptr;   // kMaxItems slots; an item stays in its slot whatever the list does
+    u32*   order = nullptr;   // the list: slot indices, in order
+    u32    count = 0;         // items in the list
+    u64    next_id = 1;
+    u32    cursor = 0;        // the place: the position of the item playing, or next to
     bool   want_play = false;
     bool   paused    = false;
     bool   ended_said = true; // PlayerQueueEnded has been emitted for this run of the queue
@@ -124,12 +130,35 @@ void set_state(KTable* queue, Item& it, PlayerItemState s, const char* reason = 
     if (reason) format(r.reason, sizeof r.reason, "%s", reason);
 }
 
+void mark_done(KTable* queue, Item& it, const char* reason) {
+    it.done = true;
+    if (it.state != PlayerItemState::Failed) set_state(queue, it, PlayerItemState::Idle, reason);
+}
+
 // The I/O queue's data is the general allocator's, freed with the size it was read at.
 void free_bytes(void* data, usize size) { if (data) free_in(mem_general(), data, size ? size : 1); }
 
-Item* find(Player& p, u64 id) { return id >= 1 && id <= p.count ? &p.items[id - 1] : nullptr; }
+// The item at position k of the list.
+inline Item& at(Player& p, u32 k) { return p.items[p.order[k]]; }
+inline const Item& at(const Player& p, u32 k) { return p.items[p.order[k]]; }
 
-bool finished(const Item& it) { return it.state == PlayerItemState::Done || it.state == PlayerItemState::Failed; }
+// An item by id, in the list or edited out of it and not yet let go of; null when none.
+Item* find(Player& p, u64 id) {
+    for (u32 i = 0; i < kMaxItems; ++i) if (p.items[i].alive && p.items[i].id == id) return &p.items[i];
+    return nullptr;
+}
+
+// Its position in the list; count when it is not in it.
+u32 pos_of(const Player& p, const Item& it) {
+    u32 slot = (u32)(&it - p.items);
+    for (u32 k = 0; k < p.count; ++k) if (p.order[k] == slot) return k;
+    return p.count;
+}
+
+bool finished(const Item& it) { return it.done || it.removed || it.state == PlayerItemState::Failed; }
+
+// Before the place now: heard, or skipped. Its row says idle; how it ended stays.
+void mark_done(KTable* queue, Item& it, const char* reason = nullptr);
 
 // ---- the file in pieces -----------------------------------------------------------------
 
@@ -237,7 +266,7 @@ void drop_span(Player& p, IoQueue* io, Item& it) {
 // The state an item not in play and not finished is in, by what it holds: ready, with its
 // head read; reading, with its span made; waiting, with nothing.
 PlayerItemState resting(const Item& it) {
-    return it.base && it.head ? PlayerItemState::Ready : it.base ? PlayerItemState::Reading : PlayerItemState::Waiting;
+    return it.base && it.head ? PlayerItemState::Ready : it.base ? PlayerItemState::Reading : PlayerItemState::Idle;
 }
 
 void fail(TickContext& ctx, Player& p, KTable* queue, Item& it, const char* reason) {
@@ -276,8 +305,9 @@ void lend(Player& p, Item& it, HifiSource* out) {
 // Nothing in play any more: what was, and is not finished, is ready again with what it
 // has read. hifi may still be letting go of it.
 void out_of_play(Player& p, KTable* queue) {
-    for (u32 k = 0; k < p.count; ++k) {
+    for (u32 k = 0; k < kMaxItems; ++k) {
         Item& it = p.items[k];
+        if (!it.alive) continue;
         it.want_lo = kNone;
         if (!it.in_play) continue;
         it.in_play = false;
@@ -291,7 +321,7 @@ void out_of_play(Player& p, KTable* queue) {
 void flush(Player& p, KTable* queue) {
     hifi_flush(p.hifi);
     out_of_play(p, queue);
-    for (u32 k = p.cursor; k < p.count; ++k) { p.items[k].start = 0; p.items[k].seek = false; }
+    for (u32 k = p.cursor; k < p.count; ++k) { at(p, k).start = 0; at(p, k).seek = false; }
     p.seek_item = 0;
 }
 
@@ -303,10 +333,11 @@ void flush(Player& p, KTable* queue) {
 void jump_to(Player& p, KTable* queue, u32 k, u64 frame, bool seek) {
     if (k > p.count) k = p.count;
     for (u32 j = 0; j < p.count; ++j) {
-        Item& it = p.items[j];
+        Item& it = at(p, j);
         if (it.state == PlayerItemState::Failed) continue;
-        if (j < k && !finished(it)) set_state(queue, it, PlayerItemState::Done);       // skipped
-        if (j >= k && it.state == PlayerItemState::Done) {                             // to come again
+        if (j < k && !it.done) mark_done(queue, it);                                     // skipped
+        if (j >= k && it.done) {                                                         // to come again
+            it.done = false;
             row_of(queue, it).damaged = 0;
             set_state(queue, it, resting(it), "");
         }
@@ -315,7 +346,7 @@ void jump_to(Player& p, KTable* queue, u32 k, u64 frame, bool seek) {
     p.cursor = k;
     p.seek_item = 0;
     if (k < p.count) {
-        Item& it = p.items[k];
+        Item& it = at(p, k);
         it.start = frame;
         it.seek = seek;
         if (seek) { p.seek_item = it.id; p.seek_frame = frame; }
@@ -327,7 +358,7 @@ void jump_to(Player& p, KTable* queue, u32 k, u64 frame, bool seek) {
     HifiSource srcs[2];
     u32 n = 0;
     for (u32 j = k; j < p.count && n < 2; ++j) {
-        Item& it = p.items[j];
+        Item& it = at(p, j);
         if (it.state == PlayerItemState::Failed) continue;
         if (it.state != PlayerItemState::Ready) break; // the rest follow when they are
         lend(p, it, &srcs[n++]);
@@ -341,25 +372,152 @@ bool heard_now(const Player& p, const Item& it) { return p.transport.item == it.
 
 // The index of the first item at or after k that is not Failed; count when there is none.
 u32 playable_from(const Player& p, u32 k) {
-    while (k < p.count && p.items[k].state == PlayerItemState::Failed) ++k;
+    while (k < p.count && at(p, k).state == PlayerItemState::Failed) ++k;
     return k;
 }
 
+// The list, as positions: an item into it at k, and out of it at k.
+void insert_at(Player& p, u32 k, u32 slot) {
+    for (u32 i = p.count; i > k; --i) p.order[i] = p.order[i - 1];
+    p.order[k] = slot;
+    ++p.count;
+}
+u32 take_out(Player& p, u32 k) {
+    u32 slot = p.order[k];
+    for (u32 i = k; i + 1 < p.count; ++i) p.order[i] = p.order[i + 1];
+    --p.count;
+    return slot;
+}
+
+// Its slot freed and its row gone, once nothing of it is out: hifi has let go of it and
+// no read is out for it.
+void let_go(Player& p, IoQueue* io, KTable* queue, Item& it) {
+    if (!it.removed) return;
+    if (!it.row.is_null()) { queue->destroy(it.row); it.row = Handle{}; } // out of the table at once
+    if (it.lends) return;                                                   // the slot when hifi lets go
+    drop_span(p, io, it);
+    it = Item{};
+}
+
+// What is before the place is done, and what is from it on is to come: after an edit, or
+// a move of the place.
+void restamp(Player& p, KTable* queue) {
+    for (u32 k = 0; k < p.count; ++k) {
+        Item& it = at(p, k);
+        if (it.state == PlayerItemState::Failed) continue;
+        if (k < p.cursor && !it.done) mark_done(queue, it);
+        if (k >= p.cursor && it.done) {
+            it.done = false;
+            row_of(queue, it).damaged = 0;
+            set_state(queue, it, resting(it), "");
+        }
+    }
+}
+
+// After edits: the place follows the row it was at, and what hifi has after that row is
+// what the list now has after it. A row at the place that was removed is a jump to what
+// is there now. What follows the place, if it changed, goes to hifi as a replacement
+// after the place's row: free while that row is still being decoded, a recut of the lead
+// when it is not.
+void resync(Player& p, KTable* queue, u64 place_id, u32 fallback) {
+    Item* place = place_id ? find(p, place_id) : nullptr;
+    if (!place || place->removed) {
+        u32 k = fallback < p.count ? fallback : p.count;
+        if (p.want_play && place) jump_to(p, queue, playable_from(p, k), 0, false);
+        else { p.cursor = k; restamp(p, queue); }
+        return;
+    }
+    p.cursor = pos_of(p, *place);
+    restamp(p, queue);
+    if (!p.want_play || !place->in_play) return; // hifi has nothing of the place: advance lends in order
+    u32 nk = playable_from(p, p.cursor + 1);
+    Item* want = nk < p.count ? &at(p, nk) : nullptr;
+    Item* has = nullptr;
+    u32 others = 0;
+    for (u32 i = 0; i < kMaxItems; ++i) {
+        Item& it = p.items[i];
+        if (!it.alive || &it == place || !it.in_play) continue;
+        ++others;
+        if (!has) has = &it;
+    }
+    if (others <= 1 && has == want) return; // what follows is what hifi has
+    for (u32 i = 0; i < kMaxItems; ++i) if (p.items[i].alive && &p.items[i] != place && p.items[i].in_play) {
+        Item& it = p.items[i];
+        it.in_play = false;
+        it.want_lo = kNone;
+        if (!finished(it)) set_state(queue, it, resting(it));
+    }
+    HifiSource src;
+    u32 n = 0;
+    if (want && want->state == PlayerItemState::Ready) { lend(p, *want, &src); n = 1; }
+    hifi_replace_after(p.hifi, place->id, &src, n);
+}
+
 void commands(TickContext& ctx, Player& p, KTable* queue) {
+    bool edited = false;          // the list changed after the place: what hifi has may be wrong
+    u64 place_id = p.cursor < p.count ? at(p, p.cursor).id : 0;
     for (const PlayerEnqueue& q : ctx.received<PlayerEnqueue>()) {
-        if (p.count == kMaxItems) { KV_ERROR("player", "the queue is full (%u items): '%s' is not added", kMaxItems, q.path); continue; }
-        Item& it = p.items[p.count];
+        u32 slot = kMaxItems;
+        for (u32 i = 0; i < kMaxItems && slot == kMaxItems; ++i) if (!p.items[i].alive) slot = i;
+        if (slot == kMaxItems || p.count == kMaxItems) { KV_ERROR("player", "the queue is full (%u items): '%s' is not added", kMaxItems, q.path); continue; }
+        Item& it = p.items[slot];
         it = Item{};
-        it.id = p.count + 1;
+        it.id = p.next_id;
         PlayerItem r{};
         r.id = it.id;
-        r.state = (u8)PlayerItemState::Waiting;
+        r.state = (u8)PlayerItemState::Idle;
         memcpy(r.path, q.path, sizeof r.path);
         r.path[sizeof r.path - 1] = 0;
         it.row = queue->spawn(r);
         if (it.row.is_null()) { KV_ERROR("player", "the queue table is full: '%s' is not added", q.path); continue; }
-        ++p.count;
+        it.alive = true;
+        ++p.next_id;
+        // Where: before a row, or at the end. Before the place, it is already behind it.
+        Item* before = q.before ? find(p, q.before) : nullptr;
+        u32 k = before && !before->removed ? pos_of(p, *before) : p.count;
+        insert_at(p, k, slot);
+        edited = true;
         p.ended_said = false;
+    }
+    u32 fallback = p.cursor;
+    for (const PlayerQueueEdit& x : ctx.received<PlayerQueueEdit>()) {
+        if (x.op == (u8)PlayerEditOp::Clear) {
+            if (p.want_play || p.cursor < p.count) flush(p, queue);
+            p.want_play = false; p.paused = false;
+            hifi_play(p.hifi);
+            IoQueue* io = platform_io(*ctx.engine);
+            while (p.count) {
+                Item& it = p.items[take_out(p, p.count - 1)];
+                if (!it.stat.is_null() && io) io->cancel(it.stat);
+                cancel_reads(p, io, it);
+                it.removed = true;
+                let_go(p, io, queue, it);
+            }
+            p.cursor = 0; fallback = 0; place_id = 0;
+            edited = false;
+            continue;
+        }
+        Item* it = find(p, x.item);
+        if (!it || it->removed) { KV_ERROR("player", "there is no row %llu to edit", (unsigned long long)x.item); continue; }
+        u32 k = pos_of(p, *it);
+        if (x.op == (u8)PlayerEditOp::Remove) {
+            take_out(p, k);
+            if (it->id == place_id) fallback = k;
+            else if (k < fallback) --fallback;
+            IoQueue* io = platform_io(*ctx.engine);
+            if (!it->stat.is_null() && io) io->cancel(it->stat);
+            cancel_reads(p, io, *it);
+            it->removed = true;
+            let_go(p, io, queue, *it);
+            edited = true;
+        } else if (x.op == (u8)PlayerEditOp::Move) {
+            Item* before = x.before ? find(p, x.before) : nullptr;
+            if (before == it) continue;
+            u32 slot = take_out(p, k);
+            u32 to = before && !before->removed ? pos_of(p, *before) : p.count;
+            insert_at(p, to, slot);
+            edited = true;
+        }
     }
     for (const PlayerStop& x : ctx.received<PlayerStop>()) {
         (void)x;
@@ -370,7 +528,7 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
     for (const PlayerNext& x : ctx.received<PlayerNext>()) {
         (void)x;
         if (p.cursor < p.count) {
-            Item& it = p.items[p.cursor];
+            Item& it = at(p, p.cursor);
             // Its reads still out are cancelled. Left to run, they would hold the disk
             // while the next item's waited behind them: on slow media, each skip added
             // reads, and none finished.
@@ -385,31 +543,31 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         (void)x;
         if (p.cursor >= p.count) { // past the end: the last row that will play
             u32 k = p.count;
-            while (k > 0 && p.items[k - 1].state == PlayerItemState::Failed) --k;
+            while (k > 0 && at(p, k - 1).state == PlayerItemState::Failed) --k;
             if (k > 0) jump_to(p, queue, k - 1, 0, false);
             continue;
         }
-        Item& it = p.items[p.cursor];
+        Item& it = at(p, p.cursor);
         const PlayerItem& r = row_of(queue, it);
         bool heard_it = p.transport.item == it.id;
-        u64 at = p.seek_item == it.id ? p.seek_frame : heard_it ? p.transport.position : 0;
+        u64 now = p.seek_item == it.id ? p.seek_frame : heard_it ? p.transport.position : 0;
         u32 before = p.cursor;
-        while (before > 0 && p.items[before - 1].state == PlayerItemState::Failed) --before;
+        while (before > 0 && at(p, before - 1).state == PlayerItemState::Failed) --before;
         // Within the first three seconds, the row before; later, the start of this one.
-        if (before > 0 && (!r.rate || at < (u64)r.rate * 3)) jump_to(p, queue, before - 1, 0, false);
+        if (before > 0 && (!r.rate || now < (u64)r.rate * 3)) jump_to(p, queue, before - 1, 0, false);
         else jump_to(p, queue, p.cursor, 0, heard_now(p, it));
     }
     for (const PlayerJump& x : ctx.received<PlayerJump>()) {
         Item* it = find(p, x.item);
-        if (!it || it->state == PlayerItemState::Failed) { KV_ERROR("player", "there is no row %llu to play", (unsigned long long)x.item); continue; }
-        jump_to(p, queue, (u32)(it - p.items), 0, false);
+        if (!it || it->removed || it->state == PlayerItemState::Failed) { KV_ERROR("player", "there is no row %llu to play", (unsigned long long)x.item); continue; }
+        jump_to(p, queue, pos_of(p, *it), 0, false);
         if (!p.want_play) { p.want_play = true; p.ended_said = false; } // play this row now
     }
     for (const PlayerSeek& x : ctx.received<PlayerSeek>()) {
-        Item* it = x.item ? find(p, x.item) : (p.cursor < p.count ? &p.items[p.cursor] : nullptr);
-        if (!it || it->state == PlayerItemState::Failed) continue;
+        Item* it = x.item ? find(p, x.item) : (p.cursor < p.count ? &at(p, p.cursor) : nullptr);
+        if (!it || it->removed || it->state == PlayerItemState::Failed) continue;
         u64 frames = row_of(queue, *it).frames, to = frames && x.frame > frames ? frames : x.frame;
-        u32 k = (u32)(it - p.items);
+        u32 k = pos_of(p, *it);
         jump_to(p, queue, k, to, k == p.cursor && heard_now(p, *it));
     }
     for (const PlayerSetParam& x : ctx.received<PlayerSetParam>()) {
@@ -424,7 +582,7 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
     }
     for (const PlayerSeekBy& x : ctx.received<PlayerSeekBy>()) {
         if (p.cursor >= p.count) continue;
-        Item& it = p.items[p.cursor];
+        Item& it = at(p, p.cursor);
         const PlayerItem& r = row_of(queue, it);
         if (!r.rate) continue; // not heard yet: nothing to count from
         // From wherever the last seek was going, so repeats add up.
@@ -438,6 +596,7 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         (void)x;
         if (p.want_play) { p.paused = true; hifi_pause(p.hifi); }
     }
+    if (edited) resync(p, queue, place_id, fallback);
     for (const PlayerPlay& x : ctx.received<PlayerPlay>()) {
         (void)x;
         p.want_play = true;
@@ -501,7 +660,7 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
             case HifiEventKind::Ended: {
                 if (finished(*it) || !it->in_play) break;
                 bool damaged = e.status == DecodeStatus::Damaged;
-                set_state(queue, *it, PlayerItemState::Done, damaged ? e.reason : nullptr);
+                mark_done(queue, *it, damaged ? e.reason : nullptr);
                 row_of(queue, *it).damaged = damaged;
                 it->in_play = false;
                 drop_span(p, io, *it);
@@ -516,7 +675,8 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
             case HifiEventKind::Released:
                 if (it->lends) --it->lends;
                 it->want_lo = kNone;
-                if (finished(*it)) drop_span(p, io, *it);
+                if (it->removed) let_go(p, io, queue, *it);
+                else if (finished(*it)) drop_span(p, io, *it);
                 break;
             case HifiEventKind::Want: {
                 if (!it->lends || !it->base || e.need.len == 0) break;
@@ -538,9 +698,9 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
     IoQueue* io = platform_io(*ctx.engine);
     if (!io) return;
     // Stats.
-    for (u32 k = 0; k < p.count; ++k) {
+    for (u32 k = 0; k < kMaxItems; ++k) {
         Item& it = p.items[k];
-        if (it.stat.is_null()) continue;
+        if (!it.alive || it.stat.is_null()) continue;
         for (const IoCompletion& c : io->completions()) {
             if (c.request != it.stat) continue;
             IoCompletion done = c;
@@ -622,14 +782,14 @@ bool make_room(Player& p, KTable* queue, u64 need, bool urgent) {
     auto over = [&] { return p.committed - p.returning + need > cap; };
     if (!over()) return p.committed + need <= cap;
     // Items hifi does not read, the last first.
-    for (u32 k = p.count; k-- > 0 && over();) {
+    for (u32 k = kMaxItems; k-- > 0 && over();) {
         Item& it = p.items[k];
-        if (it.lends || !it.base) continue;
+        if (!it.alive || it.lends || !it.base) continue;
         for (u32 i = it.pieces; i-- > 0 && over();) give_back(p, it, i);
     }
     // The item playing, behind the frame heard.
     for (u32 k = p.cursor; k < p.count && over(); ++k) {
-        Item& it = p.items[k];
+        Item& it = at(p, k);
         if (!it.lends || !it.base) continue;
         u32 floor = heard_floor(p, it, queue);
         for (u32 i = 0; i < floor && over(); ++i) give_back(p, it, i);
@@ -637,7 +797,7 @@ bool make_room(Player& p, KTable* queue, u64 need, bool urgent) {
     if (over() && urgent) {
         // Read ahead, the farthest first, but never what is wanted.
         for (u32 k = p.count; k-- > p.cursor && over();) {
-            Item& it = p.items[k];
+            Item& it = at(p, k);
             if (!it.lends || !it.base) continue;
             for (u32 i = it.pieces; i-- > 0 && over();) {
                 if (it.want_lo != kNone && i >= it.want_lo && i <= it.want_hi) continue;
@@ -707,16 +867,16 @@ void schedule_reads(Player& p, IoQueue* io, KTable* queue, Item** ahead, u32 nah
 // Moves the cursor past what is finished, looks at the item playing and the one after
 // it and reads their pieces, and lends hifi each ready item in order.
 void advance(TickContext& ctx, Player& p, KTable* queue) {
-    while (p.cursor < p.count && finished(p.items[p.cursor])) ++p.cursor;
+    while (p.cursor < p.count && finished(at(p, p.cursor))) ++p.cursor;
     if (!p.want_play) return;
     IoQueue* io = platform_io(*ctx.engine);
     Item* ahead[2];
     u32 nahead = 0;
     bool gap = false; // an item before this one is not in hifi yet: later ones must wait their turn
     for (u32 k = p.cursor; k < p.count && nahead < 2; ++k) {
-        Item& it = p.items[k];
+        Item& it = at(p, k);
         if (finished(it)) continue;
-        if (it.state == PlayerItemState::Waiting && it.stat.is_null() && !it.sized) {
+        if (it.state == PlayerItemState::Idle && it.stat.is_null() && !it.sized) {
             if (!io) { fail(ctx, p, queue, it, "there is no I/O queue to read with"); continue; }
             IoRequest rq;
             rq.path = row_of(queue, it).path;
@@ -754,13 +914,20 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     t.frames   = cur ? row_of(queue, *cur).frames : 0;
     t.rate     = cur ? row_of(queue, *cur).rate : 0;
     t.queued   = p.count;
-    t.place    = p.cursor < p.count ? p.items[p.cursor].id : 0;
+    t.place    = p.cursor < p.count ? at(p, p.cursor).id : 0;
+    t.place_pos = p.cursor + 1;
     t.seek_item  = p.seek_item;
     t.seek_frame = p.seek_item ? p.seek_frame : 0;
     u32 left = 0;
     bool busy = false; // anything of ours still in hifi's hands
-    for (u32 k = 0; k < p.count; ++k) { left += !finished(p.items[k]); busy = busy || p.items[k].lends || p.items[k].in_play; }
-    for (u32 k = p.cursor; k < p.count; ++k) row_of(queue, p.items[k]).bytes_read = p.items[k].bytes_there;
+    for (u32 k = 0; k < p.count; ++k) {
+        Item& it = at(p, k);
+        left += !finished(it);
+        PlayerItem& r = row_of(queue, it);
+        r.pos = k + 1;
+        r.bytes_read = it.bytes_there;
+    }
+    for (u32 k = 0; k < kMaxItems; ++k) busy = busy || (p.items[k].alive && (p.items[k].lends || p.items[k].in_play));
     t.left = left;
 
     // The queue has run out when nothing is left to play and the last of it has been heard.
@@ -796,6 +963,8 @@ bool player_startup(Engine& e, ModuleInstance& self) {
     Player* p = arena_push<Player>(self.arena);
     self.set_state(p);
     p->items = (Item*)mem_alloc(sizeof(Item) * kMaxItems);
+    p->order = (u32*)mem_alloc(sizeof(u32) * kMaxItems);
+    for (u32 i = 0; i < kMaxItems; ++i) new (&p->items[i]) Item();
     p->returns = (Return*)mem_alloc(sizeof(Return) * kMaxReturns);
     u32 piece = g_config.piece_bytes;
     if (piece < os_page_size() || (piece & (piece - 1))) {
@@ -837,8 +1006,9 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
     hifi_destroy(p->hifi); // first: after this nobody reads the items' spans
     p->hifi = nullptr;
     IoQueue* io = platform_io(e);
-    for (u32 k = 0; k < p->count; ++k) {
+    for (u32 k = 0; k < kMaxItems; ++k) {
         Item& it = p->items[k];
+        if (!it.alive) continue;
         if (!it.stat.is_null() && io) {
             io->cancel(it.stat);
             for (const IoCompletion& c : io->completions()) if (c.request == it.stat) { io->reap(it.stat); break; }
@@ -855,6 +1025,7 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
     }
     p->nreads = 0;
     mem_free(p->items);
+    mem_free(p->order);
     mem_free(p->returns);
     for (u8* m : p->shadow) mem_free(m);
     p->items = nullptr;
@@ -894,14 +1065,14 @@ void cmd_jump(CliContext& ctx, Span<const char* const> args) {
     ctx.engine->events.emit(PlayerJump{(u64)row});
 }
 void cmd_seek(CliContext& ctx, Span<const char* const> args) {
-    f64 at = 0.0;
-    if (args.len != 1 || !number(args[0], &at) || at < 0.0) { ctx.fail("player seek <seconds>"); return; }
+    f64 secs = 0.0;
+    if (args.len != 1 || !number(args[0], &secs) || secs < 0.0) { ctx.fail("player seek <seconds>"); return; }
     Player* p = state(*ctx.engine);
     if (!p || p->cursor >= p->count) { ctx.fail("nothing to seek in"); return; }
     KTable* queue = engine_ktable(*ctx.engine, g_queue_ktable);
-    u32 rate = queue ? queue->rows_of<PlayerItem>()[p->items[p->cursor].row.index()].rate : 0;
+    u32 rate = queue ? queue->rows_of<PlayerItem>()[at(*p, p->cursor).row.index()].rate : 0;
     if (!rate) { ctx.fail("the row has not been heard yet: its rate is not known"); return; }
-    ctx.engine->events.emit(PlayerSeek{0, (u64)(at * rate)});
+    ctx.engine->events.emit(PlayerSeek{0, (u64)(secs * rate)});
 }
 void cmd_volume(CliContext& ctx, Span<const char* const> args) {
     f64 db = 0.0;
@@ -944,6 +1115,34 @@ void cmd_eq(CliContext& ctx, Span<const char* const> args) {
     }
     ctx.engine->events.emit(PlayerSetParam{1, (u32)band * 4 + 2, db});
 }
+void cmd_remove(CliContext& ctx, Span<const char* const> args) {
+    f64 row = 0.0;
+    if (args.len != 1 || !number(args[0], &row) || row < 1.0) { ctx.fail("player remove <row>"); return; }
+    ctx.engine->events.emit(PlayerQueueEdit{(u8)PlayerEditOp::Remove, (u64)row, 0});
+}
+void cmd_move(CliContext& ctx, Span<const char* const> args) {
+    f64 row = 0.0, before = 0.0;
+    if (args.len < 1 || args.len > 2 || !number(args[0], &row) || row < 1.0 || (args.len == 2 && !number(args[1], &before))) {
+        ctx.fail("player move <row> [<before row>]: to before that row, or to the end");
+        return;
+    }
+    ctx.engine->events.emit(PlayerQueueEdit{(u8)PlayerEditOp::Move, (u64)row, (u64)before});
+}
+void cmd_clear(CliContext& ctx, Span<const char* const> args) {
+    if (args.len) { ctx.fail("player clear"); return; }
+    ctx.engine->events.emit(PlayerQueueEdit{(u8)PlayerEditOp::Clear, 0, 0});
+}
+void cmd_insert(CliContext& ctx, Span<const char* const> args) {
+    f64 before = 0.0;
+    if (args.len < 2 || !number(args[0], &before) || before < 1.0) { ctx.fail("player insert <before row> <file>..."); return; }
+    for (u32 i = 1; i < args.len; ++i) {
+        PlayerEnqueue q{};
+        if (strlen(args[i]) >= sizeof q.path) { ctx.fail("the path is too long: %s", args[i]); return; }
+        format(q.path, sizeof q.path, "%s", args[i]);
+        q.before = (u64)before;
+        ctx.engine->events.emit(q);
+    }
+}
 void cmd_seekby(CliContext& ctx, Span<const char* const> args) {
     f64 by = 0.0;
     if (args.len != 1 || !number(args[0], &by)) { ctx.fail("player seekby <seconds>"); return; }
@@ -956,9 +1155,9 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
     if (!p) { ctx.fail("the player is not running"); return; }
     const PlayerTransport& t = p->transport;
     const PlayerOutput& o = p->output;
-    f64 at = t.rate ? (f64)t.position / t.rate : 0.0, of = t.rate ? (f64)t.frames / t.rate : 0.0;
+    f64 secs = t.rate ? (f64)t.position / t.rate : 0.0, of = t.rate ? (f64)t.frames / t.rate : 0.0;
     ctx.print("%s; item %llu at %.1f of %.1f s; %u queued, %u left", player_state_name((PlayerState)t.state),
-              (unsigned long long)t.item, at, of, t.queued, t.left);
+              (unsigned long long)t.item, secs, of, t.queued, t.left);
     if (o.open) ctx.print("device: %u Hz, %u ch, %s, %s%s; lead %.2f s; %u underruns", o.rate, o.channels,
                           hifi_sample_format_name((HifiSampleFormat)o.sample), o.shared ? "shared" : "unshared", o.exact ? ", exact" : "",
                           o.rate ? (f64)o.lead_frames / o.rate : 0.0, o.underruns);
@@ -980,7 +1179,7 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
     KTable* queue = engine_ktable(*ctx.engine, g_queue_ktable);
     if (!queue) return;
     for (u32 k = 0; k < p->count; ++k) {
-        const PlayerItem& r = queue->rows_of<PlayerItem>()[p->items[k].row.index()];
+        const PlayerItem& r = queue->rows_of<PlayerItem>()[at(*p, k).row.index()];
         ctx.print("%4llu %-8s %s%s%s", (unsigned long long)r.id, player_item_state_name((PlayerItemState)r.state), r.path,
                   r.reason[0] ? ": " : "", r.reason);
     }
@@ -1000,10 +1199,14 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "player mute",   .help = "on|off", .fn = cmd_mute},
     {.name = "player set",    .help = "<stage> <param> <value> a parameter of the chain", .fn = cmd_set},
     {.name = "player eq",     .help = "<band> <dB>, preset <name>, presets: the equalizer", .fn = cmd_eq},
+    {.name = "player remove", .help = "<row> takes a row out of the queue", .fn = cmd_remove},
+    {.name = "player move",   .help = "<row> [<before row>] moves a row: before another, or to the end", .fn = cmd_move},
+    {.name = "player insert", .help = "<before row> <file>... adds files before a row", .fn = cmd_insert},
+    {.name = "player clear",  .help = "empties the queue, and stops", .fn = cmd_clear},
     {.name = "player status", .help = "the transport, the device and the queue", .fn = cmd_status},
 };
 
-constinit const FieldDesc k_item_fields[] = {KV_FIELDS(PlayerItem, id, state, damaged, channels, bits, rate, frames, size, bytes_read, path, reason)};
+constinit const FieldDesc k_item_fields[] = {KV_FIELDS(PlayerItem, id, pos, state, damaged, channels, bits, rate, frames, size, bytes_read, path, reason)};
 constinit const FieldDesc k_stage_fields[] = {KV_FIELDS(PlayerStage, index, flat, params_len, name, param_names, params)};
 constinit const ComponentDesc k_components[] = {KV_COMPONENT(PlayerItem, k_item_fields, CompCosmetic), KV_COMPONENT(PlayerStage, k_stage_fields, CompCosmetic)};
 constinit const KTableDesc k_ktables[] = {
@@ -1013,13 +1216,13 @@ constinit const KTableDesc k_ktables[] = {
 constinit const EventTypeDesc k_events[] = {
     KV_EVENT(PlayerEnqueue), KV_EVENT(PlayerPlay), KV_EVENT(PlayerPause), KV_EVENT(PlayerStop), KV_EVENT(PlayerNext),
     KV_EVENT(PlayerPrevious), KV_EVENT(PlayerJump), KV_EVENT(PlayerSeek), KV_EVENT(PlayerSeekBy), KV_EVENT(PlayerSeeked),
-    KV_EVENT(PlayerSetParam), KV_EVENT(PlayerParamChanged),
+    KV_EVENT(PlayerSetParam), KV_EVENT(PlayerParamChanged), KV_EVENT(PlayerQueueEdit),
     KV_EVENT(PlayerTrackStarted), KV_EVENT(PlayerTrackEnded), KV_EVENT(PlayerTrackFailed), KV_EVENT(PlayerQueueEnded), KV_EVENT(HifiUnderrun),
 };
 constinit const ResourceDesc k_resources[] = {{".transport"}, {".output"}};
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = player_pump,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerQueueEdit",
      .writes = ".queue, .chain, .transport, .output",
      .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, PlayerSeeked, PlayerParamChanged, HifiUnderrun",
      .main_thread = true, .runs = RunWhen::Always},
@@ -1047,11 +1250,10 @@ const PlayerOutput*    player_output(Engine& e)    { Player* p = state(e); retur
 
 const char* player_item_state_name(PlayerItemState s) {
     switch (s) {
-    case PlayerItemState::Waiting: return "waiting";
+    case PlayerItemState::Idle:    return "idle";
     case PlayerItemState::Reading: return "reading";
     case PlayerItemState::Ready:   return "ready";
     case PlayerItemState::Playing: return "playing";
-    case PlayerItemState::Done:    return "done";
     case PlayerItemState::Failed:  return "failed";
     case PlayerItemState::Count:   break;
     }

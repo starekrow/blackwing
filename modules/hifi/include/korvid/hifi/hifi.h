@@ -124,6 +124,12 @@ void hifi_flush(Hifi* h);
 // Sources dropped get Released. n may be 0: the old audio fades out, and what is added
 // afterwards is joined the same way.
 void hifi_jump(Hifi* h, const HifiSource* sources, u32 n);
+// What follows source `id` is to be `sources` instead (a queue edit). If `id` is still
+// being decoded, nothing after it has been rendered, and nothing heard changes. If its
+// end is already in the lead, the lead is cut there: an aligned recut renders the same
+// music to that frame and the new sources after it, crossfaded in, and what was in the
+// lead past it is never heard. Sources dropped get Released.
+void hifi_replace_after(Hifi* h, u64 id, const HifiSource* sources, u32 n);
 // The bytes source `id` waits for will not come (a read failed): when it next waits, its
 // decode ends there, Damaged with `reason`, or it Fails if it had not opened yet. What
 // was decoded before plays.

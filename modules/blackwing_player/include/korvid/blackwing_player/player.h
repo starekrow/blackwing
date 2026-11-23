@@ -21,9 +21,16 @@ struct Engine;
 
 // ---- commands: events the player consumes ----------------------------------------------
 
-// Adds a file to the end of the queue. The path is the OS's, absolute or relative to the
-// working directory.
-struct PlayerEnqueue { char path[512]; };
+// Adds a file to the queue: before row `before`, or at the end (0). The path is the OS's,
+// absolute or relative to the working directory.
+struct PlayerEnqueue { char path[512]; u64 before = 0; };
+// An edit of the queue. Remove: row `item` leaves the list (and the table). Move: row
+// `item` goes before row `before` (0: to the end); its id stays. Clear: every row goes,
+// and playing stops. The place stays at the row it was at; if that row is removed, the
+// row that takes its position plays. An edit after the place is heard as the edit even
+// when the next row's audio is already in the lead.
+enum class PlayerEditOp : u8 { Remove, Move, Clear };
+struct PlayerQueueEdit { u8 op; u64 item; u64 before; };
 // Plays: from the first item not yet done, or on from a pause.
 struct PlayerPlay    { u8 unused = 0; };
 // Holds the playhead where it is.
@@ -75,24 +82,27 @@ struct HifiUnderrun       { u32 count; u32 seq; };
 
 // ---- state: what anyone may read ---------------------------------------------------------
 
+// What is true of a row now. A row before the place is done: heard, or skipped; its
+// state is then idle (or failed), and `damaged` and `reason` say how it ended.
 enum class PlayerItemState : u8 {
-    Waiting, // queued; not read yet
+    Idle,    // nothing of it read
     Reading, // its first pieces are being read
     Ready,   // its first pieces are in, and a decoder takes it; the rest arrive as it plays
     Playing, // its first frame has been heard and its last has not
-    Done,    // heard to its end, or skipped
     Failed,  // could not be played: `reason`
     Count
 };
-// "waiting", "reading", ...
+// "idle", "reading", ...
 const char* player_item_state_name(PlayerItemState s);
 
-// A row of the ktable "player.queue": the component PlayerItem, one row per item ever
-// queued, in order. Rows are not removed when an item is done.
+// A row of the ktable "player.queue": the component PlayerItem, one row per item in the
+// list. The table's order is not the list's: `pos` is. A row removed from the list
+// leaves the table.
 struct PlayerItem {
-    u64  id;          // from 1, in the order queued
+    u64  id;          // from 1, in the order added; it stays through moves
+    u32  pos;         // its place in the list, from 1
     u8   state;       // a PlayerItemState
-    u8   damaged;     // Done, but the file ended early or was spoiled: `reason`
+    u8   damaged;     // done, but the file ended early or was spoiled: `reason`
     u16  channels;    // the format, known once the item has Started
     u16  bits;
     u32  rate;
@@ -121,10 +131,12 @@ struct PlayerTransport {
     u64  position = 0;  // the frame of it being heard: where it started, or was sent to, and the frames heard since
     u64  frames   = 0;  // its length; 0 when its header does not say
     u32  rate     = 0;  // frames per second of the item being heard
-    u32  queued   = 0;  // items ever queued
-    u32  left     = 0;  // items not yet Done or Failed
+    u32  queued   = 0;  // rows in the list
+    u32  left     = 0;  // items not yet done or failed
     u32  pad2     = 0;
     u64  place    = 0;  // the row the transport is at: the one playing, or about to; 0 past the end
+    u32  place_pos = 0; // its pos (the list's length and one, past the end): the rows before it are done
+    u32  pad3     = 0;
     u64  seek_item  = 0; // a seek on its way to the ear: its row (0: none), and the frame it was sent to
     u64  seek_frame = 0;
 };

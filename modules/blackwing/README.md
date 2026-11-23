@@ -23,7 +23,8 @@ With a terminal on stdin, the engine's command line is live while it plays: `pla
 pause`, `player play`, `player next`, `player previous`, `player jump ROW`, `player seek
 SECONDS`, `player seekby SECONDS`, `player volume DB`, `player mute on|off`, `player set
 STAGE PARAM VALUE`, `player eq BAND DB`, `player eq preset NAME`, `player eq presets`,
-`player stop`, `player status`, `quit`. Ctrl-C
+`player remove ROW`, `player move ROW [BEFORE]`, `player insert BEFORE FILE...`, `player
+clear`, `player stop`, `player status`, `quit`. Ctrl-C
 stops cleanly. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
 a bad command line, 3 if a dev build leaked.
 

@@ -505,3 +505,10 @@ full-scale sine past full scale; a recut with the equalizer unchanged is within 
 of a straight render (23 samples in 48 000), which is as exact as a filter that never
 forgets can be.
 
+**Milestone 6, the queue** (Nov 23, 2026; BR18, and BR26's queue commands). As planned:
+a list with a place in it, ids that survive moves, rows that leave the table, done as
+being before the place; an edit after the place goes to `hifi` as a replacement of what
+follows the place's row, free before that row's end is rendered and a recut of the lead
+after. Found on the way: a milestone 4 bug where a recut joined after a jump left the
+jump's later marks unplaced, blocking every mark behind them; fixed, with a test.
+

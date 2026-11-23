@@ -138,6 +138,8 @@ struct Rig {
         for (u32 i = 0; i < rows.len; ++i) if (q->is_alive(i) && rows[i].id == id) return rows[i];
         return PlayerItem{};
     }
+    // Done: before the place.
+    bool done(u64 id) { PlayerItem it = item(id); return it.id && it.pos < t().place_pos; }
     void add(const char* path) { PlayerEnqueue q{}; format(q.path, sizeof q.path, "%s", path); e.events.emit(q); }
     template <class E> void say(const E& ev) { e.events.emit(ev); }
 
@@ -275,9 +277,9 @@ void test_player(TestCtx& c) {
         r.add(data(A)); r.add(data(A));
         r.step();
         KV_CHECK(c, r.t().queued == 2 && r.t().left == 2 && r.t().state == (u8)PlayerState::Stopped);
-        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Waiting && strstr(r.item(2).path, A) != nullptr);
+        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Idle && strstr(r.item(2).path, A) != nullptr);
         r.step(5);
-        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Waiting && !r.o().open); // queued is not playing: nothing is read
+        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Idle && !r.o().open); // queued is not playing: nothing is read
         r.say(PlayerPlay{});
         KV_CHECK(c, r.wait_lead(kN * 2));
         KV_CHECK(c, r.t().state == (u8)PlayerState::Starting && r.t().item == 0 && g_nlog == 0); // in the lead; not heard
@@ -292,7 +294,7 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, r.wait_log('Q', 0));
         KV_CHECK(c, log_is("S1 E1 S2 E2 Q0"));
         KV_CHECK(c, r.t().state == (u8)PlayerState::Stopped && r.t().item == 0 && r.t().left == 0);
-        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Done && r.item(2).state == (u8)PlayerItemState::Done && !r.item(2).damaged);
+        KV_CHECK(c, r.done(1) && r.done(2) && !r.item(2).damaged);
         KV_CHECK(c, r.o().underruns == 0);
         HifiDeviceFormat f; u64 frames;
         const u8* d = r.seg_data(0, &f, &frames);
@@ -382,7 +384,7 @@ void test_player(TestCtx& c) {
         if (g_nlog != 10) KV_ERROR("test", "the log was: %s", log_text());
         const Heard& cut = ev('E', 4);
         KV_CHECK(c, cut.damaged && cut.frames > 0 && cut.frames < kN && strstr(cut.reason, "cut short"));
-        KV_CHECK(c, r.item(4).state == (u8)PlayerItemState::Done && r.item(4).damaged && r.item(4).reason[0]);
+        KV_CHECK(c, r.done(4) && r.item(4).damaged && r.item(4).reason[0]);
         KV_CHECK(c, heard('F', 5) && ev('F', 5).reason[0] && r.item(5).state == (u8)PlayerItemState::Failed);
         KV_CHECK(c, heard('E', 6) && !ev('E', 6).damaged && r.t().left == 0 && r.t().state == (u8)PlayerState::Stopped);
         KV_CHECK(c, r.o().underruns == 0 && !heard('U', 1));
@@ -402,7 +404,7 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, r.t().item == 1);
         r.say(PlayerNext{});
         r.step();
-        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Done && r.t().item == 0);
+        KV_CHECK(c, r.done(1) && r.t().item == 0);
         KV_CHECK(c, r.wait_lead(kN * 2));             // items 2 and 3, the jump's new lead
         r.pull(2000);
         KV_CHECK(c, log_is("S1 S2") && r.t().item == 2);
@@ -503,13 +505,13 @@ void test_player(TestCtx& c) {
         r.say(PlayerPrevious{});
         until = time_now() + 2.0;
         while (count_of('S', 1) < 2 && time_now() < until) r.pace(&still);
-        KV_CHECK(c, heard('S', 2) && count_of('S', 1) == 2 && r.t().item == 1 && r.item(2).state != (u8)PlayerItemState::Done);
+        KV_CHECK(c, heard('S', 2) && count_of('S', 1) == 2 && r.t().item == 1 && !r.done(2));
         // A jump to the third row: the first two are done, and it plays to the end.
         r.say(PlayerJump{3});
         until = time_now() + 5.0;
         while (!heard('Q', 0) && time_now() < until) r.pace(&still);
         KV_CHECK(c, heard('S', 3) && heard('E', 3) && !heard('E', 1) && !heard('E', 2) && heard('Q', 0));
-        KV_CHECK(c, r.item(1).state == (u8)PlayerItemState::Done && r.item(2).state == (u8)PlayerItemState::Done);
+        KV_CHECK(c, r.done(1) && r.done(2));
         KV_CHECK(c, r.o().underruns == 0);
         r.stop();
         mem_free(pcm.s);
@@ -547,6 +549,65 @@ void test_player(TestCtx& c) {
         const u8* d = r.seg_data(0, &f, &frames);
         KV_CHECK(c, heard('P', 1) && !row().flat && d && all_zero(d + (frames - 500) * 4, 500 * 4)); // muted: silence
         KV_CHECK(c, r.o().underruns == 0);
+        r.stop();
+    }
+
+    // The queue as a list. An edit to the row after the one playing, when its audio is
+    // already in the lead, is heard as the edit (a recut at the boundary); before that it
+    // costs nothing. Rows have ids that survive a move, and a removed row leaves the
+    // table. Removing the row playing plays what takes its place; clear stops.
+    c.begin("player queue");
+    {
+        const char* T = "broken/truncated.flac"; // the same format as A, and shorter: told apart by length
+        for (u32 kase = 0; kase < 3; ++kase) {
+            Rig r;
+            KV_CHECK(c, r.start(0, 256u << 10, 256u << 20, kase == 2 ? 0.1 : 5.0));
+            r.add(data(A)); r.add(data(T)); r.add(data(A));
+            r.say(PlayerPlay{});
+            KV_CHECK(c, r.wait_lead(kase == 2 ? 1000 : kN + 8000)); // in the lead: all of 1 and the start of 2 (not with a short lead)
+            u32 still = 0;
+            while (r.t().position < 2000 && still < 1000) r.pace(&still);
+            KV_CHECK(c, r.t().item == 1);
+            if (kase == 1) r.say(PlayerQueueEdit{(u8)PlayerEditOp::Move, 3, 2});  // 1, 3, 2
+            else           r.say(PlayerQueueEdit{(u8)PlayerEditOp::Remove, 2, 0}); // 1, 3
+            r.step();
+            KV_CHECK(c, r.t().queued == (kase == 1 ? 3u : 2u) && r.item(3).pos == 2 && (kase == 1 ? r.item(2).pos == 3 : r.item(2).id == 0));
+            f64 until = time_now() + 5.0;
+            while (!heard('Q', 0) && time_now() < until) r.pace(&still);
+            KV_CHECK(c, log_is(kase == 1 ? "S1 E1 S3 E3 S2 E2 Q0" : "S1 E1 S3 E3 Q0"));
+            HifiDeviceFormat f; u64 frames = 0;
+            const u8* d = r.seg_data(0, &f, &frames);
+            u64 z = 0;
+            while (d && z < frames && all_zero(d + z * 4, 4)) ++z;
+            KV_CHECK(c, d && md5_is(d + z * 4, kN, 2, data(A)) && md5_is(d + (z + kN) * 4, kN, 2, data(A))); // 1, then 3, exact
+            if (kase != 1) KV_CHECK(c, d && all_zero(d + (z + 2 * kN) * 4, (usize)(frames - z - 2 * kN) * 4)); // and not 2
+            KV_CHECK(c, r.o().underruns == 0 && r.o().recuts == (kase == 2 ? 0u : 1u)); // in the lead: a recut; not yet: none
+            r.stop();
+        }
+        // Insert before a row; remove the row playing; clear.
+        Rig r;
+        KV_CHECK(c, r.start());
+        r.add(data(A)); r.add(data(A));
+        PlayerEnqueue q{}; format(q.path, sizeof q.path, "%s", data(T)); q.before = 2;
+        r.say(q);                                       // 1, 3, 2
+        r.step();
+        KV_CHECK(c, r.item(3).pos == 2 && r.item(2).pos == 3);
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(kN));
+        u32 still = 0;
+        while (r.t().position < 2000 && still < 1000) r.pace(&still);
+        r.say(PlayerQueueEdit{(u8)PlayerEditOp::Remove, 1, 0}); // the row playing: what takes its place plays
+        f64 until = time_now() + 2.0;
+        while (!heard('S', 3) && time_now() < until) r.pace(&still);
+        KV_CHECK(c, heard('S', 3) && !heard('E', 1) && r.item(1).id == 0 && r.t().place == 3 && r.item(3).pos == 1);
+        r.say(PlayerQueueEdit{(u8)PlayerEditOp::Clear, 0, 0});
+        r.step(3);
+        KV_CHECK(c, r.t().queued == 0 && r.t().state == (u8)PlayerState::Stopped && r.item(2).id == 0 && r.item(3).id == 0);
+        r.add(data(A));                                 // and the list goes on from empty
+        r.say(PlayerPlay{});
+        until = time_now() + 3.0;
+        while (!heard('Q', 0) && time_now() < until) r.pace(&still);
+        KV_CHECK(c, heard('S', 4) && heard('E', 4) && heard('Q', 0));
         r.stop();
     }
 

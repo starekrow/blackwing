@@ -79,6 +79,14 @@ silence. Paused or held, it switches with no fade when play lets it go. One recu
 flight at a time; changes that arrive meanwhile wait, and the next recut renders the
 newest. `ParamsHeard` says which generation of parameters is being heard.
 
+**Replacing what follows.** `hifi_replace_after(h, id, sources, n)` is a queue edit: what
+follows source `id` is to be other sources. While `id` is still being decoded nothing
+after it has been rendered, and it costs nothing. When its end is already in the lead,
+the lead is cut at that frame: an aligned recut renders the same music up to it from the
+source ring and the new sources after it, crossfaded in like any recut, and a cut note
+tells the caller to void the marks the old render made past the boundary (except the
+`Ended` of `id` itself, which is still true).
+
 **A source can start anywhere.** `HifiSource::start` is the frame it begins at (the
 decoder seeks there, waiting for bytes like any other read), and `seek` says it was
 being heard already: its first mark is `Seeked`, not `Started`. The status's `position`
@@ -194,6 +202,7 @@ Header `korvid/hifi/hifi.h`:
 | `hifi_add_source(h, source)` | function | queue a source |
 | `hifi_pause(h)`, `hifi_play(h)`, `hifi_flush(h)` | functions | hold, let go, drop everything |
 | `hifi_jump(h, sources, n)` | function | everything replaced by these: the old fades out, the new fades in |
+| `hifi_replace_after(h, id, sources, n)` | function | what follows a source replaced: free before its end is rendered, a recut after |
 | `hifi_set_param(h, stage, param, value)` | function | a parameter of the chain, heard by a recut; returns its generation |
 
 Header `korvid/hifi/stage.h`: `StageDesc` (`name`, `memory_bytes`, `params`, `open`,
@@ -270,7 +279,10 @@ straight -6 dB render bit for bit (not flat); a change from -6 to -12 dB is the 
 render to the join, the fade's mix of the two renders to the sample, then the -12
 render, with no step larger than the two renders' own and the fade's slope; 200 changes
 dragged over four seconds end at the last value in about twenty recuts, no underrun; a
-change while paused is heard from the resume with no fade.
+change while paused is heard from the resume with no fade. A replacement after the
+source playing, before its end is rendered (no recut) and after (a recut at the
+boundary), and with nothing: the source exact, then the new one exact, the old next
+never Started. A jump's marks still placed after a recut joined behind it.
 
 ## Not in this module
 

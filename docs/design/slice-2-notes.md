@@ -316,3 +316,44 @@ the path, 0 underruns.
   and is clipped at the device's word.
 - Matched designs near Nyquist and coefficients from the engine's transcendentals, as
   the PRD defers.
+
+## Milestone 6, the queue
+
+Nov 23, 2026. Linux laptop, `linux-dev`.
+
+**As planned**, with these particulars:
+
+- The player's items live in fixed slots and the list is an order of them, so a read or
+  a piece given back keeps pointing at its item through any edit. Ids are handed out in
+  order and stay through moves; rows carry `pos`. "Done" is no longer a state: a row is
+  done by being before the place (`player.transport`'s `place` and `place_pos`), and its
+  state then says idle (or failed), with how it ended in `damaged` and `reason`.
+- `PlayerQueueEdit` (remove, move, clear) and `PlayerEnqueue` with `before`. A removed
+  row leaves the table at once; its slot waits for `hifi`'s `Released`.
+- After edits the player works out what should follow the place's row and, if `hifi` has
+  something else, calls `hifi_replace_after` (new): while that row is still being
+  decoded it is free; once its end is in the lead, `hifi` cuts the lead there with an
+  aligned recut (the same audio to the boundary from the source ring, then the new
+  programme) and a cut note that voids the old programme's marks past the boundary.
+- CLI: `player remove`, `move`, `insert`, `clear` (the rest of BR26).
+
+**Found on the way, a bug from milestone 4:** a jump's marks, made before the callback
+had joined it, carry the slot's frame and are placed when "the last request joined" is
+the jump. A recut joined afterwards changed that, so a mark made late (a second source's
+`Started`) could never be placed, and as the head of the caller's list it held back every
+mark behind it. Through PipeWire: seek near the end of a track, remove the next, and one
+time in five the track after never said it had started, though it played. The callback
+now keeps the last jump it joined and where, apart from recuts, and a render checks
+whether it has been joined before it makes a mark relative. Twenty runs of the same
+sequence after: all right. A test makes recut-after-jump deterministic, and fails on the
+old code.
+
+**Tests.** `hifi`: replacing after the source playing before its end is rendered (no
+recut) and after (a recut), and with nothing: exact both sides, the old next never
+Started; marks across a jump and a recut. The player: remove and move inside the lead
+and before it, each heard as the edit with the recut where expected; insert before a row;
+remove the row playing; clear. ThreadSanitizer and AddressSanitizer clean.
+
+**Through PipeWire and the capture device**, on the real album: seek to 251 s of the
+first track, remove the second (already in the lead): a recut 6 to 8 ms after the edit
+reached the path, and the third track follows the first.

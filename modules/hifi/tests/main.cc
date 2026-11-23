@@ -17,6 +17,8 @@ void test_hifi_jump(kv::TestCtx&);
 void test_hifi_null_recut(kv::TestCtx&);
 void test_hifi_gain_join(kv::TestCtx&);
 void test_hifi_drag(kv::TestCtx&);
+void test_hifi_replace(kv::TestCtx&);
+void test_hifi_marks_across_joins(kv::TestCtx&);
 
 int main() {
     kv::TestCtx c;
@@ -36,6 +38,8 @@ int main() {
     test_hifi_null_recut(c);
     test_hifi_gain_join(c);
     test_hifi_drag(c);
+    test_hifi_replace(c);
+    test_hifi_marks_across_joins(c);
     int rc = kv::test_report(c, "hifi_tests");
     kv::mem_shutdown();
     return rc;

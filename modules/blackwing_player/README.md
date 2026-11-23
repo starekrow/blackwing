@@ -12,7 +12,16 @@ link it and have a player. Its engine name is `player`.
 takes the command events that arrived, collects stats and reads that landed, takes
 `hifi`'s events, lets go of pieces given back, moves items along, and publishes.
 
-**An item's life.** `PlayerEnqueue` makes a row in `player.queue`, *waiting*. Nothing is
+**The queue is a list with a place in it.** Rows have ids that stay through moves, and a
+`pos`; the transport's `place` is the row playing or about to, and the rows before it are
+done (heard, or skipped). `PlayerQueueEdit` removes, moves or clears; `PlayerEnqueue`
+with `before` inserts. Removed rows leave the table at once (their slot waits for `hifi`
+to let go). An edit after the place changes what `hifi` has after the place's row
+(`hifi_replace_after`): free while that row is still being decoded, a recut of the lead
+when its end is already in it, so the edit is heard as the edit. Removing the row
+playing plays the row that takes its position; clear stops.
+
+**An item's life.** `PlayerEnqueue` makes a row in `player.queue`, *idle*. Nothing is
 read until there is a mind to play. Then the item playing and the one after it are
 looked at through the engine's I/O queue (a stat), and read in pieces (*reading*). Once
 a file's first pieces are in and a decoder claims them (*ready*), it is lent to `hifi`
@@ -80,7 +89,8 @@ Header `korvid/blackwing_player/player.h`:
 
 | name | kind | what |
 |---|---|---|
-| `PlayerEnqueue` | event type | in: `path`; a file joins the end of the queue |
+| `PlayerEnqueue` | event type | in: `path`, `before` (0: the end); a file joins the queue |
+| `PlayerQueueEdit`, `PlayerEditOp` | event type, enum | in: `op` (`Remove`, `Move`, `Clear`), `item`, `before` |
 | `PlayerPlay`, `PlayerPause`, `PlayerStop`, `PlayerNext` | event type | in: the transport |
 | `PlayerPrevious`, `PlayerJump` | event type | in: the row before (or this one again); `item`, a row now |
 | `PlayerSeek`, `PlayerSeekBy` | event type | in: `item` (0: the one playing) and `frame`; `seconds` on from the last seek |
@@ -93,9 +103,9 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerTrackFailed` | event type | out: `item`, `seq`, `reason`; it could not be played |
 | `PlayerQueueEnded` | event type | out: `seq`; everything queued is done and nothing is sounding |
 | `HifiUnderrun` | event type | out: `count`, `seq`; the lead ran dry |
-| `PlayerItem` | component | `id`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
+| `PlayerItem` | component | `id`, `pos`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
 | `PlayerItemState`, `PlayerState` | enum | an item's state; the transport's |
-| `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `seek_item`, `seek_frame` |
+| `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `place_pos`, `seek_item`, `seek_frame` |
 | `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts` |
 | `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
@@ -105,14 +115,14 @@ Header `korvid/blackwing_player/module.h`: `blackwing_player_module`, the record
 
 What the module registers with the engine, as module `player`:
 
-- the ktable `player.queue` (component `PlayerItem`, cosmetic, 4096 rows);
+- the ktable `player.queue` (component `PlayerItem`, cosmetic, 4096 rows, the list's rows);
 - the ktable `player.chain` (component `PlayerStage`, cosmetic, a row per stage: `gain`,
   `eq`);
 - the resources `player.transport` and `player.output`;
-- the seventeen event types above;
+- the eighteen event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
-  `seekby`, `volume`, `mute`, `set`, `eq`, `status`.
+  `seekby`, `volume`, `mute`, `set`, `eq`, `remove`, `move`, `insert`, `clear`, `status`.
 
 ## Behaviour worth knowing
 
@@ -126,7 +136,7 @@ What the module registers with the engine, as module `player`:
   the one before it is still being heard.
 - **A file cut short is Done, not Failed**: it plays what it has, and its row and its
   `PlayerTrackEnded` say `damaged`, with the reason.
-- **Next is not Ended.** A skipped item goes to Done with no `PlayerTrackEnded`.
+- **Next is not Ended.** A skipped row is done with no `PlayerTrackEnded`.
 - **A seek, a next, a previous and a jump are each a jump in `hifi`**: the old audio fades
   out at once, the transport says *starting* (no item) until the new audio is heard, and
   that fades in. A seek within the row heard says `PlayerSeeked`, not a new start, and
@@ -144,7 +154,8 @@ What the module registers with the engine, as module `player`:
 - **Going back reopens what was done**: a row before the place that comes back (a
   previous, a jump) is read again if its file was let go of.
 - **Stop keeps the place in the queue, not in the track.** The item starts over.
-- **Rows are never removed.** The queue is also the history, up to 4096 items.
+- **The table holds the list**, up to 4096 rows; its storage order is not the list's,
+  `pos` is.
 - **A file of any size plays** within the cap. A cap smaller than a decoder's window
   (FLAC's largest frame and 8 KB, a few pieces) cannot be played under: keep it well
   above a few megabytes.
@@ -173,12 +184,15 @@ only its fade and silence, `PlayerSeeked` with the frame, the position from the 
 two seek-bys in one tick added up; previous past three seconds a restart, within them a
 row back; a jump to the third row. Volume and mute through events: the change said when
 heard, the chain's row showing it and whether it is flat, `exact` off and on again, a
-value above 0 dB kept at 0, mute as silence.
+value above 0 dB kept at 0, mute as silence. The queue: the row after the one playing
+removed, or another moved into its place, once its audio is in the lead (a recut) and
+before (none), each heard as the edit, exact; a row inserted before another; the row
+playing removed; clear, and the list going on from empty.
 
 ## Not in this module
 
 The audio path (`hifi`). Decoders (`hifi_codec`). The stages (`hifi_eq`). Tags and the
-library. Queue edits (slice 2, milestone 6). Playlists and a saved session (later in P0).
+library. Playlists and a saved session (later in P0).
 
 ## See also
 
