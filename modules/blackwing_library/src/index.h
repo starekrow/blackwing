@@ -3,6 +3,7 @@
 // on the writer's thread; one reads, on the reader's. Neither is the main thread's.
 #pragma once
 #include "korvid/blackwing_library/library.h"
+#include "korvid/blackwing_tags/tags.h"
 #include "korvid/core/array.h"
 #include "korvid/core/types.h"
 
@@ -11,7 +12,7 @@ struct sqlite3_stmt;
 
 namespace kv::lib {
 
-constexpr u32 kSchema = 4; // a file with another version is deleted and made again
+constexpr u32 kSchema = 5; // a file with another version is deleted and made again
 
 // Sort keys and group identities (keys.cc).
 u32 sort_key(const char* s, char* out, u32 cap);
@@ -90,6 +91,7 @@ struct Index {
         const u8* fields = nullptr; const u8* sources = nullptr; const char* const* texts = nullptr;
     };
     bool put_tags(const Tags& t);
+    bool put_tags_merge_only(const Tags& t); // the track's columns and the search, not its values
     u32  count_tracks(u32 root);
     u32  count_unread(u32 root);
     // For the slot: a directory's root and path; the tracks of a directory, or of a root
@@ -113,6 +115,16 @@ struct Index {
     u32  window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user);
     // The reader's: a query is stopped when this says so (checked as sqlite works).
     void stop_when(int (*fn)(void*), void* user);
+
+    // Overrides: when an override file was last taken in (its time; -1 never), and the
+    // re-merge of a track with new ones: every other source's values from `tagvals`, the
+    // user's in their place, the merge in the track's columns and the search.
+    i64  override_seen(const char* path);
+    void set_override_seen(const char* path, i64 mtime);
+    struct TrackAt { u64 id = 0, dir = 0; u32 root = 0; char rel[4200] = ""; };
+    bool track_info(u64 id, TrackAt* out);
+    void tracks_in_dir(u32 root, const char* rel_dir, Array<u64>* out);
+    bool remerge(u64 track, Span<const TagValue> overrides);
 
     // The reader's keeping: a search's ordered ids, and a grouping's rows.
     struct Kept {

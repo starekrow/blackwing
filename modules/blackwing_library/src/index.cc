@@ -1,5 +1,6 @@
 // The index over sqlite: the schema, the writer's statements, and the reader's windows.
 #include "index.h"
+#include "overrides.h"
 #include "korvid/core/format.h"
 #include "korvid/core/log.h"
 #include "korvid/platform/io.h"
@@ -42,6 +43,7 @@ constexpr const char* kSchemaSql =
     "CREATE INDEX groups_artist ON tracks(missing, sort_artist, album_hash, artist_hash, shown_artist);"
     "CREATE INDEX groups_album ON tracks(missing, sort_album, album_hash, artist_hash, album, shown_artist, date);"
     "CREATE INDEX groups_genre ON tracks(missing, sort_genre, genre_hash, genre);"
+    "CREATE TABLE overrides(path BLOB PRIMARY KEY, mtime INTEGER NOT NULL) WITHOUT ROWID;"
     "CREATE TABLE tagvals(track INTEGER NOT NULL, source INTEGER NOT NULL, field INTEGER NOT NULL, value TEXT NOT NULL);"
     "CREATE INDEX tagvals_track ON tagvals(track);"
     "CREATE VIRTUAL TABLE search USING fts5(title, artist, album, path, tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3');";
@@ -268,6 +270,11 @@ bool Index::put_tags(const Tags& t) {
         sqlite3_bind_text(st_vals_put, 4, t.texts[i], -1, SQLITE_TRANSIENT);
         good = ok(sqlite3_step(st_vals_put)) && good;
     }
+    return put_tags_merge_only(t) && good;
+}
+
+bool Index::put_tags_merge_only(const Tags& t) {
+    bool good = true;
     sqlite3_stmt* s = st_tags_put;
     sqlite3_reset(s);
     sqlite3_bind_int64(s, 1, (i64)t.size);
@@ -397,6 +404,115 @@ u32 Index::count_dirs(u32 root, u32* failed) {
 u64 Index::count_all() {
     sqlite3_reset(st_count_all);
     return sqlite3_step(st_count_all) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_count_all, 0) : 0;
+}
+
+i64 Index::override_seen(const char* path) {
+    sqlite3_stmt* st = nullptr;
+    i64 t = -1;
+    if (ok(sqlite3_prepare_v2(db, "SELECT mtime FROM overrides WHERE path = ?", -1, &st, nullptr))) {
+        sqlite3_bind_blob(st, 1, path, (int)strlen(path), SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW) t = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    return t;
+}
+
+void Index::set_override_seen(const char* path, i64 mtime) {
+    sqlite3_stmt* st = nullptr;
+    if (ok(sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO overrides(path, mtime) VALUES(?, ?)", -1, &st, nullptr))) {
+        sqlite3_bind_blob(st, 1, path, (int)strlen(path), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 2, mtime);
+        ok(sqlite3_step(st));
+        sqlite3_finalize(st);
+    }
+}
+
+bool Index::track_info(u64 id, TrackAt* out) {
+    sqlite3_stmt* st = nullptr;
+    bool found = false;
+    if (ok(sqlite3_prepare_v2(db, "SELECT root, dir, path FROM tracks WHERE id = ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, (i64)id);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            out->id = id;
+            out->root = (u32)sqlite3_column_int64(st, 0);
+            out->dir = (u64)sqlite3_column_int64(st, 1);
+            format(out->rel, sizeof out->rel, "%.*s", sqlite3_column_bytes(st, 2), (const char*)sqlite3_column_blob(st, 2));
+            found = true;
+        }
+        sqlite3_finalize(st);
+    }
+    return found;
+}
+
+void Index::tracks_in_dir(u32 root, const char* rel_dir, Array<u64>* out) {
+    u64 dir = find_dir(root, rel_dir);
+    if (!dir) return;
+    sqlite3_stmt* st = nullptr;
+    if (ok(sqlite3_prepare_v2(db, "SELECT id FROM tracks WHERE dir = ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, (i64)dir);
+        while (sqlite3_step(st) == SQLITE_ROW) out->push((u64)sqlite3_column_int64(st, 0));
+        sqlite3_finalize(st);
+    }
+}
+
+bool Index::remerge(u64 track, Span<const TagValue> overrides) {
+    // The other sources' values, as the last read left them.
+    Strings text;
+    struct V { u8 field, source; u32 at; };
+    Array<V> vals;
+    sqlite3_stmt* st = nullptr;
+    if (!ok(sqlite3_prepare_v2(db, "SELECT field, source, value FROM tagvals WHERE track = ? AND source != 0", -1, &st, nullptr))) return false;
+    sqlite3_bind_int64(st, 1, (i64)track);
+    while (sqlite3_step(st) == SQLITE_ROW)
+        vals.push(V{(u8)sqlite3_column_int(st, 0), (u8)sqlite3_column_int(st, 1), text.add((const char*)sqlite3_column_text(st, 2))});
+    sqlite3_finalize(st);
+    Array<TagValue> all;
+    for (const V& v : vals) all.push(TagValue{(TagField)v.field, (TagSource)v.source, (u32)strlen(text.at(v.at)), text.at(v.at)});
+    for (const TagValue& v : overrides) all.push(v);
+    Merged m;
+    merge(all.span(), &m);
+    // The user's values in tagvals, and the rest of the row as put_tags writes it.
+    bool good = true;
+    if (ok(sqlite3_prepare_v2(db, "DELETE FROM tagvals WHERE track = ? AND source = 0", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, (i64)track);
+        good = ok(sqlite3_step(st));
+        sqlite3_finalize(st);
+    }
+    for (const TagValue& v : overrides) {
+        sqlite3_reset(st_vals_put);
+        sqlite3_bind_int64(st_vals_put, 1, (i64)track);
+        sqlite3_bind_int(st_vals_put, 2, 0);
+        sqlite3_bind_int(st_vals_put, 3, (int)v.field);
+        sqlite3_bind_text(st_vals_put, 4, v.text, (int)v.len, SQLITE_TRANSIENT);
+        good = ok(sqlite3_step(st_vals_put)) && good;
+    }
+    TrackAt at;
+    char shown[4200] = "";
+    if (track_info(track, &at)) shown_utf8(at.rel, shown, sizeof shown);
+    u64 size = 0; i64 mtime = 0; u32 rate = 0, channels = 0, bits = 0; u64 frames = 0; int est = 0;
+    char reason[256] = "";
+    if (ok(sqlite3_prepare_v2(db, "SELECT read_size, read_mtime, rate, channels, bits, frames, estimated, reason FROM tracks WHERE id = ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, (i64)track);
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            size = (u64)sqlite3_column_int64(st, 0); mtime = sqlite3_column_int64(st, 1);
+            rate = (u32)sqlite3_column_int(st, 2); channels = (u32)sqlite3_column_int(st, 3); bits = (u32)sqlite3_column_int(st, 4);
+            frames = (u64)sqlite3_column_int64(st, 5); est = sqlite3_column_int(st, 6);
+            format(reason, sizeof reason, "%s", sqlite3_column_text(st, 7) ? (const char*)sqlite3_column_text(st, 7) : "");
+        }
+        sqlite3_finalize(st);
+    }
+    Tags t;
+    t.track = track; t.size = size; t.mtime = mtime; t.rate = rate; t.channels = (u16)channels; t.bits = (u16)bits; t.frames = frames;
+    t.estimated = est != 0; t.reason = reason;
+    t.title = m.title; t.artist = m.artist; t.album = m.album; t.albumartist = m.albumartist; t.date = m.date; t.genre = m.genre;
+    t.trackno = m.trackno; t.discno = m.discno; t.shown = shown;
+    t.titlesort = m.titlesort; t.artistsort = m.artistsort; t.albumsort = m.albumsort; t.albumartistsort = m.albumartistsort;
+    // put_tags writes every value given and the merge; here the values are already in place.
+    const u8* none = nullptr;
+    t.nvals = 0; t.fields = none; t.sources = none; t.texts = nullptr;
+    good = put_tags_merge_only(t) && good;
+    text.free(); vals.free(); all.free();
+    return good;
 }
 
 void Index::stop_when(int (*fn)(void*), void* user) { sqlite3_progress_handler(db, fn ? 1000 : 0, fn, user); }

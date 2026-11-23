@@ -75,7 +75,7 @@ struct SlotMsg {
 };
 
 // For the writer, in the order sent.
-enum class WriteKind : u8 { AddRoot, RemoveRoot, Batch, Walked, SaveRoots, Tags, Slot };
+enum class WriteKind : u8 { AddRoot, RemoveRoot, Batch, Walked, SaveRoots, Tags, Slot, Override };
 struct WriteMsg {
     WriteKind kind;
     u32       root = 0;
@@ -84,6 +84,11 @@ struct WriteMsg {
     TagBatch* tags = nullptr;
     SlotMsg*  slot = nullptr;
     char      path[kPathMax] = "";
+    // An override: track, field, value, or clear it.
+    u64       track = 0;
+    u8        field = 0;
+    bool      clear = false;
+    char      value[256] = "";
 };
 
 // A read the tagger wants, and its answer.
@@ -120,6 +125,8 @@ struct Shared {
     bool    quit = false;
     bool    ready = false;            // the writer has the index open: the reader may open it
     char    index_path[kPathMax] = "";
+    char    data_dir[kPathMax] = "";
+    u32     overrides_epoch = 0;   // atomic: moved on when the writer writes an override file
     char    roots_path[kPathMax] = "";
     // main -> scan
     Array<Walk> walks;

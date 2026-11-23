@@ -284,6 +284,8 @@ void test_library_walk(TestCtx& c) {
     Rig d;
     KV_CHECK(c, d.start(data));
     KV_CHECK(c, d.until([] { return g_finished == 1; }));
+    if (!(d.scan().rebuilt == 1 && d.root(2).tracks == 5 && d.root(1).id == 0))
+        KV_ERROR("test", "rebuilt %u, root 2 has %u tracks (state %u), root 1 is %u, %u finished", d.scan().rebuilt, d.root(2).tracks, d.root(2).state, d.root(1).id, g_finished);
     KV_CHECK(c, d.scan().rebuilt == 1 && d.root(2).tracks == 5 && d.root(1).id == 0);
     d.stop();
 
@@ -385,5 +387,131 @@ void test_library_cancel(TestCtx& c) {
     KV_CHECK(c, shown_wrong == 0);
     KV_INFO("test", "library cancel: %u rounds, %llu stopped in sqlite", rounds, (unsigned long long)r.scan().cancelled);
     r.stop();
+    io_remove_tree(tmp);
+}
+
+// Overrides: written into Blackwing's data (never the music), shown in every query, kept
+// through the index's deletion, taken in when edited by hand while stopped, set aside when
+// they will not parse, and kept for a root that is removed and added again.
+void test_library_overrides(TestCtx& c) {
+    c.begin("library overrides");
+    char tmp[1024], music[1100], data[1100];
+    KV_CHECK(c, io_make_temp_dir("bw_override", tmp, sizeof tmp));
+    format(music, sizeof music, "%s/music", tmp);
+    format(data, sizeof data, "%s/data", tmp);
+    kvtest::make_library(music, 24, 12);
+    Rig r;
+    KV_CHECK(c, r.start(data));
+    r.add(music);
+    KV_CHECK(c, r.until([] { return g_finished == 1; }));
+    KV_CHECK(c, r.query(1, LibraryView::Search, 0, "zq5"));
+    Array<LibraryRow> hit = r.rows(1);
+    KV_CHECK(c, hit.len == 1);
+    if (hit.len != 1) { r.stop(); return; }
+    LibraryRow track = hit[0];
+    hit.free();
+    IoStat before;
+    KV_CHECK(c, io_stat(track.path, &before));
+    IoBytes bytes_before;
+    io_read_now(track.path, &bytes_before);
+    auto over = [&](const char* field, const char* value, bool clear = false) {
+        LibraryOverride o;
+        o.track = track.id;
+        format(o.field, sizeof o.field, "%s", field);
+        format(o.value, sizeof o.value, "%s", value);
+        o.clear = clear;
+        u64 gen = r.scan().generation;
+        r.say(o);
+        r.until([&] { return r.scan().generation > gen; });
+    };
+    auto title_of = [&](Rig& x, const char* word, char* out) {
+        out[0] = 0;
+        if (!x.query(1, LibraryView::Search, 0, word)) return 0u;
+        Array<LibraryRow> rows = x.rows(1);
+        if (rows.len) format(out, 256, "%s", rows[0].title);
+        u32 n = rows.len;
+        rows.free();
+        return n;
+    };
+    over("title", "Night Swim Zz");
+    over("album", "");      // hidden
+    char t[256];
+    KV_CHECK(c, title_of(r, "swim", t) == 1 && strcmp(t, "Night Swim Zz") == 0);
+    KV_CHECK(c, title_of(r, "zq5", t) == 1 && strcmp(t, "Night Swim Zz") == 0); // still found by its path, showing the override
+    KV_CHECK(c, r.query(2, LibraryView::Albums, 0, ""));
+    u32 album_tracks = 0;
+    { Array<LibraryRow> al = r.rows(2); for (const LibraryRow& a : al) album_tracks += a.count; al.free(); }
+    KV_CHECK(c, album_tracks == 23); // the one whose album is hidden is in none
+    // The file in Blackwing's data, readable, and the music untouched.
+    char ovr[2048], dir[2048];
+    format(dir, sizeof dir, "%s", track.path + strlen(music) + 1);
+    *strrchr(dir, '/') = 0;
+    format(ovr, sizeof ovr, "%s/overrides%s/%s/overrides.txt", data, music, dir);
+    IoBytes text;
+    KV_CHECK(c, io_read_now(ovr, &text) && strstr((const char*)text.data, "title = Night Swim Zz") && strstr((const char*)text.data, "album =\n"));
+    text.free();
+    IoStat after;
+    IoBytes bytes_after;
+    KV_CHECK(c, io_stat(track.path, &after) && after.mtime_ns == before.mtime_ns && after.size == before.size);
+    KV_CHECK(c, io_read_now(track.path, &bytes_after) && bytes_after.size == bytes_before.size && memcmp(bytes_after.data, bytes_before.data, bytes_after.size) == 0);
+    bytes_after.free();
+    r.stop();
+
+    // The index deleted: made again from the roots and the overrides.
+    char ix[1200];
+    format(ix, sizeof ix, "%s/index.sqlite", data);
+    io_remove(ix);
+    Rig s;
+    KV_CHECK(c, s.start(data));
+    KV_CHECK(c, s.until([] { return g_finished == 1; }));
+    KV_CHECK(c, title_of(s, "swim", t) == 1 && strcmp(t, "Night Swim Zz") == 0);
+    s.stop();
+
+    // Edited by hand while stopped: taken in at the next start.
+    {
+        IoBytes b;
+        io_read_now(ovr, &b);
+        char* at = strstr((char*)b.data, "Night Swim Zz");
+        if (at) memcpy(at, "Night Walk Zz", 13);
+        io_write_now(ovr, b.data, b.size);
+        b.free();
+    }
+    Rig e;
+    KV_CHECK(c, e.start(data));
+    KV_CHECK(c, e.until([] { return g_finished == 1; }));
+    KV_CHECK(c, title_of(e, "walk", t) == 1 && strcmp(t, "Night Walk Zz") == 0);
+    // The root taken out and added again (a new id): its overrides are by its path, and stay.
+    e.say(LibraryRemoveRoot{1});
+    KV_CHECK(c, e.until([&] { return e.scan().tracks == 0; }));
+    e.add(music);
+    KV_CHECK(c, e.until([] { return g_finished == 2; }));
+    KV_CHECK(c, e.root(2).tracks == 24 && title_of(e, "walk", t) == 1 && strcmp(t, "Night Walk Zz") == 0);
+    // Cleared: the file's own title again.
+    {
+        LibraryOverride o; o.track = track.id; format(o.field, sizeof o.field, "title"); o.clear = 1;
+        // the track's id may differ after the rebuild: find it again
+        if (e.query(1, LibraryView::Search, 0, "walk")) { Array<LibraryRow> rr = e.rows(1); if (rr.len) o.track = rr[0].id; rr.free(); }
+        u64 gen = e.scan().generation;
+        e.say(o);
+        e.until([&] { return e.scan().generation > gen; });
+    }
+    KV_CHECK(c, title_of(e, "zq5", t) == 1 && strstr(t, "Zq5"));
+    e.stop();
+
+    // A file that will not parse: set aside, its overrides not used.
+    io_write_now(ovr, "[05 - x.flac]\nthis line is not a field\n", 40);
+    Rig b;
+    KV_CHECK(c, b.start(data));
+    KV_CHECK(c, b.until([] { return g_finished == 1; }));
+    KV_CHECK(c, !io_is_file(ovr));
+    bool aside = false;
+    {
+        char d[2048];
+        format(d, sizeof d, "%s/overrides%s/%s", data, music, dir);
+        io_list_files(d, [](void* u, const char* rel) { if (strstr(rel, "overrides.txt.broken-")) *(bool*)u = true; return true; }, &aside);
+    }
+    KV_CHECK(c, aside);
+    b.stop();
+    bytes_before.free();
     io_remove_tree(tmp);
 }

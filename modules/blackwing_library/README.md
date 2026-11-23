@@ -6,9 +6,9 @@ in an index as soon as its directory is listed, playable, with a title, artist a
 guessed from its path. Queries are windows kept open over the index, answered off the main
 thread. Its API is events and tables, as the player's is.
 
-**Status:** slice 3, milestone 5: roots, the names pass, the tags pass, the priority slot,
-the index, and windows over every view, sorted, cancelled and following the index.
-Overrides and watching are the milestones after it.
+**Status:** slice 3, milestone 6: roots, the names pass, the tags pass, the priority slot,
+the index, windows over every view, and the user's overrides. Watching for changes is the
+milestone after it.
 
 ## How it works
 
@@ -74,6 +74,31 @@ directory the walk has not listed is listed by the scan thread now, ahead of the
 (which steps over it when it comes to it), and its tracks join the slot's as they become
 rows. When the slot's work is done, the tagger goes back to where it was. Playing a file
 prioritizes it: `blackwing` hears `PlayerEnqueue` and says so to the library.
+
+**Overrides.** The user's corrections are the one thing here that is not a cache. They
+live in Blackwing's own data, one small text file per directory, in a tree that mirrors
+each root by its path (`<data>/overrides/home/me/Music/Artist/Album/overrides.txt`), so
+nothing is ever written under a root and a root removed and added again keeps them:
+
+```
+# Blackwing's overrides for the files in this directory. ...
+[03 - Title.flac]
+title = The Real Title
+album =
+```
+
+A `[name]` is a file of the directory; each line under it a field (blackwing_tags' names)
+and the value that wins over every source. An empty value hides the field; a field given
+twice is two values; removing a line gives the file its own value back. `LibraryOverride`
+sets or clears one: the writer reads the directory's file, changes the line, writes the
+file whole under a temporary name and renames it, and merges the track again from the
+other sources' values it keeps. Every read of a track's tags merges its directory's
+overrides, so they come back when the index is deleted and made again. At start-up (and
+when a root is added) each of the root's override files whose time differs from when it
+was last taken in is read again and its directory's tracks merged again: a file edited by
+hand while the program was not running counts. A file that will not parse is renamed
+aside (`overrides.txt.broken-<time>`), never written over, with a warning naming the line,
+and its overrides are not used.
 
 **The index** is sqlite (vendored, built as C), in WAL mode, at `<data>/index.sqlite`,
 with tables for the roots, the directories, the tracks (with the merge of their tags and
@@ -150,6 +175,7 @@ Header `korvid/blackwing_library/library.h`:
 | `LibraryQuery { id, view, sort, parent, text, first, count }` | event in | opens or changes window `id` |
 | `LibraryClose { id }` | event in | its rows leave the table |
 | `LibraryPrioritize { path, dir, query, count, tracks }` | event in | the slot: scanned next |
+| `LibraryOverride { track, field, value, clear }` | event in | the user's value for a field of a track, kept in Blackwing's data |
 | `LibraryResult { id, total, first, count, generation, seconds }` | event out | the window's rows are in `library.rows`; how long the index took |
 | `LibraryChanged { generation }` | event out | the index has moved on |
 | `LibraryScanFinished { root, tracks, seconds }` | event out | a root's scan is over: walked (in `seconds`) and every track read |
@@ -177,6 +203,10 @@ Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the reco
   view and order; the first window of a grouping or a search makes it whole (artists 8 ms,
   albums 10 ms), and the next ones are slices. A search that matches every track (a word in
   all fifty thousand titles) takes 35 ms to rank them for its first window.
+- **An override is seen from the next generation**: in every view, in search (by the new
+  value, and still by the path), and in the groupings. The audio file is not touched, nor
+  its time.
+- **An override file is read whole**, up to 1 MB; it is one directory's.
 - **What is kept goes with the generation**: while a scan commits, an open grouping or
   search is made again with each refill.
 - **A root is walking, then reading, then idle**, and `LibraryScanFinished` comes when it is
@@ -210,6 +240,11 @@ albums, an album's tracks by number, the genres and a genre's tracks; five title
 album sorted by title as "angle", "Ångström", "apple", "Été", "Zebra". Then the slot: eight thousand files, and the
 directory of an album the walk comes to near its end prioritized by its path as the scan
 starts; its track is seen read with more than 2,000 still to read (about 5,500, typically).
+Then overrides: a title set and an album hidden show in search and
+in the albums; the file in Blackwing's data says so in words; the audio file's bytes and
+time are unchanged; the index deleted and made again keeps them; the file edited by hand
+while stopped is taken in at the next start; the root removed and added again keeps
+them; a cleared title is the file's own again; a file that will not parse is set aside.
 Then a wide search replaced at once by a narrow one for the same window, forty times over
 four thousand files: only the narrow one is ever shown (and nearly every wide one is
 stopped in sqlite).

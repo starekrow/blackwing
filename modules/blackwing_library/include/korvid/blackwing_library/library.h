@@ -42,6 +42,13 @@ struct LibraryPrioritize {
     u64  tracks[32] = {};
 };
 
+// Sets a field of a track (a row's `id`) for the user: `value` wins over every source, in
+// every query, from the next generation on. It is kept in Blackwing's own data, never in
+// the music, and outlasts the index. An empty value hides the field; `clear` takes the
+// override away, so the file's own value is seen again. `field` is a blackwing_tags name:
+// "title", "artist", "album", "albumartist", "tracknumber", "date", "genre" ...
+struct LibraryOverride { u64 track = 0; char field[32] = ""; char value[256] = ""; u8 clear = 0; };
+
 // What a window looks at. Albums and artists are groupings of tracks, made when asked: an
 // album is its album artist and title (or, with no album artist, its title and directory);
 // an artist is the album artist, or the artist where there is none.

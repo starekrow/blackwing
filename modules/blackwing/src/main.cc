@@ -167,9 +167,36 @@ void cmd_play(CliContext& ctx, Span<const char* const> args) {
     ctx.fail("there is no %u in the last find", n);
 }
 
+// Sets a field of the n-th track the last find listed, for the user: `library override 3
+// title The Real Title`; no value hides the field; `--clear` gives the file's own back.
+void cmd_override(CliContext& ctx, Span<const char* const> args) {
+    u32 n = args.len >= 2 ? (u32)atoi(args[0]) : 0;
+    if (n == 0) { ctx.fail("library override <number from library find> <field> [value...|--clear]"); return; }
+    KTable* t = engine_ktable(*ctx.engine, "library.rows");
+    if (!t) { ctx.fail("the library is not running"); return; }
+    Span<LibraryRow> rows = t->rows_of<LibraryRow>();
+    for (u32 i = 0; i < rows.len; ++i) {
+        if (!t->is_alive(i) || rows[i].query != kFindWindow || rows[i].index != n - 1 || rows[i].kind != (u8)LibraryRowKind::Track) continue;
+        LibraryOverride o;
+        o.track = rows[i].id;
+        format(o.field, sizeof o.field, "%s", args[1]);
+        usize k = 0;
+        for (u32 a = 2; a < args.len; ++a) {
+            if (strcmp(args[a], "--clear") == 0) { o.clear = 1; continue; }
+            k += (usize)format(o.value + k, sizeof o.value - k, "%s%s", k ? " " : "", args[a]);
+        }
+        ctx.engine->events.emit(o);
+        ctx.print(o.clear ? "%s of %s: its own again" : o.value[0] ? "%s of %s: \"%s\"" : "%s of %s: hidden", o.field,
+                  rows[i].title[0] ? rows[i].title : rows[i].name, o.value);
+        return;
+    }
+    ctx.fail("there is no %u in the last find", n);
+}
+
 constinit const CliCommandDesc k_commands[] = {
     {.name = "library find", .help = "<words>... tracks whose title, artist, album or path has words beginning so", .fn = cmd_find},
     {.name = "library play", .help = "<number> queues a track the last find listed, and plays", .fn = cmd_play},
+    {.name = "library override", .help = "<number> <field> [value...|--clear] sets a field of a found track for you; no value hides it", .fn = cmd_override},
 };
 
 } // namespace

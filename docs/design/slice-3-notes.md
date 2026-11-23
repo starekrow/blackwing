@@ -234,3 +234,30 @@ and the next tick. Every window is within the 20 ms of the exit criteria but the
 a search that matches every track, which ranks fifty thousand matches; a search as it is
 typed matches that many only at its first letter or two. The index is 117 MB with its
 indexes and every source's values.
+
+## Milestone 6, overrides
+
+Nov 23, 2026.
+
+**As planned**, with these particulars:
+
+- **The format**, which the PRD left open: a small INI-like text of our own, a `[file
+  name]` and `field = value` lines under it, with a comment at the top saying how. It is
+  read and fixed in any editor, and needs nothing of Korvid's settings.
+- **The tree mirrors each root by its path**, not its id: a root removed and added again
+  gets a new id and keeps its overrides. A root that moves loses them, as a moved file does
+  until B43's audio hash.
+- **Override files beside the music are not read.** The PRD's Open; nothing here needs it
+  yet.
+- **The merge is shared**: the tagger merges a directory's overrides into every read, so a
+  rebuild has them; the writer merges a track again, when one is set, from the other
+  sources' values `tagvals` keeps, without reading the file.
+- **"Read at start-up and when changed"**: at start-up and when a root is added, each of
+  its override files whose time differs from the last time it was taken in. One changed
+  by hand while the program runs is taken in at the next start (or, from milestone 7,
+  when the watcher says).
+
+**Found on the way.** A root removed just before the program stopped could come back at
+the next start: its removal and the save of the list of roots are two messages to the
+writer, and a writer told to stop between them dropped the second. It now does what it
+was given before it stops.

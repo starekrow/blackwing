@@ -10,6 +10,7 @@
 // at) go before the rest, and their reads go at the queue's normal priority instead of
 // the scan's.
 #include "lib.h"
+#include "overrides.h"
 #include "korvid/blackwing_tags/tags.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/format.h"
@@ -70,7 +71,29 @@ struct Tagger {
     TagBatch* out = nullptr;
     f64     out_since = 0.0;
     Array<ReadAsk> asks;              // to hand to the main thread
+    // The overrides of the directory last read in, kept while the writer writes none.
+    OverrideFile ovr;
+    char    ovr_path[kPathMax] = "";
+    u32     ovr_epoch = ~0u;
 };
+
+// The override file of a track's directory, read once for its tracks. One that will not
+// parse is no overrides here; the writer sets it aside when it next looks.
+const OverrideFile& overrides_of(Tagger& t, const char* root, const char* rel) {
+    char dir[kPathMax], path[kPathMax];
+    format(dir, sizeof dir, "%s", rel);
+    char* slash = strrchr(dir, '/');
+    if (slash) *slash = 0; else dir[0] = 0;
+    override_path(path, sizeof path, t.sh->data_dir, root, dir);
+    u32 epoch = atomic_load(&t.sh->overrides_epoch, MO_ACQUIRE);
+    if (epoch != t.ovr_epoch || strcmp(path, t.ovr_path) != 0) {
+        char problem[160];
+        if (!override_load(path, &t.ovr, problem, sizeof problem)) t.ovr.clear();
+        format(t.ovr_path, sizeof t.ovr_path, "%s", path);
+        t.ovr_epoch = epoch;
+    }
+    return t.ovr;
+}
 
 const char* root_path(Tagger& t, u32 id) {
     for (const Shared::RootLine& r : t.roots) if (r.id == id) return r.path;
@@ -141,8 +164,6 @@ void send(Tagger& t) {
     os_mutex_unlock(&t.sh->lock);
 }
 
-u32 number(const char* s) { return (u32)strtoul(s, nullptr, 10); }
-
 // Reads what can be read of a track whose pieces are in, or asks for more. True when it is done.
 bool step(Tagger& t, u32 index) {
     Active& a = t.act[index];
@@ -212,28 +233,35 @@ bool step(Tagger& t, u32 index) {
         b.vals.push(TagVal{(u8)v.field, (u8)v.source, b.s.add(v.text, v.len)});
         if (nall < 1100) all[nall++] = v;
     }
+    // The user's, which outrank every source.
+    {
+        const char* rp = root_path(t, a.job.root);
+        const char* name = strrchr(a.rel, '/');
+        TagValue ov[64];
+        u32 n = rp ? override_values(overrides_of(t, rp, a.rel), name ? name + 1 : a.rel, ov, 64) : 0;
+        for (u32 i = 0; i < n; ++i) {
+            b.vals.push(TagVal{(u8)ov[i].field, (u8)ov[i].source, b.s.add(ov[i].text, ov[i].len)});
+            if (nall < 1100) all[nall++] = ov[i];
+        }
+    }
     r.nvals = b.vals.len - r.vals;
     char shown[kPathMax];
     shown_utf8(a.rel, shown, sizeof shown);
     r.shown = b.s.add(shown);
-    TagMerge m;
-    tags_merge(Span<const TagValue>(all, nall), &m);
-    auto merged = [&](TagField f) -> u32 {
-        const TagValue* v = m.source[(u32)f] == TagSource::Count ? nullptr : tags_find(Span<const TagValue>(all, nall), f, m.source[(u32)f]);
-        return b.s.add(v ? v->text : "");
-    };
-    r.title = merged(TagField::Title);
-    r.artist = merged(TagField::Artist);
-    r.album = merged(TagField::Album);
-    r.albumartist = merged(TagField::AlbumArtist);
-    r.date = merged(TagField::Date);
-    r.genre = merged(TagField::Genre);
-    r.titlesort = merged(TagField::TitleSort);
-    r.artistsort = merged(TagField::ArtistSort);
-    r.albumsort = merged(TagField::AlbumSort);
-    r.albumartistsort = merged(TagField::AlbumArtistSort);
-    r.trackno = number(b.s.at(merged(TagField::TrackNumber)));
-    r.discno = number(b.s.at(merged(TagField::DiscNumber)));
+    Merged m;
+    merge(Span<const TagValue>(all, nall), &m);
+    r.title = b.s.add(m.title);
+    r.artist = b.s.add(m.artist);
+    r.album = b.s.add(m.album);
+    r.albumartist = b.s.add(m.albumartist);
+    r.date = b.s.add(m.date);
+    r.genre = b.s.add(m.genre);
+    r.trackno = m.trackno;
+    r.discno = m.discno;
+    r.titlesort = b.s.add(m.titlesort);
+    r.artistsort = b.s.add(m.artistsort);
+    r.albumsort = b.s.add(m.albumsort);
+    r.albumartistsort = b.s.add(m.albumartistsort);
     b.recs.push(r);
     atomic_add_fetch(&t.sh->tags_read, (u64)1, MO_RELAXED);
     atomic_sub_fetch(&t.sh->tags_active, 1u, MO_RELAXED);
@@ -348,6 +376,7 @@ void tag_thread(void* arg) {
     dones.free();
     t.queue.free(); t.roots.free(); t.asks.free();
     if (t.out) { t.out->free(); mem_free(t.out); }
+    t.ovr.free();
     mem_free(t.tag_mem); mem_free(t.path_mem); mem_free(t.dec_mem);
     mem_free(tp);
 }

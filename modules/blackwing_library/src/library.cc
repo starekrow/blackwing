@@ -17,6 +17,7 @@
 // version or sqlite says it is damaged, and the roots are walked again into it.
 #include "korvid/blackwing_library/module.h"
 #include "lib.h"
+#include "overrides.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/cli.h"
 #include "korvid/core/engine.h"
@@ -145,6 +146,58 @@ void resolve_slot(Shared& sh, Index& ix, const SlotMsg& m, Slot& slot) {
     os_mutex_unlock(&sh.lock);
 }
 
+const char* root_path_locked(Shared& sh, u32 id, char* out, u32 cap) {
+    out[0] = 0;
+    os_mutex_lock(&sh.lock);
+    for (const Shared::RootLine& r : sh.root_lines) if (r.id == id) format(out, cap, "%s", r.path);
+    os_mutex_unlock(&sh.lock);
+    return out[0] ? out : nullptr;
+}
+
+// A directory's overrides taken in: its tracks merged again with them, and the file's time
+// noted, so it is not taken in again until it changes. One that will not parse is set aside.
+void take_in_overrides(Shared& sh, Index& ix, u32 root, const char* rel_dir, const char* path, i64 mtime) {
+    OverrideFile f;
+    char problem[160];
+    if (!override_load(path, &f, problem, sizeof problem)) { override_set_aside(path, problem); f.clear(); }
+    Array<u64> ids;
+    ix.tracks_in_dir(root, rel_dir, &ids);
+    for (u64 id : ids) {
+        Index::TrackAt at;
+        if (!ix.track_info(id, &at)) continue;
+        const char* name = strrchr(at.rel, '/');
+        TagValue ov[64];
+        u32 n = override_values(f, name ? name + 1 : at.rel, ov, 64);
+        ix.remerge(id, Span<const TagValue>(ov, n));
+    }
+    ix.set_override_seen(path, mtime);
+    ids.free();
+    f.free();
+    atomic_add_fetch(&sh.overrides_epoch, 1u, MO_RELEASE);
+}
+
+// A root's overrides, at start-up or when it is added: every file that changed since it was
+// last taken in (edited by hand while the program was not running, or never seen).
+void scan_overrides(Shared& sh, Index& ix, u32 root, const char* root_path) {
+    char base[kPathMax];
+    format(base, sizeof base, "%s/overrides/%s", sh.data_dir, root_path[0] == '/' ? root_path + 1 : root_path);
+    if (!io_is_dir(base)) return;
+    struct Seen { Shared* sh; Index* ix; u32 root; const char* base; };
+    Seen w{&sh, &ix, root, base};
+    io_list_files(base, [](void* user, const char* rel) {
+        Seen& x = *(Seen*)user;
+        const char* name = strrchr(rel, '/');
+        if (strcmp(name ? name + 1 : rel, "overrides.txt") != 0) return true;
+        char path[kPathMax], dir[kPathMax];
+        format(path, sizeof path, "%s/%s", x.base, rel);
+        format(dir, sizeof dir, "%.*s", name ? (int)(name - rel) : 0, rel);
+        IoStat st;
+        if (!io_stat(path, &st)) return true;
+        if (x.ix->override_seen(path) != st.mtime_ns) take_in_overrides(*x.sh, *x.ix, x.root, dir, path, st.mtime_ns);
+        return true;
+    }, &w);
+}
+
 void write_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     Index ix;
@@ -163,9 +216,10 @@ void write_thread(void* arg) {
     Array<Note> notes;
     f64 last_commit = 0.0;
     for (;;) {
+        // At the end, what was already given is still done (the list of roots saved), then it stops.
         os_mutex_lock(&sh.lock);
         while (!sh.quit && sh.writes.len == 0) os_cond_wait(&sh.write_wake, &sh.lock);
-        if (sh.quit) { os_mutex_unlock(&sh.lock); break; }
+        if (sh.quit && sh.writes.len == 0) { os_mutex_unlock(&sh.lock); break; }
         // Commits at most four times a second, each carrying what came meanwhile; a slot
         // goes at once, since someone is looking.
         for (;;) {
@@ -194,8 +248,36 @@ void write_thread(void* arg) {
             switch (m->kind) {
             case WriteKind::AddRoot:
                 live.push(m->root);
-                if (up) ix.put_root(m->root, m->path);
+                if (up) { ix.put_root(m->root, m->path); scan_overrides(sh, ix, m->root, m->path); }
                 break;
+            case WriteKind::Override: {
+                // The user's: into the directory's file (written whole), then the track merged again.
+                Index::TrackAt at;
+                char rp[kPathMax];
+                if (!up || !ix.track_info(m->track, &at) || !root_path_locked(sh, at.root, rp, sizeof rp)) {
+                    KV_WARN("library", "an override for track %llu, which the library does not have", (unsigned long long)m->track);
+                    break;
+                }
+                const char* slash = strrchr(at.rel, '/');
+                char dir[kPathMax], path[kPathMax];
+                format(dir, sizeof dir, "%.*s", slash ? (int)(slash - at.rel) : 0, at.rel);
+                override_path(path, sizeof path, sh.data_dir, rp, dir);
+                OverrideFile f;
+                char problem[160];
+                if (!override_load(path, &f, problem, sizeof problem)) { override_set_aside(path, problem); f.clear(); }
+                const char* name = slash ? slash + 1 : at.rel;
+                override_set(f, name, (TagField)m->field, m->value, m->clear);
+                if (!override_save(path, f)) KV_ERROR("library", "the override could not be saved to %s", path);
+                IoStat st;
+                ix.set_override_seen(path, io_stat(path, &st) ? st.mtime_ns : -2);
+                atomic_add_fetch(&sh.overrides_epoch, 1u, MO_RELEASE);
+                TagValue ov[64];
+                u32 n = override_values(f, name, ov, 64);
+                ix.remerge(m->track, Span<const TagValue>(ov, n));
+                touch(at.root);
+                f.free();
+                break;
+            }
             case WriteKind::RemoveRoot:
                 for (u32 i = 0; i < live.len; ++i) if (live[i] == m->root) { live[i] = live[live.len - 1]; --live.len; break; }
                 if (up) ix.remove_root(m->root);
@@ -622,6 +704,21 @@ void commands(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
         os_mutex_unlock(&L.sh->lock);
         L.scan_res.slot = m->kind != SlotKind::None ? 1 : 0;
     }
+    for (const LibraryOverride& o : ctx.received<LibraryOverride>()) {
+        TagField f;
+        if (!tag_field_from_name(o.field, &f)) { KV_WARN("library", "an override of '%s', which is not a field", o.field); continue; }
+        WriteMsg* w = (WriteMsg*)mem_alloc(sizeof(WriteMsg));
+        new (w) WriteMsg{};
+        w->kind = WriteKind::Override;
+        w->track = o.track;
+        w->field = (u8)f;
+        w->clear = o.clear != 0;
+        format(w->value, sizeof w->value, "%s", o.value);
+        os_mutex_lock(&L.sh->lock);
+        L.sh->writes.push(w);
+        os_cond_signal(&L.sh->write_wake);
+        os_mutex_unlock(&L.sh->lock);
+    }
     for (const LibraryClose& c : ctx.received<LibraryClose>()) {
         for (u32 i = 0; i < L.windows.len; ++i) {
             if (L.windows[i].id != c.id) continue;
@@ -836,6 +933,7 @@ bool library_startup(Engine& e, ModuleInstance& self) {
     os_mutex_init(&sh.lock);
     os_cond_init(&sh.scan_wake); os_cond_init(&sh.write_wake); os_cond_init(&sh.read_wake); os_cond_init(&sh.tag_wake);
     format(sh.index_path, sizeof sh.index_path, "%s/index.sqlite", L->data_dir);
+    format(sh.data_dir, sizeof sh.data_dir, "%s", L->data_dir);
     format(sh.roots_path, sizeof sh.roots_path, "%s/roots.txt", L->data_dir);
     if (!os_thread_start(&L->writer, write_thread, &sh) || !os_thread_start(&L->reader, read_thread, &sh) ||
         !os_thread_start(&L->scan, scan_thread, &sh) || !os_thread_start(&L->tagger, tag_thread, &sh)) {
@@ -939,6 +1037,7 @@ constinit const FieldDesc k_f_remove[] = {KV_FIELDS(LibraryRemoveRoot, root)};
 constinit const FieldDesc k_f_query[] = {KV_FIELDS(LibraryQuery, id, view, sort, parent, text, first, count)};
 constinit const FieldDesc k_f_close[] = {KV_FIELDS(LibraryClose, id)};
 constinit const FieldDesc k_f_prio[] = {KV_FIELDS(LibraryPrioritize, path, dir, query, count, tracks)};
+constinit const FieldDesc k_f_override[] = {KV_FIELDS(LibraryOverride, track, field, value, clear)};
 constinit const FieldDesc k_f_result[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation, seconds)};
 constinit const FieldDesc k_f_changed[] = {KV_FIELDS(LibraryChanged, generation)};
 constinit const FieldDesc k_f_finished[] = {KV_FIELDS(LibraryScanFinished, root, tracks, seconds)};
@@ -948,6 +1047,7 @@ constinit const EventTypeDesc k_events[] = {
     KV_EVENT_EX(LibraryQuery, k_f_query, 0),
     KV_EVENT_EX(LibraryClose, k_f_close, 0),
     KV_EVENT_EX(LibraryPrioritize, k_f_prio, 0),
+    KV_EVENT_EX(LibraryOverride, k_f_override, 0),
     KV_EVENT_EX(LibraryResult, k_f_result, 0),
     KV_EVENT_EX(LibraryChanged, k_f_changed, 0),
     KV_EVENT_EX(LibraryScanFinished, k_f_finished, 0),
@@ -955,7 +1055,7 @@ constinit const EventTypeDesc k_events[] = {
 constinit const ResourceDesc k_resources[] = {{".scan"}};
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = library_pump,
-     .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize",
+     .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize, LibraryOverride",
      .writes = ".roots, .rows, .scan",
      .emits = "LibraryResult, LibraryChanged, LibraryScanFinished",
      .main_thread = true, .runs = RunWhen::Always},
