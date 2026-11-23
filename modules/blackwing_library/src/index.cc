@@ -22,15 +22,32 @@ constexpr const char* kSchemaSql =
     "  name TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL, missing INTEGER NOT NULL DEFAULT 0,"
     "  read_size INTEGER, read_mtime INTEGER, reason TEXT,"
     "  rate INTEGER, channels INTEGER, bits INTEGER, frames INTEGER, estimated INTEGER,"
-    "  title TEXT, artist TEXT, album TEXT, albumartist TEXT, trackno INTEGER, discno INTEGER, date TEXT, genre TEXT);"
+    "  title TEXT, artist TEXT, album TEXT, albumartist TEXT, trackno INTEGER, discno INTEGER, date TEXT, genre TEXT,"
+    "  sort_title TEXT NOT NULL DEFAULT '', sort_artist TEXT NOT NULL DEFAULT '', sort_album TEXT NOT NULL DEFAULT '',"
+    "  sort_genre TEXT NOT NULL DEFAULT '', artist_hash INTEGER NOT NULL DEFAULT 0, album_hash INTEGER NOT NULL DEFAULT 0,"
+    "  genre_hash INTEGER NOT NULL DEFAULT 0, shown_artist TEXT NOT NULL DEFAULT '');"
     "CREATE UNIQUE INDEX tracks_path ON tracks(root, path);"
-    "CREATE INDEX tracks_dir ON tracks(dir, name);"
+    // An index per order a window takes, matching its ORDER BY to the last column, so the
+    // ids of a window anywhere in fifty thousand rows are a walk of the index, not a sort;
+    // the rows are then fetched by id.
+    "CREATE INDEX tracks_dir ON tracks(dir, missing, name);"
+    "CREATE INDEX tracks_by_artist ON tracks(missing, sort_artist, sort_album, album_hash, discno, trackno, sort_title);"
+    "CREATE INDEX tracks_by_title ON tracks(missing, sort_title, sort_artist);"
+    "CREATE INDEX tracks_by_album ON tracks(missing, sort_album, album_hash, discno, trackno);"
+    "CREATE INDEX tracks_by_date ON tracks(missing, date, sort_artist, sort_album);"
+    "CREATE INDEX tracks_by_path ON tracks(missing, root, path);"
+    "CREATE INDEX tracks_album ON tracks(album_hash, missing, discno, trackno, sort_title);"
+    "CREATE INDEX tracks_genre ON tracks(genre_hash, missing, sort_artist, sort_album, album_hash, discno, trackno, sort_title);"
+    // And one covering each grouping, so it reads no table rows.
+    "CREATE INDEX groups_artist ON tracks(missing, sort_artist, album_hash, artist_hash, shown_artist);"
+    "CREATE INDEX groups_album ON tracks(missing, sort_album, album_hash, artist_hash, album, shown_artist, date);"
+    "CREATE INDEX groups_genre ON tracks(missing, sort_genre, genre_hash, genre);"
     "CREATE TABLE tagvals(track INTEGER NOT NULL, source INTEGER NOT NULL, field INTEGER NOT NULL, value TEXT NOT NULL);"
     "CREATE INDEX tagvals_track ON tagvals(track);"
     "CREATE VIRTUAL TABLE search USING fts5(title, artist, album, path, tokenize = 'unicode61 remove_diacritics 2', prefix = '2 3');";
 
 // The columns a row is filled from, in this order.
-constexpr const char* kTrackCols = "t.id, t.root, t.name, t.title, t.artist, t.album, t.trackno, t.discno, t.size, t.frames, t.rate, t.path, t.missing, t.reason";
+constexpr const char* kTrackCols = "t.id, t.root, t.name, t.title, t.artist, t.album, t.trackno, t.discno, t.size, t.frames, t.rate, t.path, t.missing, t.reason, t.date";
 
 void text_into(char* out, u32 cap, const unsigned char* s) { format(out, cap, "%s", s ? (const char*)s : ""); }
 
@@ -103,7 +120,8 @@ bool Index::open(const char* path, bool writer) {
         st_dir_put   = prep("INSERT INTO dirs(root, parent, path, name, state, reason) VALUES(?, ?, ?, ?, ?, ?)");
         st_dir_state = prep("UPDATE dirs SET state = ?, reason = ? WHERE id = ?");
         st_track_find = prep("SELECT id, size, mtime, read_size, read_mtime FROM tracks WHERE root = ? AND path = ?");
-        st_track_put = prep("INSERT INTO tracks(root, dir, path, name, size, mtime, title, artist, album, trackno, discno) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        st_track_put = prep("INSERT INTO tracks(root, dir, path, name, size, mtime, title, artist, album, trackno, discno,"
+                            " sort_title, sort_artist, sort_album, artist_hash, album_hash, shown_artist) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         st_track_seen = prep("UPDATE tracks SET size = ?, mtime = ?, dir = ?, missing = 0 WHERE id = ?");
         st_search_put = prep("INSERT INTO search(rowid, title, artist, album, path) VALUES(?, ?, ?, ?, ?)");
         st_count_t   = prep("SELECT count(*) FROM tracks WHERE root = ? AND missing = 0");
@@ -113,7 +131,10 @@ bool Index::open(const char* path, bool writer) {
         st_vals_del  = prep("DELETE FROM tagvals WHERE track = ?");
         st_vals_put  = prep("INSERT INTO tagvals(track, source, field, value) VALUES(?, ?, ?, ?)");
         st_tags_put  = prep("UPDATE tracks SET read_size = ?, read_mtime = ?, reason = ?, rate = ?, channels = ?, bits = ?, frames = ?, estimated = ?,"
-                            " title = ?, artist = ?, album = ?, albumartist = ?, date = ?, genre = ?, trackno = ?, discno = ? WHERE id = ?");
+                            " title = ?, artist = ?, album = ?, albumartist = ?, date = ?, genre = ?, trackno = ?, discno = ?,"
+                            " sort_title = ?, sort_artist = ?, sort_album = ?, sort_genre = ?, artist_hash = ?, album_hash = ?, genre_hash = ?,"
+                            " shown_artist = ? WHERE id = ?");
+        st_dir_of_track = prep("SELECT dir FROM tracks WHERE id = ?");
         st_search_del = prep("DELETE FROM search WHERE rowid = ?");
         if (!st_count_all) { damaged = true; close(); return false; }
     }
@@ -123,10 +144,11 @@ bool Index::open(const char* path, bool writer) {
 void Index::close() {
     sqlite3_stmt** all[] = {&st_root, &st_unroot_t, &st_unroot_d, &st_unroot_s, &st_unroot_r, &st_dir_find, &st_dir_put, &st_dir_state,
                             &st_track_find, &st_track_put, &st_track_seen, &st_search_put, &st_count_t, &st_count_d, &st_count_all,
-                            &st_count_unread, &st_vals_del, &st_vals_put, &st_tags_put, &st_search_del};
+                            &st_count_unread, &st_vals_del, &st_vals_put, &st_tags_put, &st_search_del, &st_dir_of_track, &st_row};
     for (sqlite3_stmt** s : all) { if (*s) sqlite3_finalize(*s); *s = nullptr; }
     if (db) sqlite3_close_v2(db);
     db = nullptr;
+    free_kept();
 }
 
 bool Index::begin()  { return exec("BEGIN;"); }
@@ -210,6 +232,16 @@ u64 Index::put_track(const TrackRec& t, u64 dir, bool* fresh, bool* changed, boo
     sqlite3_bind_text(s, 9, t.album, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(s, 10, (int)t.track);
     sqlite3_bind_int(s, 11, (int)t.disc);
+    GroupIn gi;
+    gi.title = t.title; gi.artist = t.artist; gi.album = t.album; gi.dir = dir;
+    GroupOut g;
+    group_keys(gi, &g);
+    sqlite3_bind_text(s, 12, g.sort_title, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 13, g.sort_artist, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 14, g.sort_album, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 15, (i64)g.artist_hash);
+    sqlite3_bind_int64(s, 16, (i64)g.album_hash);
+    sqlite3_bind_text(s, 17, t.artist, -1, SQLITE_TRANSIENT);
     if (!ok(sqlite3_step(s))) return 0;
     u64 id = (u64)sqlite3_last_insert_rowid(db);
     *fresh = *unread = true;
@@ -254,7 +286,23 @@ bool Index::put_tags(const Tags& t) {
     sqlite3_bind_text(s, 14, t.genre, -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(s, 15, (int)t.trackno);
     sqlite3_bind_int(s, 16, (int)t.discno);
-    sqlite3_bind_int64(s, 17, (i64)t.track);
+    sqlite3_reset(st_dir_of_track);
+    sqlite3_bind_int64(st_dir_of_track, 1, (i64)t.track);
+    GroupIn gi;
+    gi.title = t.title; gi.artist = t.artist; gi.album = t.album; gi.albumartist = t.albumartist; gi.genre = t.genre;
+    gi.titlesort = t.titlesort; gi.artistsort = t.artistsort; gi.albumsort = t.albumsort; gi.albumartistsort = t.albumartistsort;
+    gi.dir = sqlite3_step(st_dir_of_track) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_dir_of_track, 0) : 0;
+    GroupOut g;
+    group_keys(gi, &g);
+    sqlite3_bind_text(s, 17, g.sort_title, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 18, g.sort_artist, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 19, g.sort_album, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 20, g.sort_genre, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 21, (i64)g.artist_hash);
+    sqlite3_bind_int64(s, 22, (i64)g.album_hash);
+    sqlite3_bind_int64(s, 23, (i64)g.genre_hash);
+    sqlite3_bind_text(s, 24, t.albumartist[0] ? t.albumartist : t.artist, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 25, (i64)t.track);
     good = ok(sqlite3_step(s)) && good;
     if (sqlite3_changes(db) == 0) return good; // the track has gone meanwhile
     // Search by the merge now, and still by the path.
@@ -351,6 +399,8 @@ u64 Index::count_all() {
     return sqlite3_step(st_count_all) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_count_all, 0) : 0;
 }
 
+void Index::stop_when(int (*fn)(void*), void* user) { sqlite3_progress_handler(db, fn ? 1000 : 0, fn, user); }
+
 u32 search_expression(const char* text, char* out, u32 cap) {
     u32 n = 0, words = 0;
     out[0] = 0;
@@ -371,7 +421,7 @@ u32 search_expression(const char* text, char* out, u32 cap) {
     return words;
 }
 
-u32 Index::window(const LibraryQuery& q, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user) {
+u32 Index::window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user) {
     *total = 0;
     u32 want = q.count < kLibraryMaxWindow ? q.count : kLibraryMaxWindow;
     u32 got = 0;
@@ -406,6 +456,7 @@ u32 Index::window(const LibraryQuery& q, LibraryRow* out, u32* total, const char
         else format(r.reason, sizeof r.reason, "its path is %zu bytes, longer than the player takes", need);
         r.missing = (u8)sqlite3_column_int(s, 12);
         if (!r.reason[0]) text_into(r.reason, sizeof r.reason, sqlite3_column_text(s, 13));
+        text_into(r.date, sizeof r.date, sqlite3_column_text(s, 14));
     };
     auto run_tracks = [&](sqlite3_stmt* s, u32 index) {
         while (got < want && sqlite3_step(s) == SQLITE_ROW) {
@@ -414,73 +465,176 @@ u32 Index::window(const LibraryQuery& q, LibraryRow* out, u32* total, const char
             ++got;
         }
     };
-    char sql[512];
+    char sql[1024];
+    // A track view's ORDER BY, by the sort asked for or the view's own.
+    auto order = [&](const char* fallback) -> const char* {
+        switch (q.sort) {
+        case LibrarySort::Title:  return "t.sort_title, t.sort_artist";
+        case LibrarySort::Artist: return "t.sort_artist, t.sort_album, t.album_hash, t.discno, t.trackno, t.sort_title";
+        case LibrarySort::Album:  return "t.sort_album, t.album_hash, t.discno, t.trackno";
+        case LibrarySort::Date:   return "t.date, t.sort_artist, t.sort_album";
+        case LibrarySort::Path:   return "t.root, t.path";
+        default:                  return fallback;
+        }
+    };
+    // A track's row by id, into out[got].
+    auto by_id = [&](u64 id, u32 index) {
+        if (!st_row) {
+            char rs[512];
+            format(rs, sizeof rs, "SELECT %s FROM tracks t WHERE t.id = ?", kTrackCols);
+            if (!ok(sqlite3_prepare_v3(db, rs, -1, SQLITE_PREPARE_PERSISTENT, &st_row, nullptr))) return;
+        }
+        sqlite3_reset(st_row);
+        sqlite3_bind_int64(st_row, 1, (i64)id);
+        if (sqlite3_step(st_row) != SQLITE_ROW) return;
+        fill_track(st_row, out[got]);
+        out[got].index = index;
+        ++got;
+    };
+    // A window of tracks: `where` with its one bound value (or none), in `ord`. The window's
+    // ids first, by the index that is that order; then each row by its id.
+    auto tracks = [&](const char* from, const char* where, i64 arg, bool has_arg, const char* ord) {
+        format(sql, sizeof sql, "SELECT count(*) FROM %s WHERE %s", from, where);
+        *total = count(sql, [&](sqlite3_stmt* st) { if (has_arg) sqlite3_bind_int64(st, 1, arg); });
+        sqlite3_stmt* st = nullptr;
+        format(sql, sizeof sql, "SELECT t.id FROM %s WHERE %s ORDER BY %s LIMIT ? OFFSET ?", from, where, ord);
+        if (!ok(sqlite3_prepare_v2(db, sql, -1, &st, nullptr))) return;
+        int k = 1;
+        if (has_arg) sqlite3_bind_int64(st, k++, arg);
+        sqlite3_bind_int64(st, k++, want);
+        sqlite3_bind_int64(st, k++, q.first);
+        u64 ids[kLibraryMaxWindow];
+        u32 n = 0;
+        while (n < want && sqlite3_step(st) == SQLITE_ROW) ids[n++] = (u64)sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+        for (u32 i = 0; i < n; ++i) by_id(ids[i], q.first + i);
+    };
+    // What is kept for this query, if it is still good; otherwise it is made again.
+    auto keeping = [&]() {
+        bool same = kept.generation == generation && kept.view == q.view && kept.sort == q.sort && kept.parent == q.parent &&
+                    strcmp(kept.text, q.text) == 0;
+        if (same) return true;
+        kept.ids.clear(); kept.groups.clear();
+        kept.generation = generation; kept.view = q.view; kept.sort = q.sort; kept.parent = q.parent;
+        format(kept.text, sizeof kept.text, "%s", q.text);
+        return false;
+    };
+    // A window of groups: the whole grouping is made once (`select` over its covering
+    // index, grouped by `group_by`) and kept, and a window is a slice of it.
+    auto groups = [&](LibraryRowKind kind, const char* where, i64 arg, bool has_arg, const char* group_by, const char* select) {
+        if (!keeping()) {
+            sqlite3_stmt* st = nullptr;
+            format(sql, sizeof sql, "SELECT %s FROM tracks t WHERE %s GROUP BY %s ORDER BY %s", select, where, group_by, group_by);
+            if (!ok(sqlite3_prepare_v2(db, sql, -1, &st, nullptr))) return;
+            if (has_arg) sqlite3_bind_int64(st, 1, arg);
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                LibraryRow r{};
+                r.kind = (u8)kind;
+                r.id = (u64)sqlite3_column_int64(st, 0);
+                text_into(r.name, sizeof r.name, sqlite3_column_text(st, 1));
+                r.count = (u32)sqlite3_column_int64(st, 2);
+                if (kind == LibraryRowKind::Artist) r.albums = (u32)sqlite3_column_int64(st, 3);
+                if (kind == LibraryRowKind::Album) {
+                    text_into(r.artist, sizeof r.artist, sqlite3_column_text(st, 3));
+                    text_into(r.date, sizeof r.date, sqlite3_column_text(st, 4));
+                    text_into(r.album, sizeof r.album, sqlite3_column_text(st, 1));
+                }
+                kept.groups.push(r);
+            }
+            sqlite3_finalize(st);
+        }
+        *total = kept.groups.len;
+        for (u32 i = q.first; i < kept.groups.len && got < want; ++i) {
+            out[got] = kept.groups[i];
+            out[got].query = q.id;
+            out[got].index = i;
+            ++got;
+        }
+    };
+    constexpr const char* kShownArtist = "t.shown_artist";
     switch (q.view) {
     case LibraryView::Folders: {
-        u32 ndirs = count("SELECT count(*) FROM dirs WHERE parent = ?", [&](sqlite3_stmt* s) { sqlite3_bind_int64(s, 1, (i64)q.parent); });
-        u32 ntracks = q.parent ? count("SELECT count(*) FROM tracks WHERE dir = ? AND missing = 0", [&](sqlite3_stmt* s) { sqlite3_bind_int64(s, 1, (i64)q.parent); }) : 0;
+        u32 ndirs = count("SELECT count(*) FROM dirs WHERE parent = ?", [&](sqlite3_stmt* st) { sqlite3_bind_int64(st, 1, (i64)q.parent); });
+        u32 ntracks = q.parent ? count("SELECT count(*) FROM tracks WHERE dir = ? AND missing = 0", [&](sqlite3_stmt* st) { sqlite3_bind_int64(st, 1, (i64)q.parent); }) : 0;
         *total = ndirs + ntracks;
         if (q.first < ndirs) {
-            sqlite3_stmt* s = nullptr;
-            if (ok(sqlite3_prepare_v2(db, "SELECT id, root, name FROM dirs WHERE parent = ? ORDER BY name LIMIT ? OFFSET ?", -1, &s, nullptr))) {
-                sqlite3_bind_int64(s, 1, (i64)q.parent);
-                sqlite3_bind_int64(s, 2, want);
-                sqlite3_bind_int64(s, 3, q.first);
+            sqlite3_stmt* st = nullptr;
+            if (ok(sqlite3_prepare_v2(db, "SELECT id, root, name FROM dirs WHERE parent = ? ORDER BY name LIMIT ? OFFSET ?", -1, &st, nullptr))) {
+                sqlite3_bind_int64(st, 1, (i64)q.parent);
+                sqlite3_bind_int64(st, 2, want);
+                sqlite3_bind_int64(st, 3, q.first);
                 u32 index = q.first;
-                while (got < want && sqlite3_step(s) == SQLITE_ROW) {
+                while (got < want && sqlite3_step(st) == SQLITE_ROW) {
                     LibraryRow& r = out[got++];
                     r = LibraryRow{};
                     r.query = q.id; r.index = index++;
                     r.kind = (u8)LibraryRowKind::Directory;
-                    r.id = (u64)sqlite3_column_int64(s, 0);
-                    r.root = (u32)sqlite3_column_int64(s, 1);
-                    text_into(r.name, sizeof r.name, sqlite3_column_text(s, 2));
+                    r.id = (u64)sqlite3_column_int64(st, 0);
+                    r.root = (u32)sqlite3_column_int64(st, 1);
+                    text_into(r.name, sizeof r.name, sqlite3_column_text(st, 2));
                     if (!q.parent) format(r.name, sizeof r.name, "%s", root_path(user, r.root)); // a root shows as its path
                 }
-                sqlite3_finalize(s);
+                sqlite3_finalize(st);
             }
         }
         if (got < want && ntracks) {
             u32 from = q.first > ndirs ? q.first - ndirs : 0;
-            sqlite3_stmt* s = nullptr;
+            sqlite3_stmt* st = nullptr;
             format(sql, sizeof sql, "SELECT %s FROM tracks t WHERE t.dir = ? AND t.missing = 0 ORDER BY t.name LIMIT ? OFFSET ?", kTrackCols);
-            if (ok(sqlite3_prepare_v2(db, sql, -1, &s, nullptr))) {
-                sqlite3_bind_int64(s, 1, (i64)q.parent);
-                sqlite3_bind_int64(s, 2, want - got);
-                sqlite3_bind_int64(s, 3, from);
-                run_tracks(s, ndirs + from);
-                sqlite3_finalize(s);
+            if (ok(sqlite3_prepare_v2(db, sql, -1, &st, nullptr))) {
+                sqlite3_bind_int64(st, 1, (i64)q.parent);
+                sqlite3_bind_int64(st, 2, want - got);
+                sqlite3_bind_int64(st, 3, from);
+                run_tracks(st, ndirs + from);
+                sqlite3_finalize(st);
             }
         }
         break;
     }
-    case LibraryView::Tracks: {
-        *total = count("SELECT count(*) FROM tracks WHERE missing = 0", [](sqlite3_stmt*) {});
-        sqlite3_stmt* s = nullptr;
-        format(sql, sizeof sql, "SELECT %s FROM tracks t WHERE t.missing = 0 ORDER BY t.root, t.path LIMIT ? OFFSET ?", kTrackCols);
-        if (ok(sqlite3_prepare_v2(db, sql, -1, &s, nullptr))) {
-            sqlite3_bind_int64(s, 1, want);
-            sqlite3_bind_int64(s, 2, q.first);
-            run_tracks(s, q.first);
-            sqlite3_finalize(s);
-        }
+    case LibraryView::Tracks:
+        if (q.parent) tracks("tracks t", "t.genre_hash = ? AND t.missing = 0", (i64)q.parent, true,
+                             order("t.sort_artist, t.sort_album, t.album_hash, t.discno, t.trackno, t.sort_title"));
+        else tracks("tracks t", "t.missing = 0", 0, false, order("t.sort_artist, t.sort_album, t.album_hash, t.discno, t.trackno, t.sort_title"));
         break;
-    }
+    case LibraryView::AlbumTracks:
+        tracks("tracks t", "t.album_hash = ? AND t.missing = 0", (i64)q.parent, true, order("t.discno, t.trackno, t.sort_title"));
+        break;
     case LibraryView::Search: {
-        char expr[512];
-        if (!search_expression(q.text, expr, sizeof expr)) break;
-        *total = count("SELECT count(*) FROM search WHERE search MATCH ?", [&](sqlite3_stmt* s) { sqlite3_bind_text(s, 1, expr, -1, SQLITE_TRANSIENT); });
-        sqlite3_stmt* s = nullptr;
-        format(sql, sizeof sql, "SELECT %s FROM search JOIN tracks t ON t.id = search.rowid WHERE search MATCH ? AND t.missing = 0 ORDER BY rank, t.name LIMIT ? OFFSET ?", kTrackCols);
-        if (ok(sqlite3_prepare_v2(db, sql, -1, &s, nullptr))) {
-            sqlite3_bind_text(s, 1, expr, -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(s, 2, want);
-            sqlite3_bind_int64(s, 3, q.first);
-            run_tracks(s, q.first);
-            sqlite3_finalize(s);
+        // Every match's id in order, kept: best first (FTS5's rank) or by a track order.
+        if (!keeping()) {
+            char expr[512];
+            if (search_expression(q.text, expr, sizeof expr)) {
+                if (q.sort == LibrarySort::Default) format(sql, sizeof sql, "SELECT rowid FROM search WHERE search MATCH ? ORDER BY rank");
+                else format(sql, sizeof sql, "SELECT t.id FROM search JOIN tracks t ON t.id = search.rowid WHERE search MATCH ? AND t.missing = 0 ORDER BY %s", order(""));
+                sqlite3_stmt* st = nullptr;
+                if (ok(sqlite3_prepare_v2(db, sql, -1, &st, nullptr))) {
+                    sqlite3_bind_text(st, 1, expr, -1, SQLITE_TRANSIENT);
+                    while (sqlite3_step(st) == SQLITE_ROW) kept.ids.push((u64)sqlite3_column_int64(st, 0));
+                    sqlite3_finalize(st);
+                }
+            }
         }
+        *total = kept.ids.len;
+        for (u32 i = q.first; i < kept.ids.len && got < want; ++i) by_id(kept.ids[i], i);
         break;
     }
+    case LibraryView::Artists: {
+        char sel[256];
+        format(sel, sizeof sel, "MIN(t.artist_hash), MIN(%s), count(*), count(DISTINCT t.album_hash)", kShownArtist);
+        groups(LibraryRowKind::Artist, "t.missing = 0", 0, false, "t.sort_artist", sel);
+        break;
+    }
+    case LibraryView::Albums: {
+        char sel[512];
+        format(sel, sizeof sel, "t.album_hash, MIN(t.album), count(*), CASE WHEN MIN(%s) = MAX(%s) THEN MIN(%s) ELSE 'Various Artists' END, MIN(t.date)",
+               kShownArtist, kShownArtist, kShownArtist);
+        if (q.parent) groups(LibraryRowKind::Album, "t.artist_hash = ? AND t.missing = 0 AND t.album_hash != 0", (i64)q.parent, true, "t.sort_album, t.album_hash", sel);
+        else groups(LibraryRowKind::Album, "t.missing = 0 AND t.album_hash != 0", 0, false, "t.sort_album, t.album_hash", sel);
+        break;
+    }
+    case LibraryView::Genres:
+        groups(LibraryRowKind::Genre, "t.missing = 0 AND t.genre_hash != 0", 0, false, "t.sort_genre", "MIN(t.genre_hash), MIN(t.genre), count(*)");
+        break;
     case LibraryView::Count: break;
     }
     return got;

@@ -221,6 +221,71 @@ int main(int argc, char** argv) {
     while (!g_finished && time_now() - t1 < 300.0) s.step();
     printf("second start: the walk again in %.2f s, %llu files read again\n", g_walk_seconds, (unsigned long long)library_scan(s.e)->tags_read);
     KV_CHECK(c, library_scan(s.e)->tags_read == 0);
+
+    // Windows of 100 anywhere in every view and order: the index's time, and the round trip
+    // from the query to its result in the table.
+    {
+        auto ask = [&](LibraryView v, LibrarySort so, u64 parent, const char* text, u32 first, f64* rt) -> LibraryResult {
+            LibraryQuery w;
+            w.id = 7; w.view = v; w.sort = so; w.parent = parent; w.first = first; w.count = 100;
+            format(w.text, sizeof w.text, "%s", text);
+            u32 before = g_results;
+            f64 t = time_now();
+            s.e.events.emit(w);
+            while (time_now() - t < 10.0) { s.step(); if (g_results > before && g_last.id == 7) break; }
+            *rt = time_now() - t;
+            return g_last;
+        };
+        f64 rt;
+        LibraryResult ar = ask(LibraryView::Artists, LibrarySort::Default, 0, "", 0, &rt);
+        u64 an_artist = s.row(7, 3) ? s.row(7, 3)->id : 0;
+        ask(LibraryView::Albums, LibrarySort::Default, 0, "", 1000, &rt);
+        u64 an_album = s.row(7, 1000) ? s.row(7, 1000)->id : 0;
+        ask(LibraryView::Genres, LibrarySort::Default, 0, "", 0, &rt);
+        u64 a_genre = s.row(7, 0) ? s.row(7, 0)->id : 0;
+        ask(LibraryView::Folders, LibrarySort::Default, 0, "", 0, &rt);
+        u64 top = s.row(7, 0) ? s.row(7, 0)->id : 0;
+        (void)ar;
+        struct V { const char* name; LibraryView v; LibrarySort so; u64 parent; const char* text; };
+        const V views[] = {
+            {"tracks", LibraryView::Tracks, LibrarySort::Default, 0, ""},
+            {"tracks by title", LibraryView::Tracks, LibrarySort::Title, 0, ""},
+            {"tracks by album", LibraryView::Tracks, LibrarySort::Album, 0, ""},
+            {"tracks by date", LibraryView::Tracks, LibrarySort::Date, 0, ""},
+            {"tracks by path", LibraryView::Tracks, LibrarySort::Path, 0, ""},
+            {"a genre's tracks", LibraryView::Tracks, LibrarySort::Default, a_genre, ""},
+            {"artists", LibraryView::Artists, LibrarySort::Default, 0, ""},
+            {"albums", LibraryView::Albums, LibrarySort::Default, 0, ""},
+            {"an artist's albums", LibraryView::Albums, LibrarySort::Default, an_artist, ""},
+            {"an album's tracks", LibraryView::AlbumTracks, LibrarySort::Default, an_album, ""},
+            {"genres", LibraryView::Genres, LibrarySort::Default, 0, ""},
+            {"folders: the root's", LibraryView::Folders, LibrarySort::Default, top, ""},
+            {"search \"track\"", LibraryView::Search, LibrarySort::Default, 0, "track"},
+            {"search \"track\" by artist", LibraryView::Search, LibrarySort::Artist, 0, "track"},
+            {"search \"zq4\"", LibraryView::Search, LibrarySort::Default, 0, "zq4"},
+        };
+        f64 worst = 0.0, worst_every = 0.0; // the second: a search that matches every track
+        printf("windows of 100 (the index's time, then the round trip to the table), at the start, the middle and the end:\n");
+        for (const V& v : views) {
+            LibraryResult first = ask(v.v, v.so, v.parent, v.text, 0, &rt);
+            u32 total = first.total;
+            f64 t_first = first.seconds, r_first = rt;
+            LibraryResult mid = ask(v.v, v.so, v.parent, v.text, total / 2, &rt);
+            f64 r_mid = rt;
+            LibraryResult end = ask(v.v, v.so, v.parent, v.text, total > 100 ? total - 100 : 0, &rt);
+            printf("  %-26s %6u rows: %5.1f %5.1f   %5.1f %5.1f   %5.1f %5.1f ms\n", v.name, total, t_first * 1e3, r_first * 1e3,
+                   mid.seconds * 1e3, r_mid * 1e3, end.seconds * 1e3, rt * 1e3);
+            f64 m = t_first > mid.seconds ? t_first : mid.seconds;
+            if (end.seconds > m) m = end.seconds;
+            bool every = strstr(v.name, "\"track\"") != nullptr;
+            f64& w = every ? worst_every : worst;
+            if (m > w) w = m;
+        }
+        printf("windows: the slowest took the index %.1f ms; a search matching every track, %.1f ms for its first window\n",
+               worst * 1e3, worst_every * 1e3);
+        KV_CHECK(c, worst < 0.020);
+        KV_CHECK(c, worst_every < 0.060); // ranking fifty thousand matches; its later windows are a slice of what was kept
+    }
     s.stop();
 
     // The disk run: the files out of the page cache, the index gone, and a long track

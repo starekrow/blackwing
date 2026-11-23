@@ -259,6 +259,8 @@ void write_thread(void* arg) {
                     t.title = b.s.at(r.title); t.artist = b.s.at(r.artist); t.album = b.s.at(r.album); t.albumartist = b.s.at(r.albumartist);
                     t.date = b.s.at(r.date); t.genre = b.s.at(r.genre); t.trackno = r.trackno; t.discno = r.discno;
                     t.shown = b.s.at(r.shown);
+                    t.titlesort = b.s.at(r.titlesort); t.artistsort = b.s.at(r.artistsort);
+                    t.albumsort = b.s.at(r.albumsort); t.albumartistsort = b.s.at(r.albumartistsort);
                     t.nvals = r.nvals; t.fields = fields.data; t.sources = sources.data; t.texts = texts.data;
                     if (up) ix.put_tags(t);
                     touch(r.root);
@@ -361,6 +363,13 @@ const char* root_path_of(void* user, u32 id) {
     return "";
 }
 
+// sqlite asks this as it works: a newer ask for the window being answered stops it.
+struct StopCheck { Shared* sh; u32 epoch; };
+int stop_check(void* user) {
+    StopCheck& c = *(StopCheck*)user;
+    return atomic_load(&c.sh->stop_epoch, MO_RELAXED) != c.epoch ? 1 : 0;
+}
+
 void read_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     os_mutex_lock(&sh.lock);
@@ -386,9 +395,25 @@ void read_thread(void* arg) {
             r.generation = atomic_load(&sh.generation, MO_ACQUIRE);
             u32 want = a.q.count < kLibraryMaxWindow ? a.q.count : kLibraryMaxWindow;
             r.rows = (LibraryRow*)mem_alloc(sizeof(LibraryRow) * (want ? want : 1));
-            if (up) r.count = ix.window(a.q, r.rows, &r.total, root_path_of, &roots);
+            // Which window this is, so a newer ask for it can stop it in sqlite.
+            os_mutex_lock(&sh.lock);
+            bool newer = false;
+            for (const Ask& b : sh.asks) newer |= b.q.id == a.q.id;
+            sh.reading_window = a.q.id;
+            StopCheck check{&sh, atomic_load(&sh.stop_epoch, MO_RELAXED)};
+            os_mutex_unlock(&sh.lock);
+            f64 t0 = time_now();
+            if (newer) r.stopped = true; // already asked again: not worth starting
+            else if (up) {
+                ix.stop_when(stop_check, &check);
+                r.count = ix.window(a.q, r.generation, r.rows, &r.total, root_path_of, &roots);
+                ix.stop_when(nullptr, nullptr);
+                if (stop_check(&check)) { r.stopped = true; atomic_add_fetch(&sh.cancelled, (u64)1, MO_RELAXED); }
+            }
+            r.seconds = time_now() - t0;
             if (up && ix.damaged) { ix.close(); up = false; } // the writer will make it again; open it afresh next time
             os_mutex_lock(&sh.lock);
+            sh.reading_window = 0;
             sh.results.push(r);
             os_mutex_unlock(&sh.lock);
         }
@@ -522,6 +547,7 @@ void add_root(Library& L, KTable* table, u32 id, const char* path, bool save) {
 void ask(Library& L, Window& w) {
     w.seq = ++L.seq;
     os_mutex_lock(&L.sh->lock);
+    if (L.sh->reading_window == w.id) atomic_add_fetch(&L.sh->stop_epoch, 1u, MO_RELAXED); // the one being answered stops
     bool replaced = false;
     for (Ask& a : L.sh->asks) if (a.q.id == w.id) { a.q = w.q; a.seq = w.seq; replaced = true; } // the older ask is dropped unanswered
     if (!replaced) L.sh->asks.push(Ask{w.q, w.seq});
@@ -657,14 +683,14 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     }
     for (Result& res : results) {
         Window* w = window(L, res.id);
-        if (w && res.seq == w->seq && rows) {
+        if (w && res.seq == w->seq && rows && !res.stopped) {
             clear_rows(rows, *w);
             for (u32 i = 0; i < res.count; ++i) {
                 Handle h = rows->spawn(res.rows[i]);
                 if (!h.is_null()) w->rows.push(h);
             }
             w->shown_generation = res.generation;
-            ctx.emit(LibraryResult{res.id, res.total, res.first, res.count, res.generation});
+            ctx.emit(LibraryResult{res.id, res.total, res.first, res.count, res.generation, res.seconds});
         }
         mem_free(res.rows);
     }
@@ -754,6 +780,7 @@ void library_pump(TickContext& ctx) {
     s.dirs_listed = atomic_load(&L.sh->dirs_listed, MO_RELAXED);
     s.files_found = atomic_load(&L.sh->files_found, MO_RELAXED);
     s.tags_read = atomic_load(&L.sh->tags_read, MO_RELAXED);
+    s.cancelled = atomic_load(&L.sh->cancelled, MO_RELAXED);
     bool busy = false;
     u64 unread = 0;
     for (const RootInfo& r : L.roots) {
@@ -901,7 +928,7 @@ constinit const CliCommandDesc k_commands[] = {
 
 constinit const FieldDesc k_root_fields[] = {KV_FIELDS(LibraryRoot, id, state, dirs, tracks, failed, unread, path, reason)};
 constinit const FieldDesc k_row_fields[] = {KV_FIELDS(LibraryRow, query, index, id, kind, missing, offline, root, track_number, disc_number, size, frames, rate, name, title, artist), // sixteen at most a list
-                                            KV_FIELDS(LibraryRow, album, path, reason)};
+                                            KV_FIELDS(LibraryRow, album, path, reason, count, albums, date)};
 constinit const ComponentDesc k_components[] = {KV_COMPONENT(LibraryRoot, k_root_fields, CompCosmetic), KV_COMPONENT(LibraryRow, k_row_fields, CompCosmetic)};
 constinit const KTableDesc k_ktables[] = {
     {.name = ".roots", .components = "LibraryRoot", .capacity = 256, .id = &g_roots_ktable, .cosmetic = true},
@@ -909,10 +936,10 @@ constinit const KTableDesc k_ktables[] = {
 };
 constinit const FieldDesc k_f_add[] = {KV_FIELDS(LibraryAddRoot, path)};
 constinit const FieldDesc k_f_remove[] = {KV_FIELDS(LibraryRemoveRoot, root)};
-constinit const FieldDesc k_f_query[] = {KV_FIELDS(LibraryQuery, id, view, parent, text, first, count)};
+constinit const FieldDesc k_f_query[] = {KV_FIELDS(LibraryQuery, id, view, sort, parent, text, first, count)};
 constinit const FieldDesc k_f_close[] = {KV_FIELDS(LibraryClose, id)};
 constinit const FieldDesc k_f_prio[] = {KV_FIELDS(LibraryPrioritize, path, dir, query, count, tracks)};
-constinit const FieldDesc k_f_result[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation)};
+constinit const FieldDesc k_f_result[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation, seconds)};
 constinit const FieldDesc k_f_changed[] = {KV_FIELDS(LibraryChanged, generation)};
 constinit const FieldDesc k_f_finished[] = {KV_FIELDS(LibraryScanFinished, root, tracks, seconds)};
 constinit const EventTypeDesc k_events[] = {

@@ -6,9 +6,9 @@ in an index as soon as its directory is listed, playable, with a title, artist a
 guessed from its path. Queries are windows kept open over the index, answered off the main
 thread. Its API is events and tables, as the player's is.
 
-**Status:** slice 3, milestone 4: roots, the names pass, the tags pass, the priority slot,
-the index, windows by folder, of every track and by search. More views and sorting,
-overrides and watching are the milestones after it.
+**Status:** slice 3, milestone 5: roots, the names pass, the tags pass, the priority slot,
+the index, and windows over every view, sorted, cancelled and following the index.
+Overrides and watching are the milestones after it.
 
 ## How it works
 
@@ -86,16 +86,37 @@ or one sqlite calls not a database or corrupt, is deleted and made again with a 
 the log, and every root walked into it again; `library.scan`'s `rebuilt` says so.
 
 **Windows.** `LibraryQuery` opens window `id` or changes what it shows: a view, a parent
-or search text, and a range of rows. The reader answers the newest ask for each window
-(an older one not yet answered is dropped) into `library.rows`, and `LibraryResult` says
-it is there. While a scan commits, open windows are asked again, at most four times a
-second, so they follow the index.
+or search text, an order, and a range of rows. The reader answers the newest ask for each
+window into `library.rows`, and `LibraryResult` says it is there and how long the index
+took. A newer ask for a window takes the place of an older one: one not yet begun is
+dropped, and one being answered is stopped inside sqlite (a progress handler sees the
+newer ask and interrupts). While a scan commits, open windows are asked again, at most four
+times a second, so they follow the index.
 
-| view | what |
-|---|---|
-| `Folders` | a directory's subdirectories by name, then its tracks by name; `parent` 0 is the roots |
-| `Tracks` | every track, in root and path order |
-| `Search` | tracks with words beginning with each word of `text`, in title, artist, album or path, best first; case and marks do not matter ("cafe" finds "Café") |
+| view | `parent` | what |
+|---|---|---|
+| `Folders` | a directory (0: the roots) | its subdirectories by name, then its tracks by name |
+| `Tracks` | 0, or a genre | every track (a genre's), by artist, album, disc and number |
+| `Search` | | tracks with words beginning with each word of `text`, in title, artist, album or path, best first; case and marks do not matter ("cafe" finds "Café") |
+| `Artists` | | album artists (the artist where there is none), with their tracks and albums |
+| `Albums` | 0, or an artist | albums by title, with their artist ("Various Artists" when their tracks differ), tracks and earliest date |
+| `AlbumTracks` | an album | its tracks by disc and number |
+| `Genres` | | genres, with their tracks |
+
+An album is its album artist and title, or, with no album artist, its title in its
+directory; an artist is the album artist, or the artist. Neither is stored: they are
+groupings of tracks, made when asked, and named by a hash of their keys (an Artists or
+Albums row's `id`, which an Albums or AlbumTracks query takes as `parent`). The track views
+take `LibrarySort`: by title, artist, album, date or path. Names sort by a key with their
+case folded and their marks stripped (Latin, Greek, Cyrillic; other scripts by code
+point), so "Ångström" sorts beside "angle"; leading articles are not moved.
+
+**Every window is a walk of an index.** Each order a track window takes has an index that
+is that order to its last column, and a window's ids are read from it first (the offset
+skips index entries, not rows), then its rows by id. A grouping is made whole over an
+index that covers it, and a search's matches are put in order whole; either is kept by the
+reader for as long as the index's generation lasts, so every window of it after the first
+is a slice.
 
 A row carries what is needed to play it: `path` is the root's path and the file's within
 it, which `PlayerEnqueue` takes (empty, with a reason, when it is longer than that holds).
@@ -126,17 +147,18 @@ Header `korvid/blackwing_library/library.h`:
 | name | kind | what |
 |---|---|---|
 | `LibraryAddRoot { path }`, `LibraryRemoveRoot { root }` | events in | a directory in, a root out |
-| `LibraryQuery { id, view, parent, text, first, count }` | event in | opens or changes window `id` |
+| `LibraryQuery { id, view, sort, parent, text, first, count }` | event in | opens or changes window `id` |
 | `LibraryClose { id }` | event in | its rows leave the table |
 | `LibraryPrioritize { path, dir, query, count, tracks }` | event in | the slot: scanned next |
-| `LibraryResult { id, total, first, count, generation }` | event out | the window's rows are in `library.rows` |
+| `LibraryResult { id, total, first, count, generation, seconds }` | event out | the window's rows are in `library.rows`; how long the index took |
 | `LibraryChanged { generation }` | event out | the index has moved on |
 | `LibraryScanFinished { root, tracks, seconds }` | event out | a root's scan is over: walked (in `seconds`) and every track read |
-| `LibraryView` | enum | `Folders`, `Tracks`, `Search` |
+| `LibraryView` | enum | `Folders`, `Tracks`, `Search`, `Artists`, `Albums`, `AlbumTracks`, `Genres` |
+| `LibrarySort` | enum | `Default`, `Title`, `Artist`, `Album`, `Date`, `Path` |
 | `LibraryRoot` | component | a row of `library.roots`: `id`, `state`, `dirs`, `tracks`, `failed`, `unread`, `path`, `reason` |
 | `LibraryRootState` | enum | `Walking`, `Reading`, `Idle`, `Offline` |
-| `LibraryRow` | component | a row of `library.rows`: `query`, `index`, `id`, `kind`, names, numbers, `path`, `reason` |
-| `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `names_per_second`, `tags_per_second`, `slot`, `dir` |
+| `LibraryRow` | component | a row of `library.rows`: `query`, `index`, `id`, `kind` (directory, track, artist, album, genre), names, numbers, `count`, `albums`, `date`, `path`, `reason` |
+| `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `cancelled`, `names_per_second`, `tags_per_second`, `slot`, `dir` |
 | `kLibraryMaxWindow`, `kLibraryMaxRows` | constants | 512 rows a window, 4096 in all |
 | `LibraryConfig`, `library_configure` | record, function | `data_dir`, before `engine_init` |
 | `library_scan(e)` | function | the resource, for code outside the schedule |
@@ -151,6 +173,12 @@ Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the reco
   are listed in about 0.5 s and are rows within about 1.8 s; their tags are read at about
   5,500 files a second with the cache warm, and in 16 s for all of them with it cold. A
   track is findable once its batch is committed.
+- **A window of 100 anywhere in fifty thousand rows takes the index 0 to 11 ms**, in every
+  view and order; the first window of a grouping or a search makes it whole (artists 8 ms,
+  albums 10 ms), and the next ones are slices. A search that matches every track (a word in
+  all fifty thousand titles) takes 35 ms to rank them for its first window.
+- **What is kept goes with the generation**: while a scan commits, an open grouping or
+  search is made again with each refill.
 - **A root is walking, then reading, then idle**, and `LibraryScanFinished` comes when it is
   idle: walked and every track read. A track that could not be read is read, with its
   reason.
@@ -177,16 +205,22 @@ from row 10; a closed window's rows go. Every track's tags are read: the title i
 Vorbis comment's, the rate and length the decoder's; a one-byte `.MP3` is a row with "too
 short to be audio". The next start finds the roots, walks them again, reads no file again,
 and keeps every id; a second root, a root added twice, a root removed; the index replaced
-by text is made again from the roots; a root that is not there is offline. Then the slot: eight thousand files, and the
+by text is made again from the roots; a root that is not there is offline. The groupings: artists with their tracks and albums, an artist's
+albums, an album's tracks by number, the genres and a genre's tracks; five titles in one
+album sorted by title as "angle", "Ångström", "apple", "Été", "Zebra". Then the slot: eight thousand files, and the
 directory of an album the walk comes to near its end prioritized by its path as the scan
 starts; its track is seen read with more than 2,000 still to read (about 5,500, typically).
+Then a wide search replaced at once by a narrow one for the same window, forty times over
+four thousand files: only the narrow one is ever shown (and nearly every wide one is
+stopped in sqlite).
 Clean under ASan, UBSan and TSan.
 
 `kormake test blackwing_library --heavy [-- DIR]` makes fifty thousand files (once, under
 `build/library-heavy` unless a directory is given) and measures, from `LibraryAddRoot` on
 an empty index, when two chosen tracks are found by name and heard through the player; a
 folder of twenty prioritized as the tags pass starts, and how soon its tags are in; the
-walk and the tags pass; the index's size; the second start; and the disk run: the files
+walk and the tags pass; the index's size; the second start; windows of 100 at the start,
+middle and end of every view and order; and the disk run: the files
 out of the page cache and a long track played from the same disk through a whole scan,
 with no underrun.
 

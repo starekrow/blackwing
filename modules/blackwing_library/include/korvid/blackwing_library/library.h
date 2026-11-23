@@ -42,20 +42,32 @@ struct LibraryPrioritize {
     u64  tracks[32] = {};
 };
 
-// What a window looks at.
+// What a window looks at. Albums and artists are groupings of tracks, made when asked: an
+// album is its album artist and title (or, with no album artist, its title and directory);
+// an artist is the album artist, or the artist where there is none.
 enum class LibraryView : u8 {
-    Folders, // a directory's directories, then its tracks; `parent` is the directory (0: the roots)
-    Tracks,  // every track
-    Search,  // tracks whose title, artist, album or path has words beginning with `text`'s
+    Folders,     // a directory's directories, then its tracks; `parent` is the directory (0: the roots)
+    Tracks,      // every track; with `parent`, a genre's (a Genres row's id)
+    Search,      // tracks whose title, artist, album or path has words beginning with `text`'s
+    Artists,     // the artists
+    Albums,      // the albums; with `parent`, an artist's (an Artists row's id)
+    AlbumTracks, // an album's tracks, by disc and track number; `parent` is the album (an Albums row's id)
+    Genres,      // the genres
     Count
 };
+// The order of a window's rows. Default is the view's own: names for Folders, artists and
+// albums and genres by name, an album's tracks by disc and number, every track by artist,
+// album, disc and number, search best first. The others are for track views. Names sort
+// by a key with case folded and marks stripped ("Ångström" beside "angle").
+enum class LibrarySort : u8 { Default, Title, Artist, Album, Date, Path, Count };
 // Opens window `id`, or replaces what it shows: `count` rows (at most kLibraryMaxWindow)
-// from `first`. A newer query with the same id takes the place of an older one not yet
-// answered.
+// from `first`. A newer query with the same id takes the place of an older one: one not
+// yet answered is dropped, one being answered is stopped in sqlite.
 struct LibraryQuery {
     u32         id     = 0;
     LibraryView view   = LibraryView::Tracks;
-    u8          pad[3] = {};
+    LibrarySort sort   = LibrarySort::Default;
+    u8          pad[2] = {};
     u64         parent = 0;
     char        text[128] = "";
     u32         first  = 0;
@@ -67,8 +79,8 @@ struct LibraryClose { u32 id; };
 // ---- notifications: events the library emits ------------------------------------------------
 
 // Window `id`'s rows are in library.rows: `count` of them from `first`, of `total` the
-// query has, as the index was at `generation`.
-struct LibraryResult { u32 id; u32 total; u32 first; u32 count; u64 generation; };
+// query has, as the index was at `generation`; `seconds` is how long the index took.
+struct LibraryResult { u32 id; u32 total; u32 first; u32 count; u64 generation; f64 seconds; };
 // Something a query might show has changed: the index's generation is now this. At most a
 // few times a second while a scan runs.
 struct LibraryChanged { u64 generation; };
@@ -101,7 +113,7 @@ struct LibraryRoot {
     char reason[96];   // why it is offline
 };
 
-enum class LibraryRowKind : u8 { Directory, Track, Count };
+enum class LibraryRowKind : u8 { Directory, Track, Artist, Album, Genre, Count };
 
 // A row of the ktable "library.rows": the component LibraryRow, one per row of an open
 // window. `index` is its place in the query's whole list, from 0.
@@ -119,8 +131,11 @@ struct LibraryRow {
     u64  size;
     u64  frames;       // 0 until its tags have been read, or when the file does not say
     u32  rate;
+    u32  count;        // an artist's, album's or genre's tracks
+    u32  albums;       // an artist's albums
     u32  pad2;
-    char name[256];    // the file's or the directory's own name, UTF-8 (U+FFFD for what is not)
+    char date[16];     // as its tags have it; an album's earliest
+    char name[256];    // the file's or the directory's own name, UTF-8 (U+FFFD for what is not); a group's name
     char title[256];
     char artist[256];
     char album[256];
@@ -137,6 +152,7 @@ struct LibraryScan {
     u64  generation  = 0;  // the index's, as of the last commit
     u64  tracks      = 0;  // in the index, across every root
     u64  dirs_listed = 0;  // directories listed since start-up
+    u64  cancelled   = 0;  // queries stopped in sqlite by a newer one for their window
     u64  files_found = 0;  // audio files found by the walk since start-up
     u64  tags_read   = 0;  // tracks whose tags have been read since start-up
     u64  unread      = 0;  // tracks whose tags are still to be read, across every root

@@ -55,6 +55,7 @@ struct TagRec {
     u32 reason = 0;                        // offset of "" when it all went well
     u32 vals = 0, nvals = 0;               // into the batch's values
     u32 title = 0, artist = 0, album = 0, albumartist = 0, date = 0, genre = 0, shown = 0;
+    u32 titlesort = 0, artistsort = 0, albumsort = 0, albumartistsort = 0;
     u32 trackno = 0, discno = 0;
 };
 struct TagBatch {
@@ -104,6 +105,8 @@ struct Note {
 struct Result {
     u32 id = 0, seq = 0, total = 0, first = 0, count = 0;
     u64 generation = 0;
+    f64 seconds = 0.0;
+    bool stopped = false;     // a newer ask for its window stopped it: not shown
     LibraryRow* rows = nullptr; // count of them, from mem_alloc
 };
 struct Ask { LibraryQuery q; u32 seq = 0; };
@@ -143,6 +146,9 @@ struct Shared {
     u64 dirs_listed = 0, files_found = 0, tags_read = 0;
     u32 tags_active = 0;  // tracks the tagger is reading now
     u32 walking = 0;      // the root being walked
+    u32 reading_window = 0; // the window the reader is answering (under the lock), and
+    u32 stop_epoch = 0;     // atomic: moved on when a newer ask for it comes
+    u64 cancelled = 0;      // atomic: queries stopped so
     char walking_dir[256] = ""; // under the lock
     bool rebuilt = false;
     // The roots, as the writer saves them: under the lock.

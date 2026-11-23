@@ -188,3 +188,49 @@ it.
 
 **Not measured**: the USB disks. They are not attached to this machine; their numbers
 are for the close.
+
+## Milestone 5, queries
+
+Nov 23, 2026.
+
+**As planned**, with these particulars:
+
+- **Albums and artists are groupings, named by a hash.** An album is its album artist and
+  title, or, with no album artist, its title in its directory (so a compilation without
+  one is one album, and two discs in two directories without one are two; the PRD's Open).
+  An artist is the album artist, or the artist. Their ids are hashes of their sort keys,
+  kept in each track's row with the keys, so an `Albums` or `AlbumTracks` query can name
+  one.
+- **Sort keys fold case and strip marks** for Latin, Greek and Cyrillic, from a table made
+  from Unicode's data (BL26); other scripts sort by code point. Leading articles stay.
+- **A window is a walk of an index.** The first version sorted: a window of 100 at the end
+  of fifty thousand by title took 110 ms, because the index did not match the ORDER BY to
+  its last column, and every skipped row was read. Each order now has an index that is it,
+  a window's ids are read from it first and its rows fetched by id (2 ms where it was
+  110), and the groupings have indexes that cover them.
+- **Groupings and searches are made whole and kept** by the reader for one generation; a
+  window is a slice. This is what makes a search's later windows 0.5 ms.
+- **Cancelling** is a progress handler: when a newer ask for the window being answered
+  arrives, the reader's query is interrupted in sqlite. Forty wide searches replaced at
+  once by narrow ones: forty stopped, and only the narrow ones shown.
+- **`LibraryResult` says how long the index took** (`seconds`), and `LibraryQuery` gained
+  `sort`. Both are the PRD's table with a field more.
+
+**The numbers**, windows of 100 over fifty thousand tracks, the index's time at the start,
+the middle and the end, in ms:
+
+| view | start | middle | end |
+|---|---|---|---|
+| every track (by artist, album, disc, number) | 3.8 | 5.2 | 7.8 |
+| by title / album / date / path | 3.3–3.8 | 4.3–5.5 | 5.1–9.4 |
+| a genre's tracks | 3.8 | 5.7 | 6.9 |
+| artists (279) / albums (2,311) / genres | 7.8 / 10.4 / 4.9 | 0.0 | 0.0 |
+| an artist's albums / an album's tracks / a folder of 904 | 4.0 / 0.3 / 0.1 | 0.0–0.2 | 0.0–0.2 |
+| search "zq4" (11,111 matches) | 7.0 | 0.7 | 0.5 |
+| search "track" (every track), best first / by artist | 30.1 / 34.5 | 0.5 | 0.5 |
+
+The round trip from the query to its rows in the table is 4 ms more: the reader's thread
+and the next tick. Every window is within the 20 ms of the exit criteria but the first of
+a search that matches every track, which ranks fifty thousand matches; a search as it is
+typed matches that many only at its first letter or two. The index is 117 MB with its
+indexes and every source's values.

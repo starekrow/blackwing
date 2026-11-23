@@ -228,6 +228,10 @@ bool step(Tagger& t, u32 index) {
     r.albumartist = merged(TagField::AlbumArtist);
     r.date = merged(TagField::Date);
     r.genre = merged(TagField::Genre);
+    r.titlesort = merged(TagField::TitleSort);
+    r.artistsort = merged(TagField::ArtistSort);
+    r.albumsort = merged(TagField::AlbumSort);
+    r.albumartistsort = merged(TagField::AlbumArtistSort);
     r.trackno = number(b.s.at(merged(TagField::TrackNumber)));
     r.discno = number(b.s.at(merged(TagField::DiscNumber)));
     b.recs.push(r);

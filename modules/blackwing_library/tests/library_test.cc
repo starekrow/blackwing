@@ -124,6 +124,18 @@ void test_library_walk(TestCtx& c) {
     chmod(p, 0644);
     format(p, sizeof p, "%s/Odd/Locked", music); chmod(p, 0);
     bool root_user = geteuid() == 0;
+    // Five tracks of one album whose titles sort by their folded keys, one in another genre.
+    {
+        const char* titles[] = {"Zebra", "Ångström", "apple", "Été", "angle"};
+        format(p, sizeof p, "%s/Sorts", music); io_make_dirs(p);
+        for (u32 i = 0; i < 5; ++i) {
+            kvtest::Bytes f;
+            kvtest::Tags t{titles[i], "Sorter", "Sorting", i + 1, 5, 1, "2001", i == 4 ? "Jazz" : "Electronic"};
+            kvtest::flac_file(f, t);
+            format(p, sizeof p, "%s/Sorts/%u.flac", music, i);
+            io_write_now(p, f.b, f.n);
+        }
+    }
 
     Rig r;
     KV_CHECK(c, r.start(data));
@@ -132,7 +144,7 @@ void test_library_walk(TestCtx& c) {
     KV_CHECK(c, r.until([] { return g_finished == 1; }));
     f64 walked = time_now() - t0;
     LibraryRoot root = r.root(1);
-    u32 expect = (u32)made.files + 2 + (root_user ? 1 : 0); // and SHOUTING.MP3, the Latin-1 name
+    u32 expect = (u32)made.files + 2 + 5 + (root_user ? 1 : 0); // and SHOUTING.MP3, the Latin-1 name, Sorts
     KV_CHECK(c, root.id == 1 && root.state == (u8)LibraryRootState::Idle && root.tracks == expect && g_finished_tracks == expect);
     KV_CHECK(c, root_user || root.failed == 1);
     KV_CHECK(c, r.scan().tracks == expect && r.scan().active == 0 && g_changed > 0 && root.unread == 0 && r.scan().unread == 0);
@@ -183,6 +195,59 @@ void test_library_walk(TestCtx& c) {
     Array<LibraryRow> w = r.rows(7);
     KV_CHECK(c, g_result[7].total == expect && w.len == 25 && w[0].index == 10 && w[24].index == 34);
     w.free();
+    // The groupings. Artists: the generator's (nine albums each, so one here), Sorter, and the
+    // files with no artist at all (the Odd ones, guessed from nothing).
+    KV_CHECK(c, r.query(8, LibraryView::Artists, 0, ""));
+    Array<LibraryRow> artists = r.rows(8);
+    u64 sorter = 0;
+    u32 artist_tracks = 0;
+    for (const LibraryRow& a : artists) {
+        KV_CHECK(c, a.kind == (u8)LibraryRowKind::Artist && a.count > 0);
+        artist_tracks += a.count;
+        if (!strcmp(a.name, "Sorter")) { sorter = a.id; KV_CHECK(c, a.count == 5 && a.albums == 1); }
+    }
+    KV_CHECK(c, sorter && artist_tracks == expect && g_result[8].total == artists.len);
+    artists.free();
+    // Its albums, then the album's tracks by number.
+    KV_CHECK(c, r.query(9, LibraryView::Albums, sorter, ""));
+    Array<LibraryRow> albums = r.rows(9);
+    KV_CHECK(c, albums.len == 1 && strcmp(albums[0].name, "Sorting") == 0 && strcmp(albums[0].artist, "Sorter") == 0 && albums[0].count == 5);
+    KV_CHECK(c, albums.len == 1 && strcmp(albums[0].date, "2001") == 0);
+    u64 album = albums.len ? albums[0].id : 0;
+    albums.free();
+    KV_CHECK(c, r.query(10, LibraryView::AlbumTracks, album, ""));
+    Array<LibraryRow> at = r.rows(10);
+    bool numbered = at.len == 5;
+    for (u32 i = 0; i < at.len; ++i) numbered &= at[i].track_number == i + 1;
+    KV_CHECK(c, numbered);
+    at.free();
+    // Every album: the generator's five, Sorting, and the guessed ones of the Odd files.
+    KV_CHECK(c, r.query(11, LibraryView::Albums, 0, ""));
+    KV_CHECK(c, g_result[11].total >= 6);
+    // Genres: Electronic for all but one, Jazz for it; the files with no tags have none.
+    KV_CHECK(c, r.query(12, LibraryView::Genres, 0, ""));
+    Array<LibraryRow> genres = r.rows(12);
+    KV_CHECK(c, genres.len == 2 && strcmp(genres[0].name, "Electronic") == 0 && strcmp(genres[1].name, "Jazz") == 0 && genres[1].count == 1);
+    u64 jazz = genres.len == 2 ? genres[1].id : 0;
+    genres.free();
+    KV_CHECK(c, r.query(13, LibraryView::Tracks, jazz, ""));
+    Array<LibraryRow> jz = r.rows(13);
+    KV_CHECK(c, jz.len == 1 && strcmp(jz[0].title, "angle") == 0);
+    jz.free();
+    // Sorted by title, case folded and marks stripped: angle, Ångström, apple, Été, Zebra.
+    {
+        LibraryQuery q;
+        q.id = 14; q.view = LibraryView::AlbumTracks; q.parent = album; q.sort = LibrarySort::Title; q.count = 10;
+        u32 before = g_results;
+        r.say(q);
+        KV_CHECK(c, r.until([&] { return g_results > before && g_result[14].id == 14; }));
+        Array<LibraryRow> st = r.rows(14);
+        const char* want_order[] = {"angle", "Ångström", "apple", "Été", "Zebra"};
+        bool sorted = st.len == 5;
+        for (u32 i = 0; i < st.len && sorted; ++i) sorted = strcmp(st[i].title, want_order[i]) == 0;
+        KV_CHECK(c, sorted);
+        st.free();
+    }
     // A window closed: its rows go.
     r.say(LibraryClose{7});
     r.step(); r.step();
@@ -281,6 +346,44 @@ void test_library_slot(TestCtx& c) {
     KV_CHECK(c, unread_then > 2000); // without the slot it would be among the last few hundred
     KV_CHECK(c, r.until([] { return g_finished == 1; }, 60.0));
     KV_CHECK(c, r.root(1).unread == 0 && r.root(1).tracks == 8000);
+    r.stop();
+    io_remove_tree(tmp);
+}
+
+// A query replaced by a newer one for its window: only the newer is shown, whether the
+// older was dropped before it began or stopped in sqlite.
+void test_library_cancel(TestCtx& c) {
+    c.begin("library cancel");
+    char tmp[1024], music[1100], data[1100];
+    KV_CHECK(c, io_make_temp_dir("bw_cancel", tmp, sizeof tmp));
+    format(music, sizeof music, "%s/music", tmp);
+    format(data, sizeof data, "%s/data", tmp);
+    kvtest::make_library(music, 4000, 10);
+    Rig r;
+    KV_CHECK(c, r.start(data));
+    r.add(music);
+    KV_CHECK(c, r.until([] { return g_finished == 1; }, 60.0));
+    u32 shown_wrong = 0, rounds = 0;
+    for (u32 k = 0; k < 40; ++k) {
+        // A wide one (every title has "Track"), then at once a narrow one in its place.
+        LibraryQuery wide; wide.id = 1; wide.view = LibraryView::Search; wide.sort = LibrarySort::Artist; wide.count = 512; wide.first = 3000;
+        format(wide.text, sizeof wide.text, "track");
+        r.say(wide);
+        r.step();
+        LibraryQuery narrow; narrow.id = 1; narrow.view = LibraryView::Search; narrow.count = 10;
+        format(narrow.text, sizeof narrow.text, "zq%u", 1000 + k);
+        u32 before = g_results;
+        r.say(narrow);
+        KV_CHECK(c, r.until([&] { return g_results > before && g_result[1].total == 1; }));
+        Array<LibraryRow> rows = r.rows(1);
+        char want[16];
+        format(want, sizeof want, "Zq%u", 1000 + k);
+        if (rows.len != 1 || !strstr(rows[0].title, want)) ++shown_wrong;
+        rows.free();
+        ++rounds;
+    }
+    KV_CHECK(c, shown_wrong == 0);
+    KV_INFO("test", "library cancel: %u rounds, %llu stopped in sqlite", rounds, (unsigned long long)r.scan().cancelled);
     r.stop();
     io_remove_tree(tmp);
 }

@@ -3,6 +3,7 @@
 // on the writer's thread; one reads, on the reader's. Neither is the main thread's.
 #pragma once
 #include "korvid/blackwing_library/library.h"
+#include "korvid/core/array.h"
 #include "korvid/core/types.h"
 
 struct sqlite3;
@@ -10,7 +11,21 @@ struct sqlite3_stmt;
 
 namespace kv::lib {
 
-constexpr u32 kSchema = 2; // a file with another version is deleted and made again
+constexpr u32 kSchema = 4; // a file with another version is deleted and made again
+
+// Sort keys and group identities (keys.cc).
+u32 sort_key(const char* s, char* out, u32 cap);
+u64 key_hash(const char* a, const char* b);
+struct GroupIn {
+    const char* title = ""; const char* artist = ""; const char* album = ""; const char* albumartist = ""; const char* genre = "";
+    const char* titlesort = ""; const char* artistsort = ""; const char* albumsort = ""; const char* albumartistsort = "";
+    u64 dir = 0;
+};
+struct GroupOut {
+    char sort_title[256], sort_artist[256], sort_album[256], sort_genre[128];
+    u64 artist_hash = 0, album_hash = 0, genre_hash = 0;
+};
+void group_keys(const GroupIn& in, GroupOut* out);
 
 // What the walk found of one directory, and of one file in it, as the writer takes them.
 struct DirRec {
@@ -70,6 +85,7 @@ struct Index {
         const char* title = ""; const char* artist = ""; const char* album = ""; const char* albumartist = "";
         const char* date = ""; const char* genre = ""; u32 trackno = 0, discno = 0;
         const char* shown = "";  // the path within its root as UTF-8, searched beside the merge
+        const char* titlesort = ""; const char* artistsort = ""; const char* albumsort = ""; const char* albumartistsort = "";
         u32 nvals = 0;
         const u8* fields = nullptr; const u8* sources = nullptr; const char* const* texts = nullptr;
     };
@@ -92,7 +108,24 @@ struct Index {
     // A window of a view: up to `count` rows from `first` into `out`, with query `id` and
     // their indexes set; the view's whole length in *total. Paths are joined to their
     // root's, which `root_path` says.
-    u32  window(const LibraryQuery& q, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user);
+    // `generation` is the index's as the reader knows it: what it has kept of a search or a
+    // grouping (the whole ordered list, so a window anywhere is a slice) lasts that long.
+    u32  window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user);
+    // The reader's: a query is stopped when this says so (checked as sqlite works).
+    void stop_when(int (*fn)(void*), void* user);
+
+    // The reader's keeping: a search's ordered ids, and a grouping's rows.
+    struct Kept {
+        u64 generation = ~0ull;
+        LibraryView view = LibraryView::Count;
+        LibrarySort sort = LibrarySort::Count;
+        u64 parent = 0;
+        char text[128] = "";
+        Array<u64> ids;          // a search's
+        Array<LibraryRow> groups; // a grouping's (name, counts, id)
+    };
+    Kept kept;
+    void free_kept() { kept.ids.free(); kept.groups.free(); kept = Kept{}; }
 
 private:
     bool exec(const char* sql);
@@ -102,7 +135,8 @@ private:
     sqlite3_stmt* st_dir_find = nullptr, *st_dir_put = nullptr, *st_dir_state = nullptr;
     sqlite3_stmt* st_track_find = nullptr, *st_track_put = nullptr, *st_track_seen = nullptr, *st_search_put = nullptr;
     sqlite3_stmt* st_count_t = nullptr, *st_count_d = nullptr, *st_count_all = nullptr, *st_count_unread = nullptr;
-    sqlite3_stmt* st_vals_del = nullptr, *st_vals_put = nullptr, *st_tags_put = nullptr, *st_search_del = nullptr;
+    sqlite3_stmt* st_vals_del = nullptr, *st_vals_put = nullptr, *st_tags_put = nullptr, *st_search_del = nullptr, *st_dir_of_track = nullptr;
+    sqlite3_stmt* st_row = nullptr; // the reader's: a track's row by id
 };
 
 // The FTS5 expression for words typed: each word a prefix, all of them wanted.
