@@ -448,3 +448,13 @@ cannot be known, a refused read and a seek back to the last frame returned. The 
 test files decode to their MD5 in four piece sizes and four orders of delivery, over
 address space committed only as pieces arrive; 3600 seeks and 160 on a real album land
 exact.
+
+**Milestone 2, reading in pieces** (Nov 23, 2026; BR4 to BR6, BR24). As planned, in 256 KB
+pieces under a 256 MB cap on bytes committed. `hifi` says what a decoder waits for with a
+`Want` event, and ends a source whose bytes will not come with `hifi_starve`. A piece
+`hifi` may be reading is given back behind a fence the render thread passes between
+steps. Beyond the plan: `hifi` opens the next source as soon as the current one has
+decoded, and holds the current one's last frames back while the next waits for its first
+bytes, so a late head does not break a gapless join. A cap smaller than a decoder's
+window (a few pieces) cannot be played under. The flash drive's numbers follow.
+

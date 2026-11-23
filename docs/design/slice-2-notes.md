@@ -69,3 +69,50 @@ the slowest 4 ms. These files have seek tables.
 - Without a seek table, a seek in a file that arrives in pieces waits once per probe of
   the binary search, and each wait starts the search again. Cheap in memory; on a cold
   file it is a read per probe, about ten for a large file.
+
+## Milestone 2, reading in pieces
+
+Nov 23, 2026. Linux laptop, `linux-dev`.
+
+**As planned**, with these particulars:
+
+- A piece is 256 KB (`PlayerConfig::piece_bytes`), and the cap 256 MB on bytes committed
+  (`memory_bytes`). Eight reads are out at once at most, so 2 MB in flight.
+- `hifi` gained the `Want` event, said once per range a decoder waits for, and
+  `hifi_starve`, which ends a source whose bytes will not come. A waiting decoder is
+  tried every 2 ms (no timed wait: KR10).
+- The player reads, in order: wanted pieces; the head of the item playing and the next;
+  then each on from where it is. The head is as much as `decoder_for` needs, which
+  `decoder_head_bytes` (new in `hifi_codec`) says from the first piece: 64 bytes, or past
+  a long ID3v2 tag.
+- The stat goes through the I/O queue (BR24).
+- `player.queue` rows gained `size` and `bytes_read`; `player.output` gained
+  `bytes_held`; `player status` prints it.
+
+**Giving a piece back safely.** A decoder may have seen a piece's byte set just before the
+player clears it, and still be copying it. The player clears the byte, takes a fence
+from `hifi` (a counter the render thread makes odd while it is in a step, where every
+decoder call is), and decommits only once the fence has passed. A piece of an item
+`hifi` no longer reads goes at once.
+
+**Where the build departed from the plan:**
+
+- `hifi` now opens the next source as soon as the current one has decoded its last
+  frame, not when its last frames are written, so the next file's wants are said a
+  lead's length ahead. And when the next source is still waiting for its first bytes as
+  the current one's last frames come due, it holds them back while the lead lasts, so
+  the join stays gapless. Without that, a next file whose head came late would end the
+  stream and start a new one.
+- The cap has to be larger than a decoder's window: FLAC's largest frame plus 8 KB
+  (about 20 KB for CD audio). A 16 KB cap with 4 KB pieces deadlocks, the wanted range
+  being larger than the cap. Real caps are thousands of times that.
+
+**Tests.** `hifi`: two sources whose 4 KB pieces are handed over only when wanted play
+exact and gapless; a source starved half way ends `Damaged`, exact up to there; one
+starved before it opened fails. The player: two 56 KB files under a 40 KB cap in 4 KB
+pieces, each starting before it is all read, exact and joined, never more than the cap
+held; a file truncated on the disk while it is read ends damaged, "cut short". All three
+modules clean under ThreadSanitizer, and under AddressSanitizer with UBSan.
+
+**Through PipeWire**, on the built-in disk with no load: the first sound 0.36 s after
+the player starts, and a skip heard 0.05 to 0.06 s after the command (two skips).

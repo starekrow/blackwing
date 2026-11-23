@@ -4,10 +4,10 @@
 //
 //   HifiConfig cfg;                                  // the default device, a five-second lead
 //   Hifi* h = hifi_create(cfg);
-//   hifi_add_source(h, {id, decoder_for(bytes), bytes});
+//   hifi_add_source(h, {id, decoder_for(head), file}); // file: a SparseSpan, filling in
 //   ... each tick:
 //   HifiEvent ev[16];
-//   u32 n = hifi_poll(h, ev, 16);                    // Started, Ended, Failed, Released, Underrun
+//   u32 n = hifi_poll(h, ev, 16);                    // Started, Ended, Failed, Released, Underrun, Want
 //   HifiStatus st; hifi_status(h, &st);              // where the playhead is, how deep the lead
 //   ...
 //   hifi_destroy(h);
@@ -21,6 +21,9 @@
 // Time is the device's. A source has Started when its first frame has been heard, by the
 // device's own account of its delay, and its position is counted from there; nothing
 // reports where the decoder is. modules/hifi/README.md has the whole model.
+//
+// hifi does no I/O. A source is a sparse span its caller fills; when a decoder needs bytes
+// that are not there yet, hifi says so with a Want, and looks again shortly.
 #pragma once
 #include "korvid/hifi_codec/decoder.h"
 #include "korvid/hifi_platform/device.h"
@@ -37,12 +40,13 @@ struct HifiConfig {
     f64 ramp_seconds  = 0.005; // the fade to and from silence on pause, resume, flush and underrun
 };
 
-// One thing to play: a decoder and the bytes it reads. `bytes` must stay where they are,
-// unchanged, until the source's Released event.
+// One thing to play: a decoder and the file it reads. The span's bytes and map must stay
+// where they are until the source's Released event. Pieces may arrive in it meanwhile; a
+// piece may be given back (its byte cleared) only through hifi_read_fence.
 struct HifiSource {
     u64                id      = 0; // the caller's name for it; comes back in events
     const DecoderDesc* decoder = nullptr;
-    Span<const u8>     bytes;
+    SparseSpan         file;
 };
 
 enum class HifiEventKind : u8 {
@@ -51,6 +55,7 @@ enum class HifiEventKind : u8 {
     Failed,   // it could not be played at all: `reason`. Never Started
     Released, // the path will not touch the source's bytes again. Once per source, whatever became of it
     Underrun, // the lead ran dry while more was expected: `frames` is how many times since the last poll
+    Want,     // the source's decoder is waiting for `need`, a range of its file. Said once per wait
     Count
 };
 
@@ -60,6 +65,7 @@ struct HifiEvent {
     DecoderInfo   info;
     DecodeStatus  status = DecodeStatus::End;
     u64           frames = 0;
+    ByteRange     need;
     char          reason[96] = "";
 };
 
@@ -97,6 +103,17 @@ void hifi_play(Hifi* h);
 // Drops every source and everything in the lead: what is playing ramps down and stops.
 // Sources flushed get Released and nothing else. What is added afterwards starts clean.
 void hifi_flush(Hifi* h);
+// The bytes source `id` waits for will not come (a read failed): when it next waits, its
+// decode ends there, Damaged with `reason`, or it Fails if it had not opened yet. What
+// was decoded before plays.
+void hifi_starve(Hifi* h, u64 id, const char* reason);
+
+// Giving a piece back. A decoder may have seen a piece's byte set just before it was
+// cleared, and still be reading it. Clear the byte, then take a fence; once
+// hifi_read_passed says the fence is passed, no decoder is still reading what it saw,
+// and the piece's memory can go.
+u64  hifi_read_fence(Hifi* h);
+bool hifi_read_passed(Hifi* h, u64 fence);
 
 // Events since the last poll, oldest first; returns how many were written. Started and
 // Ended arrive when the device's clock passes them, so poll as often as they should be

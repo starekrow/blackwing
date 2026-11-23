@@ -15,7 +15,9 @@
 #include "korvid/hifi_platform/capture.h"
 #include "korvid/platform/module.h"
 #include "../../hifi_codec/tests/md5.h"
+#include "korvid/platform/io.h"
 #include <initializer_list>
+#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -93,7 +95,7 @@ struct Rig {
     HifiCapture* cap = nullptr;
     bool         up  = false;
 
-    bool start(u32 delay = 0) {
+    bool start(u32 delay = 0, u32 piece = 256u << 10, usize memory = 256u << 20, f64 lead = 5.0) {
         g_nlog = 0;
         HifiCaptureDesc cd;
         cd.delay_frames = delay;
@@ -102,6 +104,9 @@ struct Rig {
         PlayerConfig pc;
         pc.device = "capture";
         pc.device_backend = cap;
+        pc.piece_bytes = piece;
+        pc.memory_bytes = memory;
+        pc.lead_seconds = lead;
         player_configure(pc);
         CliConfig cli; cli.no_stdin = true;
         cli_configure(cli);
@@ -155,6 +160,16 @@ struct Rig {
         for (;;) { step(); if (heard(kind, item)) return true; if (time_now() > until) return false; time_sleep(0.0005); }
     }
     u32 pull(u32 frames) { u32 n = hifi_capture_pull(cap, frames); step(); return n; }
+    // Paces a device against a small lead: pulls what is surely there, keeping back more
+    // than the callback's ramp (which would fade a lead about to run dry), and the rest
+    // only once the lead has stopped growing (the stream's end).
+    void pace(u32* still) {
+        time_sleep(0.0005);
+        step();
+        u32 lead = o().lead_frames;
+        if (lead > 1200) { pull(lead - 1000 > 1024 ? 1024 : lead - 1000); *still = 0; }
+        else if (++*still > 40) { pull(lead ? lead : 256); *still = 0; }
+    }
     // Pulls as a device would, not as fast as a loop can: a driven clock outruns any
     // decoder, and frames taken before the decoder has made the next ones are an underrun
     // no hardware would cause. A short sleep, then at most what is in the lead (or a
@@ -422,6 +437,67 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, !cli_run(r.e, "player add", collect, &out));       // no file: refused
         KV_CHECK(c, !cli_run(r.e, "player pause now", collect, &out)); // an argument it does not take
         r.stop();
+    }
+
+    // Files larger than the memory cap, in 4 KB pieces: each starts before it is all read,
+    // plays exact, and the next follows it in the same stream. Never more than the cap
+    // is held.
+    c.begin("player in pieces");
+    {
+        Rig r;
+        const usize cap = 40u << 10; // the file is 56 KB
+        KV_CHECK(c, r.start(0, 4096, cap, 0.05));
+        r.add(data(A)); r.add(data(A));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(2000));
+        u64 most = 0;
+        bool early = false, seen_s1 = false;
+        f64 until = time_now() + 5.0;
+        u32 still = 0;
+        while (!heard('Q', 0) && time_now() < until) {
+            r.pace(&still);
+            if (r.o().bytes_held > most) most = r.o().bytes_held;
+            if (!seen_s1 && heard('S', 1)) { seen_s1 = true; early = r.item(1).bytes_read < r.item(1).size && r.item(1).size == 56367; }
+        }
+        KV_CHECK(c, log_is("S1 E1 S2 E2 Q0"));
+        KV_CHECK(c, early && most <= cap && most > 0);
+        KV_CHECK(c, r.o().underruns == 0 && !ev('E', 1).damaged && !ev('E', 2).damaged);
+        HifiDeviceFormat f; u64 frames = 0;
+        const u8* d = r.seg_data(0, &f, &frames);
+        u64 z = 0; // the pacing pulls silence before the device starts: the music from its first frame
+        while (d && z < frames && all_zero(d + z * 4, 4)) ++z;
+        KV_CHECK(c, d && frames >= z + kN * 2 && md5_is(d + z * 4, kN, 2, data(A)) && md5_is(d + (z + kN) * 4, kN, 2, data(A)));
+        KV_CHECK(c, r.o().bytes_held == 0 && r.item(1).bytes_read == 0); // both done: nothing held
+        KV_INFO("test", "player in pieces: at most %llu bytes held, under a cap of %llu", (unsigned long long)most, (unsigned long long)cap);
+        r.stop();
+    }
+
+    // A file cut short on the disk while it is being read: what was read plays, and the
+    // item ends damaged, saying so.
+    c.begin("player cut while read");
+    {
+        char dir[512], path[600];
+        KV_CHECK(c, io_make_temp_dir("blackwing-cut", dir, sizeof dir));
+        format(path, sizeof path, "%s/cut.flac", dir);
+        IoBytes b;
+        KV_CHECK(c, io_read_now(data(A), &b) && io_write_now(path, b.data, b.size));
+        b.free();
+        Rig r;
+        KV_CHECK(c, r.start(0, 4096, 32u << 10, 0.05));
+        r.add(path);
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(1000));
+        KV_CHECK(c, r.item(1).bytes_read <= (32u << 10));
+        KV_CHECK(c, truncate(path, 36u << 10) == 0);
+        f64 until = time_now() + 5.0;
+        u32 still = 0;
+        while (!heard('Q', 0) && time_now() < until) r.pace(&still);
+        const Heard& e = ev('E', 1);
+        KV_CHECK(c, log_is("S1 E1 Q0"));
+        KV_CHECK(c, e.damaged && strstr(e.reason, "cut short") && e.frames > 4000 && e.frames < kN);
+        KV_CHECK(c, r.item(1).damaged && strstr(r.item(1).reason, "cut short"));
+        r.stop();
+        io_remove_tree(dir);
     }
 
     // Shut down in the middle of everything: reading, decoding, playing. Nothing hangs

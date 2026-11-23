@@ -2,21 +2,31 @@
 // arrived, moves each item along (waiting, reading, ready, in hifi's hands), turns what
 // hifi says into rows, events and the two resources, and that is all of it.
 //
-// What the player holds that hifi does not: the files' bytes. An item's bytes are read
-// whole through the engine's I/O queue when it is the item playing or the one after, lent
-// to hifi as a source, and kept until hifi has let go of them (Released) and the item is
-// done. An item flushed out of hifi (a stop, a next) keeps its bytes and can go back in.
+// What the player holds that hifi does not: the files' bytes. An item's file is a sparse
+// span: address space reserved at the file's size, committed a piece at a time as its
+// pieces are read through the engine's I/O queue. The span is lent to hifi as a source
+// once its first pieces are in, and the rest arrive while it plays. What is read, in
+// order: the pieces a decoder is waiting for (hifi's wants); the first pieces of the item
+// playing and the one after it; then each of those two on from where it is.
+//
+// The memory cap is on bytes committed, across every item. Past it, pieces are given
+// back: first those of items hifi no longer reads, then those of the item playing that
+// are behind the frame heard. A piece hifi may be reading is given back in two steps:
+// its byte in the map is cleared, and its memory goes once hifi's read fence has passed.
 //
 // Two things are true of an item in hifi's hands, and they end at different times. It is
-// lent: hifi may read its bytes, until Released, which comes as soon as it is decoded.
+// lent: hifi may read its span, until Released, which comes as soon as it is decoded.
 // It is in play: hifi is to play it, until it has Ended or Failed or was flushed, which
-// for a decoded item is seconds later.
+// for a decoded item is seconds later. An item flushed out of hifi (a stop, a next)
+// keeps what it has read, and can go back in.
 #include "korvid/blackwing_player/module.h"
+#include "korvid/core/atomic.h"
 #include "korvid/core/cli.h"
 #include "korvid/core/engine.h"
 #include "korvid/core/format.h"
 #include "korvid/core/log.h"
 #include "korvid/core/memory.h"
+#include "korvid/core/os_memory.h"
 #include "korvid/hifi/hifi.h"
 #include "korvid/hifi_codec/decoder.h"
 #include "korvid/platform/io.h"
@@ -27,22 +37,43 @@ namespace kv {
 
 namespace {
 
-constexpr u32 kMaxItems = 4096;
+constexpr u32 kMaxItems   = 4096;
+constexpr u32 kMaxReads   = 8;    // piece reads out at once, across every item
+constexpr u32 kMaxReturns = 4096; // pieces given back and waiting for hifi's fence
+constexpr u32 kKeepBehind = 4;    // pieces kept behind the frame heard's estimated place
+constexpr u32 kNone       = ~0u;
 
 constinit PlayerConfig g_config = {};
 constinit u32 g_queue_ktable = 0;
+
+// What the player knows of one piece of a file.
+enum class Piece : u8 { Absent, Reading, There, Returning, Broken };
 
 // The player's own record of an item, beside its row in the ktable.
 struct Item {
     u64    id      = 0;
     Handle row;
-    Handle read;              // the I/O request, while Reading
-    u8*    data    = nullptr; // the file, once read
-    usize  size    = 0;
-    bool   lent    = false;   // hifi may be reading its bytes: added, and not yet Released
+    Handle stat;              // the stat, while it is out
+    u64    size    = 0;
+    bool   sized   = false;   // the stat has said
+    // The file in pieces: the span hifi reads, and the player's own state of each piece.
+    u8*    base    = nullptr;
+    usize  reserved = 0;
+    u8*    have    = nullptr; // the span's map
+    Piece* piece   = nullptr;
+    u32    pieces  = 0;
+    u64    bytes_there = 0;   // committed and read
+    u64    head    = 0;       // bytes from the start decoder_for needs; 0 until the first piece has said
+    u32    front   = 0;       // where read-ahead looks next; nothing before it from the floor is Absent
+    u32    want_lo = kNone, want_hi = 0; // the pieces hifi last said a decoder waits for
+    char   broken[96] = "";   // why a piece could not be read
+    bool   lent    = false;   // hifi may be reading its span: added, and not yet Released
     bool   in_play = false;   // hifi is to play it: added, and neither ended, failed nor flushed
     PlayerItemState state = PlayerItemState::Waiting;
 };
+
+struct PieceRead { Handle request; u32 item = kNone; u32 piece = 0; }; // item kNone: let go of; free what comes
+struct Return    { u32 item = 0; u32 piece = 0; u64 fence = 0; };
 
 struct Player {
     Hifi*  hifi = nullptr;
@@ -53,6 +84,13 @@ struct Player {
     bool   paused    = false;
     bool   ended_said = true; // PlayerQueueEnded has been emitted for this run of the queue
     u32    seq = 0;           // the last notification's number
+    u32    shift = 18;        // a piece is 1 << shift bytes
+    u64    committed = 0;     // bytes of pieces committed, across every item: there, being read, or being given back
+    u64    returning = 0;     // of those, being given back: gone once hifi's fence has passed
+    PieceRead reads[kMaxReads];
+    u32    nreads = 0;
+    Return*   returns = nullptr; // kMaxReturns
+    u32    nreturns = 0;
     PlayerTransport transport;
     PlayerOutput    output;
 };
@@ -71,15 +109,111 @@ void set_state(KTable* queue, Item& it, PlayerItemState s, const char* reason = 
 // The I/O queue's data is the general allocator's, freed with the size it was read at.
 void free_bytes(void* data, usize size) { if (data) free_in(mem_general(), data, size ? size : 1); }
 
-void free_data(Item& it) {
-    free_bytes(it.data, it.size);
-    it.data = nullptr;
-    it.size = 0;
-}
-
 Item* find(Player& p, u64 id) { return id >= 1 && id <= p.count ? &p.items[id - 1] : nullptr; }
 
 bool finished(const Item& it) { return it.state == PlayerItemState::Done || it.state == PlayerItemState::Failed; }
+
+// ---- the file in pieces -----------------------------------------------------------------
+
+u64 piece_len(const Player& p, const Item& it, u32 i) {
+    u64 from = (u64)i << p.shift;
+    return it.size - from < ((u64)1 << p.shift) ? it.size - from : (u64)1 << p.shift;
+}
+usize piece_commit(const Player& p, const Item& it, u32 i) { return os_page_align((usize)piece_len(p, it, i)); }
+
+SparseSpan span_of(const Player& p, const Item& it) { return SparseSpan{it.base, it.size, p.shift, it.have}; }
+
+// Address space for the whole file, and the maps; nothing committed yet.
+bool make_span(Player& p, Item& it) {
+    it.pieces   = (u32)((it.size + ((u64)1 << p.shift) - 1) >> p.shift);
+    it.reserved = (usize)it.pieces << p.shift;
+    it.base     = (u8*)os_reserve(it.reserved);
+    if (!it.base) return false;
+    it.have  = (u8*)mem_alloc(it.pieces);
+    it.piece = (Piece*)mem_alloc(it.pieces * sizeof(Piece));
+    memset(it.have, 0, it.pieces);
+    for (u32 i = 0; i < it.pieces; ++i) it.piece[i] = Piece::Absent;
+    it.front = 0;
+    return true;
+}
+
+// Takes piece i's memory back, at once: nothing may be reading it.
+void decommit(Player& p, Item& it, u32 i) {
+    if (it.piece[i] == Piece::There) it.bytes_there -= piece_len(p, it, i);
+    os_decommit(it.base + ((usize)i << p.shift), piece_commit(p, it, i));
+    p.committed -= piece_commit(p, it, i);
+    atomic_store(&it.have[i], (u8)0, MO_RELEASE);
+    it.piece[i] = Piece::Absent;
+}
+
+// Gives piece i back. While the item is lent a decoder may be reading it: the byte is
+// cleared now, and the memory goes when hifi's fence has passed (take_returns).
+bool give_back(Player& p, Item& it, u32 i) {
+    if (it.piece[i] != Piece::There) return false;
+    if (!it.lent) { decommit(p, it, i); return true; }
+    if (p.nreturns == kMaxReturns) return false;
+    atomic_store(&it.have[i], (u8)0, MO_SEQ_CST);
+    it.piece[i] = Piece::Returning;
+    it.bytes_there -= piece_len(p, it, i);
+    p.returns[p.nreturns++] = Return{(u32)(&it - p.items), i, hifi_read_fence(p.hifi)};
+    p.returning += piece_commit(p, it, i);
+    return true;
+}
+
+void take_returns(Player& p) {
+    for (u32 k = 0; k < p.nreturns;) {
+        Return& r = p.returns[k];
+        if (!hifi_read_passed(p.hifi, r.fence)) { ++k; continue; }
+        Item& it = p.items[r.item];
+        if (it.base && it.piece[r.piece] == Piece::Returning) {
+            os_decommit(it.base + ((usize)r.piece << p.shift), piece_commit(p, it, r.piece));
+            p.committed -= piece_commit(p, it, r.piece);
+            p.returning -= piece_commit(p, it, r.piece);
+            it.piece[r.piece] = Piece::Absent;
+        }
+        p.returns[k] = p.returns[--p.nreturns];
+    }
+}
+
+// Cancels the item's reads that are out. Their completions are freed when they come.
+void cancel_reads(Player& p, IoQueue* io, Item& it) {
+    u32 idx = (u32)(&it - p.items);
+    for (u32 k = 0; k < p.nreads; ++k) {
+        PieceRead& r = p.reads[k];
+        if (r.item != idx) continue;
+        if (io) io->cancel(r.request);
+        if (it.base && it.piece[r.piece] == Piece::Reading) {
+            it.piece[r.piece] = Piece::Absent;
+            p.committed -= piece_commit(p, it, r.piece);
+            os_decommit(it.base + ((usize)r.piece << p.shift), piece_commit(p, it, r.piece));
+            if (r.piece < it.front) it.front = r.piece;
+        }
+        r.item = kNone;
+    }
+}
+
+// Everything the item holds goes: its reads, its pieces, its address space. Only when
+// hifi does not have it.
+void drop_span(Player& p, IoQueue* io, Item& it) {
+    if (it.lent) return;
+    cancel_reads(p, io, it);
+    if (!it.base) return;
+    for (u32 i = 0; i < it.pieces; ++i)
+        if (it.piece[i] == Piece::There || it.piece[i] == Piece::Returning) {
+            if (it.piece[i] == Piece::There) it.bytes_there -= piece_len(p, it, i);
+            else p.returning -= piece_commit(p, it, i);
+            p.committed -= piece_commit(p, it, i);
+            it.piece[i] = Piece::Absent;
+        }
+    for (u32 k = 0; k < p.nreturns;)  // not lent: nobody reads it, and its returns are moot
+        if (p.items + p.returns[k].item == &it) p.returns[k] = p.returns[--p.nreturns]; else ++k;
+    os_release(it.base, it.reserved);
+    mem_free(it.have);
+    mem_free(it.piece);
+    it.base = nullptr; it.have = nullptr; it.piece = nullptr;
+    it.reserved = 0; it.pieces = 0; it.bytes_there = 0; it.head = 0;
+    it.want_lo = kNone;
+}
 
 void fail(TickContext& ctx, Player& p, KTable* queue, Item& it, const char* reason) {
     set_state(queue, it, PlayerItemState::Failed, reason);
@@ -89,15 +223,16 @@ void fail(TickContext& ctx, Player& p, KTable* queue, Item& it, const char* reas
     format(e.reason, sizeof e.reason, "%s", reason);
     ctx.emit(e);
     it.in_play = false;
-    if (!it.lent) free_data(it);
+    drop_span(p, platform_io(*ctx.engine), it);
 }
 
 // Everything out of hifi, and the playhead held nowhere: after a stop or a next. What
-// was in play and is not finished is ready again, with its bytes.
+// was in play and is not finished is ready again, with what it has read.
 void flush(Player& p, KTable* queue) {
     hifi_flush(p.hifi);
     for (u32 k = p.cursor; k < p.count; ++k) {
         Item& it = p.items[k];
+        it.want_lo = kNone;
         if (!it.in_play) continue;
         it.in_play = false;
         if (!finished(it)) set_state(queue, it, PlayerItemState::Ready);
@@ -133,13 +268,14 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         if (p.cursor < p.count) {
             Item& it = p.items[p.cursor];
             set_state(queue, it, PlayerItemState::Done); // skipped: done, with nothing said of how it ended
-            // A read still out for it is cancelled. Left to run, it would hold the disk
-            // while the next item's read waited behind it: on slow media, each skip added
-            // a read, and none finished. Its completion is freed when it comes (from_io).
-            if (!it.read.is_null())
-                if (IoQueue* io = platform_io(*ctx.engine)) io->cancel(it.read);
+            // Its reads still out are cancelled. Left to run, they would hold the disk
+            // while the next item's waited behind them: on slow media, each skip added
+            // reads, and none finished.
+            IoQueue* io = platform_io(*ctx.engine);
+            if (!it.stat.is_null() && io) io->cancel(it.stat);
+            cancel_reads(p, io, it);
             it.in_play = false;
-            if (!it.lent) free_data(it);
+            drop_span(p, io, it);
             flush(p, queue);
         }
     }
@@ -158,6 +294,7 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
 // What hifi has to say, as rows and events.
 void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
     HifiEvent ev[32];
+    IoQueue* io = platform_io(*ctx.engine);
     for (;;) {
         u32 n = hifi_poll(p.hifi, ev, 32);
         for (u32 i = 0; i < n; ++i) {
@@ -179,7 +316,7 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
                 set_state(queue, *it, PlayerItemState::Done, damaged ? e.reason : nullptr);
                 row_of(queue, *it).damaged = damaged;
                 it->in_play = false;
-                if (!it->lent) free_data(*it);
+                drop_span(p, io, *it);
                 PlayerTrackEnded x{};
                 x.item = it->id; x.frames = e.frames; x.damaged = damaged; x.seq = ++p.seq;
                 format(x.reason, sizeof x.reason, "%s", damaged ? e.reason : "");
@@ -190,8 +327,17 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
                 break;
             case HifiEventKind::Released:
                 it->lent = false;
-                if (finished(*it)) free_data(*it);
+                it->want_lo = kNone;
+                if (finished(*it)) drop_span(p, io, *it);
                 break;
+            case HifiEventKind::Want: {
+                if (!it->lent || !it->base || e.need.len == 0) break;
+                u64 last = e.need.at + e.need.len - 1;
+                it->want_lo = (u32)(e.need.at >> p.shift);
+                it->want_hi = (u32)((last < it->size ? last : it->size - 1) >> p.shift);
+                for (u32 k = it->want_lo; k <= it->want_hi && k < it->pieces; ++k)
+                    if (it->piece[k] == Piece::Broken) { hifi_starve(p.hifi, it->id, it->broken); break; }
+            } break;
             default: break;
             }
         }
@@ -199,71 +345,221 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
     }
 }
 
-// Reads that have landed.
+// Stats and piece reads that have landed.
 void from_io(TickContext& ctx, Player& p, KTable* queue) {
     IoQueue* io = platform_io(*ctx.engine);
     if (!io) return;
+    // Stats.
     for (u32 k = 0; k < p.count; ++k) {
         Item& it = p.items[k];
-        if (it.read.is_null()) continue;
+        if (it.stat.is_null()) continue;
         for (const IoCompletion& c : io->completions()) {
-            if (c.request != it.read) continue;
+            if (c.request != it.stat) continue;
             IoCompletion done = c;
-            io->reap(it.read);
-            it.read = Handle{};
-            if (finished(it)) { free_bytes(done.data, done.size); break; } // skipped while it was being read
+            io->reap(it.stat);
+            it.stat = Handle{};
+            if (finished(it)) break;
             if (done.status != IoStatus::Done) {
-                free_bytes(done.data, done.size);
                 char why[96];
-                format(why, sizeof why, "the file could not be read: %s", done.error ? strerror(done.error) : "the read was cancelled");
+                format(why, sizeof why, "the file could not be looked at: %s", done.error ? strerror(done.error) : "the stat was cancelled");
                 fail(ctx, p, queue, it, why);
-                break;
+            } else if (!done.stat.is_file) {
+                fail(ctx, p, queue, it, "there is no such file");
+            } else if (done.stat.size == 0) {
+                fail(ctx, p, queue, it, "not a kind of audio file this build plays");
+            } else {
+                it.size = done.stat.size;
+                it.sized = true;
+                row_of(queue, it).size = it.size;
+                if (!make_span(p, it)) fail(ctx, p, queue, it, "there is no address space for the file");
             }
-            it.data = (u8*)done.data;
-            it.size = done.size;
-            if (!decoder_for(Span<const u8>(it.data, (u32)it.size))) fail(ctx, p, queue, it, "not a kind of audio file this build plays");
-            else set_state(queue, it, PlayerItemState::Ready);
             break;
+        }
+    }
+    // Pieces.
+    for (u32 k = 0; k < p.nreads;) {
+        PieceRead r = p.reads[k];
+        const IoCompletion* got = nullptr;
+        for (const IoCompletion& c : io->completions()) if (c.request == r.request) { got = &c; break; }
+        if (!got) { ++k; continue; }
+        IoCompletion done = *got;
+        io->reap(r.request);
+        p.reads[k] = p.reads[--p.nreads];
+        if (r.item == kNone) { free_bytes(done.data, done.size); continue; } // let go of meanwhile
+        Item& it = p.items[r.item];
+        if (!it.base || it.piece[r.piece] != Piece::Reading) { free_bytes(done.data, done.size); continue; }
+        u64 len = piece_len(p, it, r.piece);
+        if (done.status == IoStatus::Done && done.size == len) {
+            memcpy(it.base + ((usize)r.piece << p.shift), done.data, (usize)len);
+            atomic_store(&it.have[r.piece], (u8)1, MO_RELEASE);
+            it.piece[r.piece] = Piece::There;
+            it.bytes_there += len;
+        } else if (done.status == IoStatus::Cancelled) {
+            it.piece[r.piece] = Piece::Absent;
+            p.committed -= piece_commit(p, it, r.piece);
+            os_decommit(it.base + ((usize)r.piece << p.shift), piece_commit(p, it, r.piece));
+            if (r.piece < it.front) it.front = r.piece;
+        } else {
+            // A piece that will not come: the source ends where it is needed (from_hifi's
+            // Want), or, before it was lent, the item fails.
+            it.piece[r.piece] = Piece::Broken;
+            p.committed -= piece_commit(p, it, r.piece);
+            os_decommit(it.base + ((usize)r.piece << p.shift), piece_commit(p, it, r.piece));
+            if (done.status == IoStatus::Done) format(it.broken, sizeof it.broken, "the file was cut short while it was read");
+            else format(it.broken, sizeof it.broken, "the file could not be read: %s", done.error ? strerror(done.error) : "unknown error");
+            if (it.lent && it.want_lo != kNone && r.piece >= it.want_lo && r.piece <= it.want_hi) hifi_starve(p.hifi, it.id, it.broken);
+            if (!it.lent && !it.in_play && !finished(it)) fail(ctx, p, queue, it, it.broken);
+        }
+        free_bytes(done.data, done.size);
+    }
+}
+
+// The piece below which the item playing has been heard, less a margin: what is behind
+// it may be given back. Estimated by the file's length in frames, so it is kept loose.
+u32 heard_floor(const Player& p, const Item& it, KTable* queue) {
+    if (p.transport.item != it.id) return 0;
+    u64 frames = row_of(queue, it).frames;
+    if (!frames || !it.pieces) return 0;
+    u64 at = (u64)((f64)it.size * ((f64)p.transport.position / (f64)frames));
+    u32 piece = (u32)(at >> p.shift);
+    return piece > kKeepBehind ? piece - kKeepBehind : 0;
+}
+
+// Makes room for one more piece under the cap. `urgent`: a decoder waits for it, and
+// pieces read ahead may go too, the farthest first. What is being given back counts as
+// gone when choosing what else must go, and as there until hifi's fence has passed, so
+// the room may come only on a later tick. False until it has.
+bool make_room(Player& p, KTable* queue, u64 need, bool urgent) {
+    const u64 cap = g_config.memory_bytes;
+    auto over = [&] { return p.committed - p.returning + need > cap; };
+    if (!over()) return p.committed + need <= cap;
+    // Items hifi does not read, the last first.
+    for (u32 k = p.count; k-- > 0 && over();) {
+        Item& it = p.items[k];
+        if (it.lent || !it.base) continue;
+        for (u32 i = it.pieces; i-- > 0 && over();) give_back(p, it, i);
+    }
+    // The item playing, behind the frame heard.
+    for (u32 k = p.cursor; k < p.count && over(); ++k) {
+        Item& it = p.items[k];
+        if (!it.lent || !it.base) continue;
+        u32 floor = heard_floor(p, it, queue);
+        for (u32 i = 0; i < floor && over(); ++i) give_back(p, it, i);
+    }
+    if (over() && urgent) {
+        // Read ahead, the farthest first, but never what is wanted.
+        for (u32 k = p.count; k-- > p.cursor && over();) {
+            Item& it = p.items[k];
+            if (!it.lent || !it.base) continue;
+            for (u32 i = it.pieces; i-- > 0 && over();) {
+                if (it.want_lo != kNone && i >= it.want_lo && i <= it.want_hi) continue;
+                if (give_back(p, it, i) && i < it.front) it.front = i;
+            }
+        }
+    }
+    return p.committed + need <= cap;
+}
+
+// Starts a read of piece i of the item.
+bool start_read(Player& p, IoQueue* io, KTable* queue, Item& it, u32 i, IoPriority prio, bool urgent) {
+    if (p.nreads == kMaxReads) return false;
+    usize commit = piece_commit(p, it, i);
+    if (!make_room(p, queue, commit, urgent)) return false;
+    if (!os_commit(it.base + ((usize)i << p.shift), commit)) return false;
+    IoRequest rq;
+    rq.path = row_of(queue, it).path;
+    rq.priority = prio;
+    rq.offset = (u64)i << p.shift;
+    rq.length = (usize)piece_len(p, it, i);
+    Handle h = io->read_file(rq);
+    if (h.is_null()) { os_decommit(it.base + ((usize)i << p.shift), commit); return false; }
+    p.committed += commit;
+    it.piece[i] = Piece::Reading;
+    p.reads[p.nreads++] = PieceRead{h, (u32)(&it - p.items), i};
+    return true;
+}
+
+// The next piece of `it` to read, from `from` on; kNone when there is none.
+u32 next_absent(const Item& it, u32 from) {
+    for (u32 i = from; i < it.pieces; ++i) if (it.piece[i] == Piece::Absent) return i;
+    return kNone;
+}
+
+// Starts what reads there is room for, in order: what decoders wait for; the first pieces
+// of the two items ahead; then each of them on from where it is.
+void schedule_reads(Player& p, IoQueue* io, KTable* queue, Item** ahead, u32 nahead) {
+    for (u32 a = 0; a < nahead; ++a) {
+        Item& it = *ahead[a];
+        if (!it.base || it.want_lo == kNone) continue;
+        for (u32 i = it.want_lo; i <= it.want_hi && i < it.pieces; ++i)
+            if (it.piece[i] == Piece::Absent && !start_read(p, io, queue, it, i, IoPriority::High, true)) return;
+    }
+    for (u32 a = 0; a < nahead; ++a) {
+        Item& it = *ahead[a];
+        if (!it.base) continue;
+        u64 head = it.head ? it.head : 1;
+        u32 last = (u32)((head - 1) >> p.shift);
+        for (u32 i = 0; i <= last && i < it.pieces; ++i)
+            if (it.piece[i] == Piece::Absent && !start_read(p, io, queue, it, i, IoPriority::High, true)) return;
+    }
+    for (u32 a = 0; a < nahead; ++a) {
+        Item& it = *ahead[a];
+        if (!it.base || !it.lent) continue; // read ahead only of what hifi has
+        u32 floor = heard_floor(p, it, queue);
+        if (it.front < floor) it.front = floor;
+        for (;;) {
+            u32 i = next_absent(it, it.front);
+            if (i == kNone) { it.front = it.pieces; break; }
+            it.front = i;
+            if (!start_read(p, io, queue, it, i, IoPriority::Normal, false)) return;
         }
     }
 }
 
-// Moves the cursor past what is finished, starts reads for the item playing and the one
-// after it, and lends hifi each ready item in order.
+// Moves the cursor past what is finished, looks at the item playing and the one after
+// it and reads their pieces, and lends hifi each ready item in order.
 void advance(TickContext& ctx, Player& p, KTable* queue) {
     while (p.cursor < p.count && finished(p.items[p.cursor])) ++p.cursor;
     if (!p.want_play) return;
     IoQueue* io = platform_io(*ctx.engine);
-    u32 ahead = 0;
+    Item* ahead[2];
+    u32 nahead = 0;
     bool gap = false; // an item before this one is not in hifi yet: later ones must wait their turn
-    for (u32 k = p.cursor; k < p.count && ahead < 2; ++k) {
+    for (u32 k = p.cursor; k < p.count && nahead < 2; ++k) {
         Item& it = p.items[k];
         if (finished(it)) continue;
-        ++ahead;
-        if (it.state == PlayerItemState::Waiting && it.read.is_null() && !it.data) {
-            const char* path = row_of(queue, it).path;
-            IoStat st;
-            if (!io)                                 { fail(ctx, p, queue, it, "there is no I/O queue to read with"); --ahead; continue; }
-            if (!io_stat(path, &st) || !st.is_file)  { fail(ctx, p, queue, it, "there is no such file"); --ahead; continue; }
-            if (st.size > g_config.read_ahead_bytes) { fail(ctx, p, queue, it, "the file is larger than the read-ahead cap"); --ahead; continue; }
-            if (st.size >= 0xFFFFFFFFull)            { fail(ctx, p, queue, it, "the file is too large to hold in memory"); --ahead; continue; }
+        if (it.state == PlayerItemState::Waiting && it.stat.is_null() && !it.sized) {
+            if (!io) { fail(ctx, p, queue, it, "there is no I/O queue to read with"); continue; }
             IoRequest rq;
-            rq.path = path;
+            rq.path = row_of(queue, it).path;
             rq.priority = IoPriority::High;
-            it.read = io->read_file(rq);
-            if (it.read.is_null()) { fail(ctx, p, queue, it, "the I/O queue is full"); --ahead; continue; }
+            it.stat = io->stat_file(rq);
+            if (it.stat.is_null()) { fail(ctx, p, queue, it, "the I/O queue is full"); continue; }
             set_state(queue, it, PlayerItemState::Reading);
         }
+        if (it.state == PlayerItemState::Reading && it.base && it.piece[0] == Piece::There) {
+            // The head: as much as decoder_for needs to say, which the first piece tells.
+            if (!it.head) it.head = decoder_head_bytes(Span<const u8>(it.base, (u32)piece_len(p, it, 0)), it.size);
+            if (sparse_has(span_of(p, it), 0, it.head)) {
+                if (it.head > 0xFFFFFFFFull || !decoder_for(Span<const u8>(it.base, (u32)it.head))) {
+                    fail(ctx, p, queue, it, "not a kind of audio file this build plays");
+                    continue;
+                }
+                set_state(queue, it, PlayerItemState::Ready);
+            }
+        }
+        ahead[nahead++] = &it;
         if (it.state == PlayerItemState::Ready && !it.in_play && !it.lent && !gap) {
             HifiSource s;
             s.id = it.id;
-            s.bytes = Span<const u8>(it.data, (u32)it.size);
-            s.decoder = decoder_for(s.bytes);
+            s.file = span_of(p, it);
+            s.decoder = decoder_for(Span<const u8>(it.base, (u32)it.head));
             hifi_add_source(p.hifi, s);
             it.lent = it.in_play = true;
         }
         if (!it.in_play) gap = true;
     }
+    if (io) schedule_reads(p, io, queue, ahead, nahead);
 }
 
 void publish(TickContext& ctx, Player& p, KTable* queue) {
@@ -280,6 +576,7 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     u32 left = 0;
     bool busy = false; // anything of ours still in hifi's hands
     for (u32 k = 0; k < p.count; ++k) { left += !finished(p.items[k]); busy = busy || p.items[k].lent || p.items[k].in_play; }
+    for (u32 k = p.cursor; k < p.count; ++k) row_of(queue, p.items[k]).bytes_read = p.items[k].bytes_there;
     t.left = left;
 
     // The queue has run out when nothing is left to play and the last of it has been heard.
@@ -293,6 +590,7 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     o.open = s.device_open; o.shared = s.shared; o.exact = s.exact;
     o.sample = (u8)s.format.sample; o.channels = s.format.channels; o.rate = s.format.rate;
     o.lead_frames = s.lead_frames; o.underruns = s.underruns;
+    o.bytes_held = p.committed;
 }
 
 // Phase PreSim, main thread, every tick, paused or not.
@@ -302,6 +600,7 @@ void player_pump(TickContext& ctx) {
     commands(ctx, p, queue);
     from_io(ctx, p, queue);
     from_hifi(ctx, p, queue);
+    take_returns(p);
     advance(ctx, p, queue);
     publish(ctx, p, queue);
 }
@@ -310,6 +609,14 @@ bool player_startup(Engine& e, ModuleInstance& self) {
     Player* p = arena_push<Player>(self.arena);
     self.set_state(p);
     p->items = (Item*)mem_alloc(sizeof(Item) * kMaxItems);
+    p->returns = (Return*)mem_alloc(sizeof(Return) * kMaxReturns);
+    u32 piece = g_config.piece_bytes;
+    if (piece < os_page_size() || (piece & (piece - 1))) {
+        KV_ERROR("player", "a piece of %u bytes is not a power of two of a page or more", piece);
+        return false;
+    }
+    p->shift = 0;
+    while ((1u << p->shift) < piece) ++p->shift;
     HifiConfig hc;
     hc.device = g_config.device ? g_config.device : "default";
     hc.device_backend = g_config.device_backend;
@@ -323,20 +630,28 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
     (void)self;
     Player* p = state(e);
     if (!p) return;
-    hifi_destroy(p->hifi); // first: after this nobody reads the items' bytes
+    hifi_destroy(p->hifi); // first: after this nobody reads the items' spans
     p->hifi = nullptr;
     IoQueue* io = platform_io(e);
     for (u32 k = 0; k < p->count; ++k) {
         Item& it = p->items[k];
-        if (!it.read.is_null() && io) {
-            // A read still out: cancel it, and take its bytes if it landed anyway.
-            io->cancel(it.read);
-            for (const IoCompletion& c : io->completions())
-                if (c.request == it.read) { free_bytes(c.data, c.size); io->reap(it.read); break; }
+        if (!it.stat.is_null() && io) {
+            io->cancel(it.stat);
+            for (const IoCompletion& c : io->completions()) if (c.request == it.stat) { io->reap(it.stat); break; }
         }
-        free_data(it);
+        it.lent = false;
+        drop_span(*p, io, it);
     }
+    // Reads still out: cancelled above; take their bytes if they landed anyway.
+    for (u32 k = 0; k < p->nreads; ++k) {
+        if (!io) break;
+        io->cancel(p->reads[k].request);
+        for (const IoCompletion& c : io->completions())
+            if (c.request == p->reads[k].request) { free_bytes(c.data, c.size); io->reap(p->reads[k].request); break; }
+    }
+    p->nreads = 0;
     mem_free(p->items);
+    mem_free(p->returns);
     p->items = nullptr;
 }
 
@@ -371,6 +686,7 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
                           hifi_sample_format_name((HifiSampleFormat)o.sample), o.shared ? "shared" : "unshared", o.exact ? ", exact" : "",
                           o.rate ? (f64)o.lead_frames / o.rate : 0.0, o.underruns);
     else        ctx.print("device: none open");
+    ctx.print("files: %.1f MB held of %.1f", (f64)o.bytes_held / (1 << 20), (f64)g_config.memory_bytes / (1 << 20));
     KTable* queue = engine_ktable(*ctx.engine, g_queue_ktable);
     if (!queue) return;
     for (u32 k = 0; k < p->count; ++k) {
@@ -389,7 +705,7 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "player status", .help = "the transport, the device and the queue", .fn = cmd_status},
 };
 
-constinit const FieldDesc k_item_fields[] = {KV_FIELDS(PlayerItem, id, state, damaged, channels, bits, rate, frames, path, reason)};
+constinit const FieldDesc k_item_fields[] = {KV_FIELDS(PlayerItem, id, state, damaged, channels, bits, rate, frames, size, bytes_read, path, reason)};
 constinit const ComponentDesc k_components[] = {KV_COMPONENT(PlayerItem, k_item_fields, CompCosmetic)};
 constinit const KTableDesc k_ktables[] = {
     {.name = ".queue", .components = "PlayerItem", .capacity = kMaxItems, .id = &g_queue_ktable, .cosmetic = true},

@@ -19,7 +19,9 @@
 # its own beside the music (MUSIC_DIR/.blackwing-stress), removed at the end.
 #
 # Needs the built player (build/linux-dev/bin/blackwing), script(1), dd, python3, and
-# iostat (sysstat) for the disk's utilisation. Prints the player's lines and a summary.
+# iostat (sysstat) for the disk's utilisation. Prints the player's lines, each stamped
+# with the seconds since the player started, and a summary: when the first sound came,
+# and with --next, how long each skip took to be heard.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -122,7 +124,10 @@ feed() {
   while [ "$t" -lt "$seconds" ]; do
     local step=$(( next > 0 && next < seconds - t ? next : seconds - t ))
     sleep "$step"; t=$((t + step))
-    if [ "$t" -lt "$seconds" ]; then echo "player next"; fi
+    if [ "$t" -lt "$seconds" ]; then
+      echo "player next"
+      awk -v a="$start" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f\n", b - a }' >> "$out/nexts"
+    fi
   done
   echo "player status"
   sleep 0.5
@@ -131,7 +136,10 @@ feed() {
 cmd="/usr/bin/time -f 'stress-play: player cpu %U s user %S s sys, %M KB max resident' $(printf '%q' "$player") play"
 for f in "${files[@]}"; do cmd+=" $(printf '%q' "$f")"; done
 start=$(date +%s.%N)
-feed | script -q -c "$cmd" /dev/null 2>&1 | tr -d '\r' | grep -v -E '^(player (next|status)|quit)$' | tee "$out/player"
+stamp() { python3 -I -u -c 'import sys, time
+t0 = float(sys.argv[1])
+for line in sys.stdin: sys.stdout.write("%7.2f %s" % (time.time() - t0, line))' "$start"; }
+feed | script -q -c "$cmd" /dev/null 2>&1 | tr -d '\r' | grep --line-buffered -v -E '^(player (next|status)|quit)$' | stamp | tee "$out/player"
 end=$(date +%s.%N)
 
 for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
@@ -139,9 +147,19 @@ wait 2>/dev/null || true
 pids=()
 
 underruns="$(grep -oE '[0-9]+ underruns' "$out/player" | tail -1 | grep -oE '^[0-9]+' || echo "?")"
-played="$(grep -c '^playing ' "$out/player" || true)"
-failed="$(grep -c '^cannot play ' "$out/player" || true)"
+played="$(grep -cE '^ *[0-9.]+ playing ' "$out/player" || true)"
+failed="$(grep -cE '^ *[0-9.]+ cannot play ' "$out/player" || true)"
 echo "stress-play: $(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.0f", b - a }') s; $played files started, $failed failed; underruns: $underruns"
+first="$(grep -E '^ *[0-9.]+ playing ' "$out/player" | head -1 | awk '{ print $1 }')"
+echo "stress-play: the first sound at ${first:-never} s"
+if [ -s "$out/nexts" ]; then
+  # Each skip, and the first track started after it (before the next skip): how long it took to be heard.
+  grep -E '^ *[0-9.]+ playing ' "$out/player" | awk '{ print $1 }' > "$out/starts"
+  awk 'NR == FNR { s[++n] = $1; next } { t[++m] = $1 }
+       END { for (i = 1; i <= m; ++i) { lim = i < m ? t[i + 1] : 1e9; got = ""; for (j = 1; j <= n; ++j) if (s[j] > t[i] && s[j] <= lim) { got = s[j] - t[i]; break }
+               if (got == "") { printf "stress-play: skip at %.1f s: nothing heard before the next\n", t[i]; miss++ } else { printf "stress-play: skip at %.1f s: heard %.2f s later\n", t[i], got; if (got > worst) worst = got; sum += got; k++ } }
+             if (k) printf "stress-play: %d skips heard, %d not; %.2f s on average, the slowest %.2f s\n", k, miss, sum / k, worst }' "$out/starts" "$out/nexts"
+fi
 if [ $load = 1 ]; then
   r=0; w=0
   for f in "$out"/read.*; do [ -f "$f" ] && r=$((r + $(cat "$f"))); done

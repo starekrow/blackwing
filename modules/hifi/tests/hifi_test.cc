@@ -177,7 +177,7 @@ void test_hifi_exact(TestCtx& c) {
     for (const Good& g : kGood) {
         File f = read_data(g.name);
         Rig r; r.make();
-        hifi_add_source(r.h, {1, &k_flac_decoder, f.bytes()});
+        hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(f.bytes())});
         KV_CHECK(c, r.wait_written(g.frames));
         const u32 sizes[] = {1, 7, 480, 512, 1024, 333, 4096, 2, 9000};
         u64 pulled = 0;
@@ -211,8 +211,8 @@ void test_hifi_join(TestCtx& c) {
     Pcm a = decode(fa);
     // B is A's bytes with a different id: the join is checked by position, and by content against A twice.
     Rig r; r.make();
-    hifi_add_source(r.h, {1, &k_flac_decoder, fa.bytes()});
-    hifi_add_source(r.h, {2, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, r.wait_written(a.frames * 2));
     u64 pulled = 0;
     while (pulled < a.frames * 2 + 1000) pulled += r.pull(777);
@@ -230,10 +230,10 @@ void test_hifi_join(TestCtx& c) {
 
     // The second added only after the first is wholly decoded and partly played: still one stream.
     Rig q; q.make();
-    hifi_add_source(q.h, {1, &k_flac_decoder, fa.bytes()});
+    hifi_add_source(q.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
     KV_CHECK(c, q.wait_written(a.frames));
     q.pull(10000);
-    hifi_add_source(q.h, {2, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(q.h, {2, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, q.wait_written(a.frames * 2));
     pulled = 10000;
     while (pulled < a.frames * 2 + 500) pulled += q.pull(1024);
@@ -252,8 +252,8 @@ void test_hifi_clock(TestCtx& c) {
     File fa = read_data("tone_16_2ch_44100.flac"), fb = read_data("tone_16_2ch_44100.flac");
     const u64 n = 22050, delay = 1000;
     Rig r; r.make((u32)delay);
-    hifi_add_source(r.h, {1, &k_flac_decoder, fa.bytes()});
-    hifi_add_source(r.h, {2, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, r.wait_written(n * 2));
     r.poll();
     KV_CHECK(c, !r.has(HifiEventKind::Started, 1)); // decoded, queued, in the lead: not heard
@@ -292,9 +292,9 @@ void test_hifi_format_change(TestCtx& c) {
     File fa = read_data("tone_16_2ch_44100.flac"), fb = read_data("tone_24_2ch_96000.flac"), fc = read_data("tone_16_2ch_44100.flac");
     Pcm a = decode(fa), b = decode(fb);
     Rig r; r.make(256);
-    hifi_add_source(r.h, {1, &k_flac_decoder, fa.bytes()});
-    hifi_add_source(r.h, {2, &k_flac_decoder, fb.bytes()});
-    hifi_add_source(r.h, {3, &k_flac_decoder, fc.bytes()});
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fb.bytes())});
+    hifi_add_source(r.h, {3, &k_flac_decoder, sparse_whole(fc.bytes())});
     // A driven clock can take frames far faster than any decoder makes them, which no
     // device does. So each stretch is pulled only once it is in the lead: wait for the
     // source to be written, pull until it has ended, then pull silence (the device
@@ -354,7 +354,7 @@ void test_hifi_pause(TestCtx& c) {
     Pcm a = decode(fa);
     const u32 ramp = 220; // 5 ms at 44.1 kHz
     Rig r; r.make();
-    hifi_add_source(r.h, {1, &k_flac_decoder, fa.bytes()});
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
     KV_CHECK(c, r.wait_written(a.frames));
     r.pull(4000);
     hifi_pause(r.h);
@@ -374,7 +374,7 @@ void test_hifi_pause(TestCtx& c) {
     KV_CHECK(c, r.wait_held(true) && hifi_capture_holds(r.cap) == 2);
     // Something to play lets it go.
     File fb = read_data("tone_16_2ch_44100.flac");
-    hifi_add_source(r.h, {2, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, r.wait_held(false) && !hifi_capture_held(r.cap));
     KV_CHECK(c, r.wait_written(a.frames + 1000));
 
@@ -407,13 +407,13 @@ void test_hifi_flush(TestCtx& c) {
     Pcm a = decode(fa);
     const u32 ramp = 220;
     Rig r; r.make();
-    hifi_add_source(r.h, {1, &k_flac_decoder, fa.bytes()});
-    hifi_add_source(r.h, {2, &k_flac_decoder, fq.bytes()});   // queued behind it: never heard
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(fq.bytes())});   // queued behind it: never heard
     KV_CHECK(c, r.wait_written(a.frames * 2));
     r.pull(6000);
     KV_CHECK(c, r.status().source == 1);
     hifi_flush(r.h);
-    hifi_add_source(r.h, {3, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(r.h, {3, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, r.wait_flushed() && r.wait_event(HifiEventKind::Released, 2) && r.has(HifiEventKind::Released, 1));
     KV_CHECK(c, r.wait_written(a.frames * 3));
     KV_CHECK(c, r.status().source == 0);
@@ -439,7 +439,7 @@ void test_hifi_flush(TestCtx& c) {
 
     // A flush with nothing after it: silence, and no underrun counted for the cut.
     Rig q; q.make();
-    hifi_add_source(q.h, {1, &k_flac_decoder, fa.bytes()});
+    hifi_add_source(q.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
     KV_CHECK(c, q.wait_written(a.frames));
     q.pull(3000);
     hifi_flush(q.h);
@@ -453,12 +453,12 @@ void test_hifi_flush(TestCtx& c) {
     // A flush, a wait with the device pulling silence, a second flush, and only then
     // something new: it starts clean and is announced, as after one flush.
     Rig w; w.make();
-    hifi_add_source(w.h, {1, &k_flac_decoder, fa.bytes()});
-    hifi_add_source(w.h, {2, &k_flac_decoder, fq.bytes()});
+    hifi_add_source(w.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(w.h, {2, &k_flac_decoder, sparse_whole(fq.bytes())});
     KV_CHECK(c, w.wait_written(a.frames * 2));
     w.pull(5000);
     hifi_flush(w.h);
-    hifi_add_source(w.h, {3, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(w.h, {3, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, w.wait_flushed() && w.wait_written(a.frames * 3));
     w.pull(2000);
     KV_CHECK(c, w.has(HifiEventKind::Started, 3) && w.status().source == 3);
@@ -467,7 +467,7 @@ void test_hifi_flush(TestCtx& c) {
     w.pull(1000);
     w.pull(1000);
     KV_CHECK(c, w.status().source == 0 && w.status().lead_frames == 0);
-    hifi_add_source(w.h, {4, &k_flac_decoder, fb.bytes()});
+    hifi_add_source(w.h, {4, &k_flac_decoder, sparse_whole(fb.bytes())});
     KV_CHECK(c, w.wait_written(a.frames * 4));
     u64 before = w.status().taken;
     w.pull(100);
@@ -496,7 +496,7 @@ void test_hifi_underrun(TestCtx& c) {
     Pcm a = decode(fa);
     const u32 ramp = 960;                            // 5 ms at 192 kHz
     Rig r; r.make(0, 0.1);                           // a lead of 0.1 s: 19200 frames
-    hifi_add_source(r.h, {1, &slow, fa.bytes()});
+    hifi_add_source(r.h, {1, &slow, sparse_whole(fa.bytes())});
     KV_CHECK(c, r.wait_written(19200));              // the lead is full
     atomic_store(&g_stall, 1u, MO_RELEASE);
     time_sleep(0.02);                                // the render thread is in the stalled decode by now, or holding a chunk it can still write
@@ -547,11 +547,11 @@ void test_hifi_failures(TestCtx& c) {
     Pcm a = decode(good), t = decode(cut);
     KV_CHECK(c, t.frames > 0 && t.frames < a.frames);
     Rig r; r.make();
-    hifi_add_source(r.h, {1, decoder_for(junk.bytes()), junk.bytes()});   // nobody's file: a null decoder
-    hifi_add_source(r.h, {2, &k_flac_decoder, magic.bytes()});            // claimed, then refused
-    hifi_add_source(r.h, {3, &k_flac_decoder, cut.bytes()});              // plays what it has
-    hifi_add_source(r.h, {4, &k_flac_decoder, good.bytes()});
-    hifi_add_source(r.h, {5, &k_flac_decoder, junk.bytes()});             // fails at the very end
+    hifi_add_source(r.h, {1, decoder_for(junk.bytes()), sparse_whole(junk.bytes())});   // nobody's file: a null decoder
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(magic.bytes())});            // claimed, then refused
+    hifi_add_source(r.h, {3, &k_flac_decoder, sparse_whole(cut.bytes())});              // plays what it has
+    hifi_add_source(r.h, {4, &k_flac_decoder, sparse_whole(good.bytes())});
+    hifi_add_source(r.h, {5, &k_flac_decoder, sparse_whole(junk.bytes())});             // fails at the very end
     KV_CHECK(c, r.wait_event(HifiEventKind::Released, 5));
     KV_CHECK(c, r.wait_written(t.frames + a.frames));
     u64 pulled = 0;
@@ -577,7 +577,7 @@ void test_hifi_failures(TestCtx& c) {
     // A device that does not exist: the source fails, in words.
     HifiConfig hc; hc.device = "no such device";
     Hifi* h = hifi_create(hc);
-    hifi_add_source(h, {9, &k_flac_decoder, good2.bytes()});
+    hifi_add_source(h, {9, &k_flac_decoder, sparse_whole(good2.bytes())});
     HifiEvent ev[8]; u32 n = 0;
     f64 until = time_now() + 2.0;
     while (n < 2 && time_now() < until) { n += hifi_poll(h, ev + n, 8 - n); time_sleep(0.0005); }
@@ -586,8 +586,8 @@ void test_hifi_failures(TestCtx& c) {
 
     // Destroyed in the middle of things: nothing hangs, nothing leaks (the leak report says).
     Rig q; q.make();
-    hifi_add_source(q.h, {1, &k_flac_decoder, good.bytes()});
-    hifi_add_source(q.h, {2, &k_flac_decoder, good2.bytes()});
+    hifi_add_source(q.h, {1, &k_flac_decoder, sparse_whole(good.bytes())});
+    hifi_add_source(q.h, {2, &k_flac_decoder, sparse_whole(good2.bytes())});
     q.pull(100);
     q.free();
     r.free();
@@ -602,7 +602,7 @@ void test_hifi_wall_clock(TestCtx& c) {
     Pcm a = decode(fa);
     Rig r; r.make(480, 5.0, true);
     f64 t0 = time_now();
-    hifi_add_source(r.h, {1, &k_flac_decoder, fa.bytes()});
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
     KV_CHECK(c, r.wait_event(HifiEventKind::Ended, 1));
     f64 took = time_now() - t0;
     KV_CHECK(c, took > 0.24 && took < 1.5);          // real time, not as fast as it will go
@@ -619,4 +619,138 @@ void test_hifi_wall_clock(TestCtx& c) {
     if (start + a.frames <= frames) { capture_md5(data + start * hifi_frame_bytes(seg[0].format), seg[0].format, a.frames, md5); KV_CHECK(c, memcmp(md5, fa.data + 26, 16) == 0); }
     hifi_capture_destroy(r.cap);
     drop(a); drop(fa);
+}
+
+namespace {
+
+// A file whose pieces the test hands over when hifi asks for them: a span over a copy of
+// its bytes, with a map the test fills.
+struct Fed {
+    const File* src = nullptr;
+    u8*  bytes = nullptr;
+    u8*  have = nullptr;
+    u32  shift = 12;
+    u64  pieces = 0;
+    u32  given = 0;
+    SparseSpan span() const { return SparseSpan{bytes, src->len, shift, have}; }
+    void make(const File& f, u32 sh) {
+        src = &f; shift = sh;
+        pieces = ((u64)f.len + (1u << sh) - 1) >> sh;
+        bytes = (u8*)mem_alloc(f.len);
+        memset(bytes, 0xA5, f.len); // not the file: a piece read before it is given decodes wrong
+        have = (u8*)mem_alloc(pieces);
+        memset(have, 0, pieces);
+    }
+    void give(ByteRange r, u64 limit = ~0ull) {
+        if (!r.len) return;
+        for (u64 i = r.at >> shift; i <= (r.at + r.len - 1) >> shift && i < pieces; ++i) {
+            if (have[i] || (i << shift) >= limit) continue;
+            u64 from = i << shift, len = src->len - from < (1u << shift) ? src->len - from : (1u << shift);
+            memcpy(bytes + from, src->data + from, len);
+            atomic_store(&have[i], (u8)1, MO_RELEASE);
+            ++given;
+        }
+    }
+    void free() { mem_free(bytes); mem_free(have); }
+};
+
+// Hands over what each new Want of `id` asks for, below `limit`; returns the wants seen.
+u32 serve(Rig& r, u32* seen, Fed& f, u64 id, u64 limit = ~0ull) {
+    r.poll();
+    u32 n = 0;
+    for (; *seen < r.nevents; ++*seen)
+        if (r.events[*seen].kind == HifiEventKind::Want && r.events[*seen].source == id) { f.give(r.events[*seen].need, limit); ++n; }
+    return n;
+}
+
+} // namespace
+
+// Sources whose bytes arrive only when hifi asks for them. Two of one format, in 4 KB
+// pieces: each waits, says what it wants, and plays exact; the second follows the first
+// in the same stream, its first bytes asked for while the first was still in the lead.
+void test_hifi_pieces(TestCtx& c) {
+    c.begin("hifi pieces");
+    File fa = read_data("tone_24_2ch_96000.flac"), fb = read_data("tone_24_2ch_96000.flac");
+    Pcm a = decode(fa);
+    Fed da, db;
+    da.make(fa, 12); db.make(fb, 12);
+    Rig r; r.make(0, 0.1);
+    hifi_add_source(r.h, {1, &k_flac_decoder, da.span()});
+    hifi_add_source(r.h, {2, &k_flac_decoder, db.span()});
+    u32 seen = 0, wants = 0;
+    u64 pulled = 0;
+    f64 until = time_now() + 5.0;
+    while (!r.has(HifiEventKind::Ended, 2) && time_now() < until) {
+        for (u32 k = 0; k < 50; ++k) { // the lead is 0.1 s: serve, then pull only what is surely there
+            u32 seen1 = seen;
+            wants += serve(r, &seen, da, 1);
+            seen = seen1;
+            wants += serve(r, &seen, db, 2);
+            time_sleep(0.0002);
+        }
+        HifiStatus s = r.status();
+        u64 ready = s.written > s.taken ? s.written - s.taken : 0;
+        if (ready > 2000) pulled += r.pull((u32)(ready - 1000));
+        else if (r.has(HifiEventKind::Released, 2)) pulled += r.pull(1000);
+    }
+    pulled += r.pull(2000);
+    KV_CHECK(c, r.has(HifiEventKind::Ended, 1) && r.has(HifiEventKind::Ended, 2));
+    KV_CHECK(c, wants >= 4 && da.given == da.pieces && db.given == db.pieces);
+    HifiCaptureSegment seg[4];
+    KV_CHECK(c, hifi_capture_segments(r.cap, seg, 4) == 1);
+    const u8* data = hifi_capture_data(r.cap) + seg[0].offset;
+    KV_CHECK(c, same(data, seg[0].format, 0, a, 0, a.frames));
+    KV_CHECK(c, same(data, seg[0].format, a.frames, a, 0, a.frames)); // the second straight after: gapless
+    const HifiEvent* e1 = r.find(HifiEventKind::Ended, 1);
+    const HifiEvent* e2 = r.find(HifiEventKind::Ended, 2);
+    KV_CHECK(c, e1 && e2 && e1->status == DecodeStatus::End && e2->status == DecodeStatus::End);
+    KV_CHECK(c, r.count(HifiEventKind::Underrun) == 0 && r.status().underruns == 0);
+    r.free();
+    da.free(); db.free();
+    drop(a); drop(fa); drop(fb);
+}
+
+// Bytes that will not come. A source that plays until it needs a piece that is never
+// given, and is starved there: it ends Damaged with the reason, and what was heard
+// before is exact. A source starved before it could open fails.
+void test_hifi_starved(TestCtx& c) {
+    c.begin("hifi starved");
+    File fa = read_data("tone_16_2ch_44100.flac"), fb = read_data("tone_16_2ch_44100.flac");
+    Pcm a = decode(fa);
+    Fed da, db;
+    da.make(fa, 12); db.make(fb, 12);
+    Rig r; r.make(0, 5.0);
+    hifi_add_source(r.h, {1, &k_flac_decoder, da.span()});
+    u32 seen = 0;
+    const u64 limit = fa.len / 2;           // nothing past half the file comes
+    bool starved = false;
+    f64 until = time_now() + 3.0;
+    while (!starved && time_now() < until) {
+        serve(r, &seen, da, 1, limit);
+        for (u32 i = 0; i < r.nevents; ++i)
+            if (r.events[i].kind == HifiEventKind::Want && r.events[i].need.at >= limit && !starved) {
+                hifi_starve(r.h, 1, "the disk went away");
+                starved = true;
+            }
+        time_sleep(0.0005);
+    }
+    KV_CHECK(c, starved);
+    time_sleep(0.05); // the render thread looks again within a few milliseconds, and ends the stream there
+    u64 pulled = 0;
+    while (!r.has(HifiEventKind::Ended, 1) && pulled < 100000) pulled += r.pull(1000);
+    const HifiEvent* e = r.find(HifiEventKind::Ended, 1);
+    KV_CHECK(c, e && e->status == DecodeStatus::Damaged && strstr(e->reason, "the disk went away"));
+    KV_CHECK(c, e && e->frames >= 4608 && e->frames < a.frames); // its first frame at least, and not the whole
+    HifiCaptureSegment seg[2];
+    hifi_capture_segments(r.cap, seg, 2);
+    KV_CHECK(c, e && same(hifi_capture_data(r.cap) + seg[0].offset, seg[0].format, 0, a, 0, e->frames));
+
+    // Starved before it opened: Failed, with the reason, and Released.
+    hifi_starve(r.h, 2, "the file could not be read: Input/output error");
+    hifi_add_source(r.h, {2, &k_flac_decoder, db.span()});
+    KV_CHECK(c, r.wait_event(HifiEventKind::Failed, 2) && r.wait_event(HifiEventKind::Released, 2));
+    KV_CHECK(c, strstr(r.find(HifiEventKind::Failed, 2)->reason, "Input/output"));
+    r.free();
+    da.free(); db.free();
+    drop(a); drop(fa); drop(fb);
 }

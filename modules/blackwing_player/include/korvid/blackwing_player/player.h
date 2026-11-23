@@ -55,8 +55,8 @@ struct HifiUnderrun       { u32 count; u32 seq; };
 
 enum class PlayerItemState : u8 {
     Waiting, // queued; not read yet
-    Reading, // its bytes are being read
-    Ready,   // read, and a decoder takes it
+    Reading, // its first pieces are being read
+    Ready,   // its first pieces are in, and a decoder takes it; the rest arrive as it plays
     Playing, // its first frame has been heard and its last has not
     Done,    // heard to its end, or skipped
     Failed,  // could not be played: `reason`
@@ -75,6 +75,8 @@ struct PlayerItem {
     u16  bits;
     u32  rate;
     u64  frames;      // its length as its header says; 0 until Started, or when it does not say
+    u64  size;        // the file's bytes; 0 until it has been looked at
+    u64  bytes_read;  // of those, how many are in memory now
     char path[512];
     char reason[96];  // why it Failed, or how it was damaged
 };
@@ -114,6 +116,7 @@ struct PlayerOutput {
     u32  lead_frames = 0; // decoded and ready, not yet taken by the device
     u32  underruns = 0;   // ever
     u32  pad2      = 0;
+    u64  bytes_held = 0;  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
 };
 
 // ---- setting up ----------------------------------------------------------------------------
@@ -122,7 +125,8 @@ struct PlayerConfig {
     const char* device         = "default";  // hifi_platform's device name
     void*       device_backend = nullptr;    // for "capture": the HifiCapture*
     f64         lead_seconds   = 5.0;
-    usize       read_ahead_bytes = 256u << 20; // the largest file that will be read; one larger fails its item
+    usize       memory_bytes   = 256u << 20; // the files' bytes held at once, across every item
+    u32         piece_bytes    = 256u << 10; // what a file is read in: a power of two, a page or more
 };
 // Before engine_init: what the module opens at startup.
 void player_configure(const PlayerConfig& config);

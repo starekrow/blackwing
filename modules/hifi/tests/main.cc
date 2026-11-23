@@ -10,6 +10,8 @@ void test_hifi_flush(kv::TestCtx&);
 void test_hifi_underrun(kv::TestCtx&);
 void test_hifi_failures(kv::TestCtx&);
 void test_hifi_wall_clock(kv::TestCtx&);
+void test_hifi_pieces(kv::TestCtx&);
+void test_hifi_starved(kv::TestCtx&);
 
 int main() {
     kv::TestCtx c;
@@ -22,6 +24,8 @@ int main() {
     test_hifi_underrun(c);
     test_hifi_failures(c);
     test_hifi_wall_clock(c);
+    test_hifi_pieces(c);
+    test_hifi_starved(c);
     int rc = kv::test_report(c, "hifi_tests");
     kv::mem_shutdown();
     return rc;

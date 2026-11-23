@@ -127,6 +127,11 @@ Span<const DecoderDesc* const> decoders();
 // The first decoder whose probe accepts `head`; null when none does.
 const DecoderDesc* decoder_for(Span<const u8> head);
 
+// How many of a file's first bytes decoder_for needs to decide, given at least its first
+// 10 (fewer only when that is the whole file): 64, or past an ID3v2 tag in front, the
+// tag's length and 64 more. Never more than `size`, the file's length.
+u64 decoder_head_bytes(Span<const u8> first, u64 size);
+
 // "ok", "end", "damaged", "wait".
 const char* decode_status_name(DecodeStatus s);
 

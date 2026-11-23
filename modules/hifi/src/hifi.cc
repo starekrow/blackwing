@@ -13,6 +13,9 @@
 //   caller <-> render   `held`, under `lock`: the device is held. The render thread holds
 //                       it when there is nothing to play and the device has played out
 //                       what it was given; play, or something to play, lets it go.
+//   render  -> caller   `readers`: odd while the render thread is in a step, where every
+//                       decoder call is made. A caller that clears a piece's byte in a
+//                       source's map waits for it to move on before the piece goes.
 //
 // Stream frames are counted from zero and never reset: `write` and `read` are positions
 // in one endless stream, the ring holds the frames between them, and a mark (a source
@@ -35,9 +38,11 @@ namespace {
 constexpr u64 kNever       = ~(u64)0;
 constexpr u32 kChunkFrames = 4096; // what the render thread decodes at a time
 constexpr u32 kMaxPending  = 256;  // commands, and events, in flight
+constexpr u32 kMaxStarved  = 16;   // sources told their bytes will not come, remembered
+constexpr f64 kWantNap     = 0.002; // how soon a decoder waiting for bytes is tried again
 
-enum class CmdKind : u8 { Add, Flush, Quit };
-struct Cmd { CmdKind kind = CmdKind::Add; HifiSource source; u32 epoch = 0; };
+enum class CmdKind : u8 { Add, Flush, Starve, Quit };
+struct Cmd { CmdKind kind = CmdKind::Add; HifiSource source; u32 epoch = 0; char reason[96] = ""; };
 
 // What the render thread tells the caller. A mark carries the stream frame it becomes
 // true at; the others are true at once.
@@ -56,13 +61,17 @@ template <class T, u32 N> struct Fifo {
     void remove(u32 i) { for (u32 k = i; k + 1 < count; ++k) at(k) = at(k + 1); --count; }
 };
 
-// A source with its decoder open.
+// A source with its decoder open, or opening.
 struct Playing {
     HifiSource  src;
-    void*       state  = nullptr;
-    u8*         memory = nullptr;
+    void*       state   = nullptr;
+    u8*         memory  = nullptr;
     DecoderInfo info;
+    bool        opening = false; // its decoder's open is waiting for bytes
+    ByteRange   wanted;          // the last Want said for it, while it waits
 };
+
+struct Starved { u64 id = 0; char reason[96] = ""; };
 
 } // namespace
 
@@ -106,6 +115,7 @@ struct Hifi {
     // ---- caller -> callback, render ----
     u32 want_pause   = 0;              // atomic
     u32 flushes_done = 0;              // atomic: the last flush the render thread has carried out
+    u64 readers      = 0;              // atomic: odd while the render thread is in a step
     bool held        = false;          // under `lock`: the device is held (hifi_device_hold)
 
     // ---- the callback's alone ----
@@ -126,6 +136,8 @@ struct Hifi {
     bool         draining   = false;   // waiting for the lead to play out before the device changes
     u32          playout_waits = 0;    // looks, since there was work, for the device to have played out
     u32          render_epoch = 0;
+    Starved      starved[kMaxStarved]; // sources whose bytes will not come
+    u32          nstarved = 0;
     i32*         scratch = nullptr;    // kChunkFrames * 8 decoded samples
     u32          scratch_frames = 0, scratch_at = 0;
 };
@@ -249,11 +261,36 @@ void note(Hifi& h, HifiEventKind kind, u64 source, u64 frame, const char* reason
     os_mutex_unlock(&h.lock);
 }
 
+// Forgets that a source was starved, once it is gone.
+void forget_starved(Hifi& h, u64 id) {
+    for (u32 i = 0; i < h.nstarved; ++i)
+        if (h.starved[i].id == id) { h.starved[i] = h.starved[--h.nstarved]; return; }
+}
+const char* starved_reason(Hifi& h, u64 id) {
+    for (u32 i = 0; i < h.nstarved; ++i) if (h.starved[i].id == id) return h.starved[i].reason;
+    return nullptr;
+}
+
+// Says that a source waits for `need`, once for each range it waits for.
+void want(Hifi& h, Playing& p, ByteRange need) {
+    if (p.wanted.at == need.at && p.wanted.len == need.len) return;
+    p.wanted = need;
+    Note n;
+    n.event.kind   = HifiEventKind::Want;
+    n.event.source = p.src.id;
+    n.event.need   = need;
+    n.epoch = h.render_epoch;
+    os_mutex_lock(&h.lock);
+    if (!h.notes.push(n)) KV_ERROR("hifi", "the event list is full: a want for source %llu is lost", (unsigned long long)p.src.id);
+    os_mutex_unlock(&h.lock);
+}
+
 // Lets go of a source: its decoder closed, its memory freed, Released sent.
 void release(Hifi& h, Playing& p) {
     if (p.state) p.src.decoder->close(p.state);
     mem_free(p.memory);
     note(h, HifiEventKind::Released, p.src.id, 0);
+    forget_starved(h, p.src.id);
     p = Playing{};
 }
 void release_cur(Hifi& h) {
@@ -268,26 +305,42 @@ void release_nxt(Hifi& h) {
     h.have_nxt = false;
 }
 
-// Opens the next source that will open, as h.nxt; the ones that will not, fail here.
+// Opens the next source that will open, as h.nxt; the ones that will not, fail here. One
+// whose open waits for bytes stays h.nxt, opening, and is tried again on the next call.
 void prepare_next(Hifi& h) {
-    HifiSource s;
-    while (!h.have_nxt && h.queue.pop(&s)) {
-        Playing p;
-        p.src = s;
+    for (;;) {
+        if (!h.have_nxt) {
+            HifiSource s;
+            if (!h.queue.pop(&s)) return;
+            h.nxt = Playing{};
+            h.nxt.src = s;
+            h.nxt.opening = true;
+            h.have_nxt = true;
+            if (s.decoder) h.nxt.memory = (u8*)mem_alloc(s.decoder->memory_bytes);
+        }
+        Playing& p = h.nxt;
+        if (!p.opening) return;
         const char* why = "";
-        if (!s.decoder) why = "no decoder takes this kind of file";
+        if (!p.src.decoder) why = "no decoder takes this kind of file";
         else {
-            p.memory = (u8*)mem_alloc(s.decoder->memory_bytes);
-            DecoderOpen o = s.decoder->open(sparse_whole(s.bytes), Span<u8>(p.memory, s.decoder->memory_bytes));
-            if (o.state) { p.state = o.state; p.info = o.info; }
-            else why = o.reason;
+            DecoderOpen o = p.src.decoder->open(p.src.file, Span<u8>(p.memory, p.src.decoder->memory_bytes));
+            if (o.need.len) {
+                const char* dead = starved_reason(h, p.src.id);
+                if (!dead) { want(h, p, o.need); return; } // still opening
+                why = dead;
+            } else if (o.state) {
+                p.state = o.state; p.info = o.info;
+            } else {
+                why = o.reason;
+            }
             const AudioFormat& f = o.info.format;
             if (o.state && (f.channels == 0 || f.channels > 8 || f.rate == 0 || f.bits == 0 || f.bits > 32))
                 why = "the file describes a format that cannot be played";
         }
-        if (why[0]) { note(h, HifiEventKind::Failed, s.id, 0, why); release(h, p); continue; }
-        h.nxt = p;
-        h.have_nxt = true;
+        if (why[0]) { note(h, HifiEventKind::Failed, p.src.id, 0, why); release(h, p); h.have_nxt = false; continue; }
+        p.opening = false;
+        p.wanted = ByteRange{};
+        return;
     }
 }
 
@@ -399,11 +452,17 @@ bool take_commands(Hifi& h) {
                 Note rel; rel.event.kind = HifiEventKind::Released; rel.event.source = c.source.id; rel.epoch = h.render_epoch;
                 os_mutex_lock(&h.lock); h.notes.push(n); h.notes.push(rel); os_mutex_unlock(&h.lock);
             }
+        } else if (c.kind == CmdKind::Starve) {
+            if (!starved_reason(h, c.source.id) && h.nstarved < kMaxStarved) {
+                h.starved[h.nstarved].id = c.source.id;
+                format(h.starved[h.nstarved].reason, sizeof h.starved[0].reason, "%s", c.reason);
+                ++h.nstarved;
+            }
         } else { // Flush: everything queued and everything in the lead goes
             release_cur(h);
             release_nxt(h);
             HifiSource s;
-            while (h.queue.pop(&s)) note(h, HifiEventKind::Released, s.id, 0);
+            while (h.queue.pop(&s)) { note(h, HifiEventKind::Released, s.id, 0); forget_starved(h, s.id); }
             h.draining = false;
             h.render_epoch = c.epoch;
             u64 w = atomic_load(&h.write, MO_RELAXED);
@@ -456,10 +515,12 @@ bool try_hold(Hifi& h) {
 f64 render_step(Hifi& h) {
     if (!h.have_cur) {
         prepare_next(h);
-        if (!h.have_nxt) {
+        if (!h.have_nxt || h.nxt.opening) {
             // Nothing to play. If sources failed just now, the stream ends where it is.
             atomic_store(&h.end_frame, atomic_load(&h.write, MO_RELAXED), MO_RELEASE);
-            return -1.0;
+            if (!h.have_nxt) return -1.0;
+            try_hold(h); // its bytes are on their way: the device need not play silence meanwhile
+            return kWantNap;
         }
         h.cur = h.nxt; h.nxt = Playing{};
         h.have_cur = true; h.have_nxt = false;
@@ -489,13 +550,21 @@ f64 render_step(Hifi& h) {
         DecodeResult r = h.cur.src.decoder->decode(h.cur.state, h.scratch, kChunkFrames);
         h.scratch_frames = r.frames; h.scratch_at = 0;
         h.cur_frames += r.frames;
-        if (r.status == DecodeStatus::Wait) { // the whole file is there, so this is a decoder's mistake
-            r.status = DecodeStatus::Damaged;
-            r.reason = "the decoder waited for bytes it was already given";
+        if (r.status == DecodeStatus::Wait) {
+            if (const char* dead = starved_reason(h, h.cur.src.id)) {
+                r.status = DecodeStatus::Damaged; // the bytes will not come: it ends here
+                r.reason = dead;
+            } else {
+                want(h, h.cur, r.need);
+                if (r.frames == 0) return kWantNap; // nothing to put in the lead until they come
+            }
+        } else {
+            h.cur.wanted = ByteRange{};
         }
-        if (r.status != DecodeStatus::Ok) {
+        if (r.status != DecodeStatus::Ok && r.status != DecodeStatus::Wait) {
             h.cur_done = true; h.cur_status = r.status;
             format(h.cur_reason, sizeof h.cur_reason, "%s", r.reason);
+            prepare_next(h); // opened now, a lead's length before it is needed, its wants said in time
         }
     }
 
@@ -517,8 +586,12 @@ f64 render_step(Hifi& h) {
             if (!take_commands(h)) return -2.0;
             if (!h.have_cur) return 0.0; // a flush came in with those commands
             prepare_next(h);
+            // The next source is still waiting for its first bytes: hold these frames
+            // back while the lead lasts, so the stream can go on into it without a gap.
+            if (h.have_nxt && h.nxt.opening && w - atomic_load(&h.read, MO_ACQUIRE) > h.start_frames && !atomic_load(&h.want_pause, MO_RELAXED))
+                return kWantNap;
         }
-        bool goes_on = !last || (h.have_nxt && device_fits(h, h.nxt.info.format));
+        bool goes_on = !last || (h.have_nxt && !h.nxt.opening && device_fits(h, h.nxt.info.format));
         atomic_store(&h.end_frame, goes_on ? kNever : w + n, MO_RELEASE);
         atomic_store(&h.write, w + n, MO_RELEASE);
         if (h.device_bits < h.cur.info.format.bits) { os_mutex_lock(&h.lock); h.device_bits = h.cur.info.format.bits; os_mutex_unlock(&h.lock); }
@@ -537,7 +610,12 @@ void render_thread(void* arg) {
     Hifi& h = *(Hifi*)arg;
     for (;;) {
         if (!take_commands(h)) break;
+        // Every decoder call is inside this. The fence after the count orders this
+        // thread's loads of the sources' maps after it (hifi_read_fence's other half).
+        atomic_add_fetch(&h.readers, (u64)1, MO_SEQ_CST);
+        atomic_fence(MO_SEQ_CST);
         f64 wait = render_step(h);
+        atomic_add_fetch(&h.readers, (u64)1, MO_SEQ_CST);
         if (wait < -1.5) break;
         if (wait >= 0.0) h.playout_waits = 0;
         if (wait > 0.0) { time_sleep(wait); continue; }
@@ -623,6 +701,20 @@ void hifi_flush(Hifi* h) {
     Cmd c; c.kind = CmdKind::Flush; c.epoch = h->epoch;
     send(*h, c);
 }
+
+void hifi_starve(Hifi* h, u64 id, const char* reason) {
+    Cmd c; c.kind = CmdKind::Starve; c.source.id = id;
+    format(c.reason, sizeof c.reason, "%s", reason);
+    send(*h, c);
+}
+
+u64 hifi_read_fence(Hifi* h) {
+    atomic_fence(MO_SEQ_CST); // the caller's clearing of a byte comes before this load
+    u64 v = atomic_load(&h->readers, MO_SEQ_CST);
+    return v + (v & 1);       // in a step: passed when it ends. Between steps: passed now
+}
+
+bool hifi_read_passed(Hifi* h, u64 fence) { return atomic_load(&h->readers, MO_SEQ_CST) >= fence; }
 
 u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
     u32 n = 0;
