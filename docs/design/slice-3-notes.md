@@ -261,3 +261,40 @@ Nov 23, 2026.
 the next start: its removal and the save of the list of roots are two messages to the
 writer, and a writer told to stop between them dropped the second. It now does what it
 was given before it stops.
+
+## Milestone 7, changes
+
+Nov 23, 2026.
+
+**As planned**, with these particulars:
+
+- **A watch thread** owns the `FsWatcher`: a polled root (a share) is walked on the thread
+  that polls, so not the main thread. The overrides tree is watched too, so an override file
+  edited by hand while the program runs is taken in.
+- **The walk marks what it did not see.** Each root's walks are numbered across runs (in the
+  index), each row keeps the number of the last walk that saw it, and a whole walk's end
+  marks the rest missing (unless the root is offline). A file the watcher reports between
+  walks takes the current number.
+- **A move is found by the missing**: a new path whose name, size and time are exactly one
+  missing track's. This covers a rename seen by the watcher (its removal is applied before
+  its addition), a directory renamed, and a file moved while the program was not running
+  (matched at the walk's end, the new row dropped and the old one moved). The PRD's BL24
+  is P1; it is here.
+- **Every root is looked at at the offline interval**, not only offline ones. An unmounted
+  disk leaves its mount point and the watcher hears nothing; the look finds it empty and the
+  walk says offline. An empty root that never held a track is left alone.
+- **The scan's "offline" goes through the writer**, after the walk's start: said directly to
+  the main thread, it arrived before the start and was undone by it.
+
+**Found on the way: a reader pinned to an old index.** The reader fetches a window's rows
+with one prepared statement, which was left on its last row. A statement on a row holds its
+read open, and in WAL a read sees the index as it was when it began: every window after
+saw the index as of the last window that had rows, and a search that found nothing found
+nothing for ever. Every prepared statement is now reset once read, the writer's too (a read
+held open also stops the WAL's checkpoints).
+
+**The numbers**, the tests' local disk, a quiet moment of 0.3 s: a file added 0.61 s,
+changed 0.61 s, moved 0.42 s, removed 0.63 s, a directory removed 0.35 s; a polled root's
+new file 1.06 s with a poll every 0.5 s. Fifty thousand files with the watcher on: found by
+name at 2.3 s (1.6 s without it: the watches are set up while the walk runs), everything
+else as before.

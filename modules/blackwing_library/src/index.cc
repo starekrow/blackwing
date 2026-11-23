@@ -14,7 +14,7 @@ namespace {
 
 constexpr const char* kSchemaSql =
     "CREATE TABLE meta(key TEXT PRIMARY KEY, value) WITHOUT ROWID;"
-    "CREATE TABLE roots(id INTEGER PRIMARY KEY, path BLOB NOT NULL);"
+    "CREATE TABLE roots(id INTEGER PRIMARY KEY, path BLOB NOT NULL, volume INTEGER NOT NULL DEFAULT 0, walks INTEGER NOT NULL DEFAULT 0);"
     "CREATE TABLE dirs(id INTEGER PRIMARY KEY, root INTEGER NOT NULL, parent INTEGER NOT NULL, path BLOB NOT NULL,"
     "  name TEXT NOT NULL, state INTEGER NOT NULL DEFAULT 0, reason TEXT);"
     "CREATE UNIQUE INDEX dirs_path ON dirs(root, path);"
@@ -26,7 +26,10 @@ constexpr const char* kSchemaSql =
     "  title TEXT, artist TEXT, album TEXT, albumartist TEXT, trackno INTEGER, discno INTEGER, date TEXT, genre TEXT,"
     "  sort_title TEXT NOT NULL DEFAULT '', sort_artist TEXT NOT NULL DEFAULT '', sort_album TEXT NOT NULL DEFAULT '',"
     "  sort_genre TEXT NOT NULL DEFAULT '', artist_hash INTEGER NOT NULL DEFAULT 0, album_hash INTEGER NOT NULL DEFAULT 0,"
-    "  genre_hash INTEGER NOT NULL DEFAULT 0, shown_artist TEXT NOT NULL DEFAULT '');"
+    "  genre_hash INTEGER NOT NULL DEFAULT 0, shown_artist TEXT NOT NULL DEFAULT '',"
+    "  seen INTEGER NOT NULL DEFAULT 0, born INTEGER NOT NULL DEFAULT 0, missing_since INTEGER NOT NULL DEFAULT 0);"
+    "CREATE INDEX tracks_moved ON tracks(missing, root, name, size, mtime);"
+    "CREATE INDEX tracks_seen ON tracks(root, missing, seen);"
     "CREATE UNIQUE INDEX tracks_path ON tracks(root, path);"
     // An index per order a window takes, matching its ORDER BY to the last column, so the
     // ids of a window anywhere in fifty thousand rows are a walk of the index, not a sort;
@@ -113,7 +116,7 @@ bool Index::open(const char* path, bool writer) {
             format(sql, sizeof sql, "INSERT INTO meta VALUES('schema', %u);", kSchema);
             if (!exec("BEGIN;") || !exec(kSchemaSql) || !exec(sql) || !exec("COMMIT;")) { damaged = true; close(); return false; }
         }
-        st_root      = prep("INSERT OR REPLACE INTO roots(id, path) VALUES(?, ?)");
+        st_root      = prep("INSERT INTO roots(id, path) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET path = excluded.path");
         st_unroot_s  = prep("DELETE FROM search WHERE rowid IN (SELECT id FROM tracks WHERE root = ?)");
         st_unroot_t  = prep("DELETE FROM tracks WHERE root = ?");
         st_unroot_d  = prep("DELETE FROM dirs WHERE root = ?");
@@ -121,10 +124,11 @@ bool Index::open(const char* path, bool writer) {
         st_dir_find  = prep("SELECT id FROM dirs WHERE root = ? AND path = ?");
         st_dir_put   = prep("INSERT INTO dirs(root, parent, path, name, state, reason) VALUES(?, ?, ?, ?, ?, ?)");
         st_dir_state = prep("UPDATE dirs SET state = ?, reason = ? WHERE id = ?");
-        st_track_find = prep("SELECT id, size, mtime, read_size, read_mtime FROM tracks WHERE root = ? AND path = ?");
+        st_track_find = prep("SELECT id, size, mtime, read_size, read_mtime, missing FROM tracks WHERE root = ? AND path = ?");
         st_track_put = prep("INSERT INTO tracks(root, dir, path, name, size, mtime, title, artist, album, trackno, discno,"
-                            " sort_title, sort_artist, sort_album, artist_hash, album_hash, shown_artist) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-        st_track_seen = prep("UPDATE tracks SET size = ?, mtime = ?, dir = ?, missing = 0 WHERE id = ?");
+                            " sort_title, sort_artist, sort_album, artist_hash, album_hash, shown_artist, seen, born)"
+                            " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        st_track_seen = prep("UPDATE tracks SET size = ?, mtime = ?, dir = ?, missing = 0, seen = ? WHERE id = ?");
         st_search_put = prep("INSERT INTO search(rowid, title, artist, album, path) VALUES(?, ?, ?, ?, ?)");
         st_count_t   = prep("SELECT count(*) FROM tracks WHERE root = ? AND missing = 0");
         st_count_d   = prep("SELECT count(*), sum(state = 2) FROM dirs WHERE root = ?");
@@ -173,11 +177,15 @@ bool Index::remove_root(u32 id) {
     return good;
 }
 
+// Every prepared statement is reset once its answer is read: one left on a row holds a
+// read open, which pins the connection's view of the index and stops the WAL's checkpoints.
+template <class F> auto once(sqlite3_stmt* st, F read) { auto v = read(); sqlite3_reset(st); return v; }
+
 u64 Index::find_dir(u32 root, const char* p) {
     sqlite3_reset(st_dir_find);
     sqlite3_bind_int64(st_dir_find, 1, root);
     sqlite3_bind_blob(st_dir_find, 2, p, (int)strlen(p), SQLITE_TRANSIENT);
-    return sqlite3_step(st_dir_find) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_dir_find, 0) : 0;
+    return once(st_dir_find, [&] { return sqlite3_step(st_dir_find) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_dir_find, 0) : (u64)0; });
 }
 
 u64 Index::put_dir(const DirRec& d) {
@@ -203,23 +211,103 @@ u64 Index::put_dir(const DirRec& d) {
     return (u64)sqlite3_last_insert_rowid(db);
 }
 
-u64 Index::put_track(const TrackRec& t, u64 dir, bool* fresh, bool* changed, bool* unread) {
+namespace {
+// The search's row for a track, from its columns and its path.
+void search_again(Index& ix, sqlite3* db, sqlite3_stmt* put, u64 id) {
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db, "SELECT title, artist, album, path FROM tracks WHERE id = ?", -1, &st, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, (i64)id);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        char rel[4200], shown[4200];
+        format(rel, sizeof rel, "%.*s", sqlite3_column_bytes(st, 3), (const char*)sqlite3_column_blob(st, 3));
+        shown_utf8(rel, shown, sizeof shown);
+        sqlite3_stmt* d = nullptr;
+        if (sqlite3_prepare_v2(db, "DELETE FROM search WHERE rowid = ?", -1, &d, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int64(d, 1, (i64)id);
+            sqlite3_step(d);
+            sqlite3_finalize(d);
+        }
+        sqlite3_reset(put);
+        sqlite3_bind_int64(put, 1, (i64)id);
+        for (int k = 0; k < 3; ++k) sqlite3_bind_text(put, 2 + k, (const char*)sqlite3_column_text(st, k), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(put, 5, shown, -1, SQLITE_TRANSIENT);
+        sqlite3_step(put);
+    }
+    sqlite3_finalize(st);
+    (void)ix;
+}
+void unsearch(sqlite3* db, u64 id) {
+    sqlite3_stmt* d = nullptr;
+    if (sqlite3_prepare_v2(db, "DELETE FROM search WHERE rowid = ?", -1, &d, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(d, 1, (i64)id);
+        sqlite3_step(d);
+        sqlite3_finalize(d);
+    }
+}
+void exec_id(sqlite3* db, const char* sql, i64 a, i64 b = 0, bool two = false) {
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int64(st, 1, a);
+    if (two) sqlite3_bind_int64(st, 2, b);
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+}
+} // namespace
+
+u64 Index::put_track(const TrackRec& t, u64 dir, u32 walk, bool* fresh, bool* changed, bool* unread, char* moved_from, u32 cap) {
     *fresh = *changed = *unread = false;
+    if (moved_from && cap) moved_from[0] = 0;
     sqlite3_reset(st_track_find);
     sqlite3_bind_int64(st_track_find, 1, t.root);
     sqlite3_bind_blob(st_track_find, 2, t.path, (int)strlen(t.path), SQLITE_TRANSIENT);
-    if (sqlite3_step(st_track_find) == SQLITE_ROW) {
+    int found_rc = sqlite3_step(st_track_find);
+    if (found_rc != SQLITE_ROW) sqlite3_reset(st_track_find);
+    if (found_rc == SQLITE_ROW) {
         u64 id = (u64)sqlite3_column_int64(st_track_find, 0);
         *changed = (u64)sqlite3_column_int64(st_track_find, 1) != t.size || sqlite3_column_int64(st_track_find, 2) != t.mtime;
         *unread = *changed || sqlite3_column_type(st_track_find, 3) == SQLITE_NULL ||
                   (u64)sqlite3_column_int64(st_track_find, 3) != t.size || sqlite3_column_int64(st_track_find, 4) != t.mtime;
+        bool was_missing = sqlite3_column_int(st_track_find, 5) != 0;
+        sqlite3_reset(st_track_find);
         sqlite3_reset(st_track_seen);
         sqlite3_bind_int64(st_track_seen, 1, (i64)t.size);
         sqlite3_bind_int64(st_track_seen, 2, t.mtime);
         sqlite3_bind_int64(st_track_seen, 3, (i64)dir);
-        sqlite3_bind_int64(st_track_seen, 4, (i64)id);
+        sqlite3_bind_int64(st_track_seen, 4, walk);
+        sqlite3_bind_int64(st_track_seen, 5, (i64)id);
         ok(sqlite3_step(st_track_seen));
+        if (was_missing) search_again(*this, db, st_search_put, id); // back: searchable again
         return id;
+    }
+    // A missing track of this name, size and time, in this root: this is it, moved.
+    {
+        sqlite3_stmt* st = nullptr;
+        u64 found = 0;
+        u32 n = 0;
+        char from[4200] = "";
+        if (ok(sqlite3_prepare_v2(db, "SELECT id, path FROM tracks WHERE missing = 1 AND root = ? AND name = ? AND size = ? AND mtime = ? LIMIT 2", -1, &st, nullptr))) {
+            sqlite3_bind_int64(st, 1, t.root);
+            sqlite3_bind_text(st, 2, t.name, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(st, 3, (i64)t.size);
+            sqlite3_bind_int64(st, 4, t.mtime);
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                if (n++ == 0) { found = (u64)sqlite3_column_int64(st, 0); format(from, sizeof from, "%.*s", sqlite3_column_bytes(st, 1), (const char*)sqlite3_column_blob(st, 1)); }
+            }
+            sqlite3_finalize(st);
+        }
+        if (n == 1) { // exactly one: otherwise which of them it is cannot be told, and it is a new track
+            if (ok(sqlite3_prepare_v2(db, "UPDATE tracks SET path = ?, dir = ?, missing = 0, seen = ? WHERE id = ?", -1, &st, nullptr))) {
+                sqlite3_bind_blob(st, 1, t.path, (int)strlen(t.path), SQLITE_TRANSIENT);
+                sqlite3_bind_int64(st, 2, (i64)dir);
+                sqlite3_bind_int64(st, 3, walk);
+                sqlite3_bind_int64(st, 4, (i64)found);
+                ok(sqlite3_step(st));
+                sqlite3_finalize(st);
+            }
+            search_again(*this, db, st_search_put, found);
+            if (moved_from && cap) format(moved_from, cap, "%s", from);
+            return found;
+        }
     }
     sqlite3_stmt* s = st_track_put;
     sqlite3_reset(s);
@@ -244,6 +332,8 @@ u64 Index::put_track(const TrackRec& t, u64 dir, bool* fresh, bool* changed, boo
     sqlite3_bind_int64(s, 15, (i64)g.artist_hash);
     sqlite3_bind_int64(s, 16, (i64)g.album_hash);
     sqlite3_bind_text(s, 17, t.artist, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 18, walk);
+    sqlite3_bind_int64(s, 19, walk);
     if (!ok(sqlite3_step(s))) return 0;
     u64 id = (u64)sqlite3_last_insert_rowid(db);
     *fresh = *unread = true;
@@ -299,6 +389,7 @@ bool Index::put_tags_merge_only(const Tags& t) {
     gi.title = t.title; gi.artist = t.artist; gi.album = t.album; gi.albumartist = t.albumartist; gi.genre = t.genre;
     gi.titlesort = t.titlesort; gi.artistsort = t.artistsort; gi.albumsort = t.albumsort; gi.albumartistsort = t.albumartistsort;
     gi.dir = sqlite3_step(st_dir_of_track) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_dir_of_track, 0) : 0;
+    sqlite3_reset(st_dir_of_track);
     GroupOut g;
     group_keys(gi, &g);
     sqlite3_bind_text(s, 17, g.sort_title, -1, SQLITE_TRANSIENT);
@@ -328,7 +419,7 @@ bool Index::put_tags_merge_only(const Tags& t) {
 u32 Index::count_unread(u32 root) {
     sqlite3_reset(st_count_unread);
     sqlite3_bind_int64(st_count_unread, 1, root);
-    return sqlite3_step(st_count_unread) == SQLITE_ROW ? (u32)sqlite3_column_int64(st_count_unread, 0) : 0;
+    return once(st_count_unread, [&] { return sqlite3_step(st_count_unread) == SQLITE_ROW ? (u32)sqlite3_column_int64(st_count_unread, 0) : 0u; });
 }
 
 bool Index::dir_of(u64 dir, u32* root, char* path, u32 cap) {
@@ -361,7 +452,7 @@ u64 Index::track_at(u32 root, const char* path) {
     sqlite3_reset(st_track_find);
     sqlite3_bind_int64(st_track_find, 1, root);
     sqlite3_bind_blob(st_track_find, 2, path, (int)strlen(path), SQLITE_TRANSIENT);
-    return sqlite3_step(st_track_find) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_track_find, 0) : 0;
+    return once(st_track_find, [&] { return sqlite3_step(st_track_find) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_track_find, 0) : (u64)0; });
 }
 
 namespace {
@@ -386,24 +477,173 @@ void Index::unread_in(u64 dir, void (*fn)(void*, u64, u32, const char*, u64, i64
 void Index::unread_track(u64 id, void (*fn)(void*, u64, u32, const char*, u64, i64), void* user) { each_unread(*this, db, "id = ? AND", (i64)id, true, fn, user); }
 void Index::unread_all(void (*fn)(void*, u64, u32, const char*, u64, i64), void* user) { each_unread(*this, db, "", 0, false, fn, user); }
 
+void Index::mark_missing(u32 root, const char* rel) {
+    sqlite3_stmt* st = nullptr;
+    u64 id = 0;
+    if (ok(sqlite3_prepare_v2(db, "SELECT id FROM tracks WHERE root = ? AND path = ? AND missing = 0", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        sqlite3_bind_blob(st, 2, rel, (int)strlen(rel), SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW) id = (u64)sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    if (!id) return;
+    exec_id(db, "UPDATE tracks SET missing = 1, missing_since = unixepoch() WHERE id = ?", (i64)id);
+    unsearch(db, id);
+}
+
+void Index::mark_missing_under(u32 root, const char* rel_dir) {
+    // Paths under rel_dir/ are those from "rel_dir/" up to "rel_dir0" ('0' is '/' + 1).
+    char lo[4200], hi[4200];
+    u32 n = (u32)format(lo, sizeof lo, "%s/", rel_dir);
+    format(hi, sizeof hi, "%s0", rel_dir);
+    Array<u64> ids;
+    sqlite3_stmt* st = nullptr;
+    if (ok(sqlite3_prepare_v2(db, "SELECT id FROM tracks WHERE root = ? AND missing = 0 AND path >= ? AND path < ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        sqlite3_bind_blob(st, 2, lo, (int)n, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 3, hi, (int)strlen(hi), SQLITE_TRANSIENT);
+        while (sqlite3_step(st) == SQLITE_ROW) ids.push((u64)sqlite3_column_int64(st, 0));
+        sqlite3_finalize(st);
+    }
+    for (u64 id : ids) { exec_id(db, "UPDATE tracks SET missing = 1, missing_since = unixepoch() WHERE id = ?", (i64)id); unsearch(db, id); }
+    ids.free();
+    // Its directories, itself included, are gone (state 3) and leave the folder views.
+    if (ok(sqlite3_prepare_v2(db, "UPDATE dirs SET state = 3 WHERE root = ? AND (path = ? OR (path >= ? AND path < ?))", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        sqlite3_bind_blob(st, 2, rel_dir, (int)strlen(rel_dir), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 3, lo, (int)n, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(st, 4, hi, (int)strlen(hi), SQLITE_TRANSIENT);
+        ok(sqlite3_step(st));
+        sqlite3_finalize(st);
+    }
+}
+
+void Index::after_walk(u32 root, u32 walk, Array<char>* moves) {
+    // What the walk did not see is missing.
+    Array<u64> gone;
+    sqlite3_stmt* st = nullptr;
+    if (ok(sqlite3_prepare_v2(db, "SELECT id FROM tracks WHERE root = ? AND missing = 0 AND seen != ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        sqlite3_bind_int64(st, 2, walk);
+        while (sqlite3_step(st) == SQLITE_ROW) gone.push((u64)sqlite3_column_int64(st, 0));
+        sqlite3_finalize(st);
+    }
+    for (u64 id : gone) { exec_id(db, "UPDATE tracks SET missing = 1, missing_since = unixepoch() WHERE id = ?", (i64)id); unsearch(db, id); }
+    gone.free();
+    // Tracks new in this walk that are one just gone missing, moved: the old row takes the
+    // new one's path and the new one goes.
+    struct Pair { u64 fresh, old; char from[2048], to[2048]; u64 dir; };
+    Array<Pair> pairs;
+    const char* sql =
+        "SELECT f.id, o.id, o.path, f.path, f.dir FROM tracks f JOIN tracks o ON o.root = f.root AND o.name = f.name AND o.size = f.size"
+        " AND o.mtime = f.mtime AND o.missing = 1 WHERE f.root = ? AND f.born = ? AND f.missing = 0";
+    if (ok(sqlite3_prepare_v2(db, sql, -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        sqlite3_bind_int64(st, 2, walk);
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            Pair p;
+            p.fresh = (u64)sqlite3_column_int64(st, 0);
+            p.old = (u64)sqlite3_column_int64(st, 1);
+            format(p.from, sizeof p.from, "%.*s", sqlite3_column_bytes(st, 2), (const char*)sqlite3_column_blob(st, 2));
+            format(p.to, sizeof p.to, "%.*s", sqlite3_column_bytes(st, 3), (const char*)sqlite3_column_blob(st, 3));
+            p.dir = (u64)sqlite3_column_int64(st, 4);
+            bool twice = false;
+            for (const Pair& q : pairs) twice |= q.fresh == p.fresh || q.old == p.old;
+            if (!twice) pairs.push(p);
+        }
+        sqlite3_finalize(st);
+    }
+    for (const Pair& p : pairs) {
+        exec_id(db, "DELETE FROM tagvals WHERE track = ?", (i64)p.fresh);
+        unsearch(db, p.fresh);
+        exec_id(db, "DELETE FROM tracks WHERE id = ?", (i64)p.fresh);
+        if (ok(sqlite3_prepare_v2(db, "UPDATE tracks SET path = ?, dir = ?, missing = 0, seen = ? WHERE id = ?", -1, &st, nullptr))) {
+            sqlite3_bind_blob(st, 1, p.to, (int)strlen(p.to), SQLITE_TRANSIENT);
+            sqlite3_bind_int64(st, 2, (i64)p.dir);
+            sqlite3_bind_int64(st, 3, walk);
+            sqlite3_bind_int64(st, 4, (i64)p.old);
+            ok(sqlite3_step(st));
+            sqlite3_finalize(st);
+        }
+        search_again(*this, db, st_search_put, p.old);
+        if (moves) {
+            u32 a = (u32)strlen(p.from) + 1, b = (u32)strlen(p.to) + 1;
+            memcpy(moves->push_n(a), p.from, a);
+            memcpy(moves->push_n(b), p.to, b);
+        }
+    }
+    pairs.free();
+}
+
+void Index::forget_missing(u32 days) {
+    char sql[256];
+    format(sql, sizeof sql, "DELETE FROM tagvals WHERE track IN (SELECT id FROM tracks WHERE missing = 1 AND missing_since < unixepoch() - %u)", days * 86400u);
+    exec(sql);
+    format(sql, sizeof sql, "DELETE FROM tracks WHERE missing = 1 AND missing_since < unixepoch() - %u", days * 86400u);
+    exec(sql);
+}
+
+u64 Index::ensure_dir(u32 root, const char* rel) {
+    if (u64 id = find_dir(root, rel)) return id;
+    char parent[4200];
+    const char* slash = strrchr(rel, '/');
+    format(parent, sizeof parent, "%.*s", slash ? (int)(slash - rel) : 0, rel);
+    if (rel[0]) ensure_dir(root, parent);
+    char name[512];
+    shown_utf8(slash ? slash + 1 : rel, name, sizeof name);
+    DirRec d{root, rel, parent, name, 1, ""};
+    return put_dir(d);
+}
+
+u32 Index::next_walk(u32 root) {
+    exec_id(db, "UPDATE roots SET walks = walks + 1 WHERE id = ?", root);
+    return current_walk(root);
+}
+
+u32 Index::current_walk(u32 root) {
+    sqlite3_stmt* st = nullptr;
+    u32 v = 0;
+    if (ok(sqlite3_prepare_v2(db, "SELECT walks FROM roots WHERE id = ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        if (sqlite3_step(st) == SQLITE_ROW) v = (u32)sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    return v;
+}
+
+u64 Index::root_volume(u32 root) {
+    sqlite3_stmt* st = nullptr;
+    u64 v = 0;
+    if (ok(sqlite3_prepare_v2(db, "SELECT volume FROM roots WHERE id = ?", -1, &st, nullptr))) {
+        sqlite3_bind_int64(st, 1, root);
+        if (sqlite3_step(st) == SQLITE_ROW) v = (u64)sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    return v;
+}
+
+void Index::set_root_volume(u32 root, u64 volume) { exec_id(db, "UPDATE roots SET volume = ? WHERE id = ?", (i64)volume, root, true); }
+
 u32 Index::count_tracks(u32 root) {
     sqlite3_reset(st_count_t);
     sqlite3_bind_int64(st_count_t, 1, root);
-    return sqlite3_step(st_count_t) == SQLITE_ROW ? (u32)sqlite3_column_int64(st_count_t, 0) : 0;
+    return once(st_count_t, [&] { return sqlite3_step(st_count_t) == SQLITE_ROW ? (u32)sqlite3_column_int64(st_count_t, 0) : 0u; });
 }
 
 u32 Index::count_dirs(u32 root, u32* failed) {
     sqlite3_reset(st_count_d);
     sqlite3_bind_int64(st_count_d, 1, root);
     *failed = 0;
-    if (sqlite3_step(st_count_d) != SQLITE_ROW) return 0;
+    if (sqlite3_step(st_count_d) != SQLITE_ROW) { sqlite3_reset(st_count_d); return 0; }
     *failed = (u32)sqlite3_column_int64(st_count_d, 1);
-    return (u32)sqlite3_column_int64(st_count_d, 0);
+    u32 n = (u32)sqlite3_column_int64(st_count_d, 0);
+    sqlite3_reset(st_count_d);
+    return n;
 }
 
 u64 Index::count_all() {
     sqlite3_reset(st_count_all);
-    return sqlite3_step(st_count_all) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_count_all, 0) : 0;
+    return once(st_count_all, [&] { return sqlite3_step(st_count_all) == SQLITE_ROW ? (u64)sqlite3_column_int64(st_count_all, 0) : (u64)0; });
 }
 
 i64 Index::override_seen(const char* path) {
@@ -602,10 +842,11 @@ u32 Index::window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* t
         }
         sqlite3_reset(st_row);
         sqlite3_bind_int64(st_row, 1, (i64)id);
-        if (sqlite3_step(st_row) != SQLITE_ROW) return;
+        if (sqlite3_step(st_row) != SQLITE_ROW) { sqlite3_reset(st_row); return; }
         fill_track(st_row, out[got]);
         out[got].index = index;
         ++got;
+        sqlite3_reset(st_row); // a statement left on a row holds its read open: the reader would see an old index
     };
     // A window of tracks: `where` with its one bound value (or none), in `ord`. The window's
     // ids first, by the index that is that order; then each row by its id.
@@ -670,12 +911,12 @@ u32 Index::window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* t
     constexpr const char* kShownArtist = "t.shown_artist";
     switch (q.view) {
     case LibraryView::Folders: {
-        u32 ndirs = count("SELECT count(*) FROM dirs WHERE parent = ?", [&](sqlite3_stmt* st) { sqlite3_bind_int64(st, 1, (i64)q.parent); });
+        u32 ndirs = count("SELECT count(*) FROM dirs WHERE parent = ? AND state != 3", [&](sqlite3_stmt* st) { sqlite3_bind_int64(st, 1, (i64)q.parent); });
         u32 ntracks = q.parent ? count("SELECT count(*) FROM tracks WHERE dir = ? AND missing = 0", [&](sqlite3_stmt* st) { sqlite3_bind_int64(st, 1, (i64)q.parent); }) : 0;
         *total = ndirs + ntracks;
         if (q.first < ndirs) {
             sqlite3_stmt* st = nullptr;
-            if (ok(sqlite3_prepare_v2(db, "SELECT id, root, name FROM dirs WHERE parent = ? ORDER BY name LIMIT ? OFFSET ?", -1, &st, nullptr))) {
+            if (ok(sqlite3_prepare_v2(db, "SELECT id, root, name FROM dirs WHERE parent = ? AND state != 3 ORDER BY name LIMIT ? OFFSET ?", -1, &st, nullptr))) {
                 sqlite3_bind_int64(st, 1, (i64)q.parent);
                 sqlite3_bind_int64(st, 2, want);
                 sqlite3_bind_int64(st, 3, q.first);

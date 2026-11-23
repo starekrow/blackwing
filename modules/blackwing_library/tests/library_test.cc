@@ -49,12 +49,16 @@ struct Rig {
     bool up = false;
     char data[1024] = "";
 
-    bool start(const char* data_dir) {
+    bool start(const char* data_dir, f64 quiet = 1.0, f64 offline = 60.0, bool poll = false, f64 poll_seconds = 60.0) {
         g_finished = g_changed = g_results = 0;
         memset(g_result, 0, sizeof g_result);
         format(data, sizeof data, "%s", data_dir);
         LibraryConfig lc;
         lc.data_dir = data;
+        lc.quiet_seconds = quiet;
+        lc.offline_seconds = offline;
+        lc.poll_roots = poll;
+        lc.poll_seconds = poll_seconds;
         library_configure(lc);
         CliConfig cli; cli.no_stdin = true;
         cli_configure(cli);
@@ -513,5 +517,141 @@ void test_library_overrides(TestCtx& c) {
     KV_CHECK(c, aside);
     b.stop();
     bytes_before.free();
+    io_remove_tree(tmp);
+}
+
+namespace {
+// Writes a generated track with these tags at `path` (made with its directories).
+void put_track_file(const char* path, const char* title, u32 n) {
+    char dir[2048];
+    format(dir, sizeof dir, "%s", path);
+    *strrchr(dir, '/') = 0;
+    io_make_dirs(dir);
+    kvtest::Bytes f;
+    kvtest::Tags t{title, "Watcher", "Changes", n, 9, 1, "2020", "Ambient"};
+    kvtest::flac_file(f, t);
+    io_write_now(path, f.b, f.n);
+}
+}
+
+// Changes under a root, heard by the watcher: a file added, changed, renamed, moved (with
+// its override), removed and put back, a directory removed; changes made while stopped;
+// a root emptied (offline, its rows kept and marked) and filled again (back, nothing read
+// again); a root that is polled.
+void test_library_changes(TestCtx& c) {
+    c.begin("library changes");
+    char tmp[1024], music[1100], data[1100], p[2048], q[2048];
+    KV_CHECK(c, io_make_temp_dir("bw_changes", tmp, sizeof tmp));
+    format(music, sizeof music, "%s/music", tmp);
+    format(data, sizeof data, "%s/data", tmp);
+    kvtest::make_library(music, 24, 12);
+    Rig r;
+    KV_CHECK(c, r.start(data, 0.3, 0.5));
+    r.add(music);
+    KV_CHECK(c, r.until([] { return g_finished == 1; }));
+    auto find = [&](Rig& x, const char* word, LibraryRow* out) -> u32 {
+        if (!x.query(1, LibraryView::Search, 0, word)) return 0;
+        Array<LibraryRow> rows = x.rows(1);
+        u32 n = rows.len;
+        if (n && out) *out = rows[0];
+        rows.free();
+        return n;
+    };
+    // Waits for a search to have `want` rows; how long it took, or -1.
+    auto until_found = [&](Rig& x, const char* word, u32 want, LibraryRow* out = nullptr) -> f64 {
+        f64 t0 = time_now();
+        while (time_now() - t0 < 6.0) {
+            for (u32 i = 0; i < 20; ++i) x.step();
+            if (find(x, word, out) == want) return time_now() - t0;
+        }
+        return -1.0;
+    };
+    // Added.
+    format(p, sizeof p, "%s/New Album/01 - Fresh.flac", music);
+    put_track_file(p, "Fresh Arrival Qx1", 1);
+    f64 added = until_found(r, "qx1", 1);
+    KV_CHECK(c, added >= 0.0 && added < 2.0);
+    // Changed: its title rewritten.
+    put_track_file(p, "Fresher Arrival Qx2", 1);
+    f64 changed = until_found(r, "qx2", 1);
+    KV_CHECK(c, changed >= 0.0 && changed < 2.0 && find(r, "qx1", nullptr) == 0);
+    // An override on it, then it is moved (rename keeps its size and time): the same track,
+    // with its override, at its new path.
+    LibraryRow before{};
+    KV_CHECK(c, find(r, "qx2", &before) == 1);
+    LibraryOverride o; o.track = before.id; format(o.field, sizeof o.field, "genre"); format(o.value, sizeof o.value, "Moved Genre");
+    u64 gen = r.scan().generation;
+    r.say(o);
+    r.until([&] { return r.scan().generation > gen; });
+    format(q, sizeof q, "%s/Elsewhere/01 - Fresh.flac", music);
+    io_make_dirs(q); io_remove(q); // the directory, then the place for the file
+    KV_CHECK(c, rename(p, q) == 0);
+    LibraryRow after{};
+    f64 moved = -1.0;
+    {
+        f64 t0 = time_now();
+        while (time_now() - t0 < 6.0) {
+            for (u32 i = 0; i < 20; ++i) r.step();
+            if (find(r, "qx2", &after) == 1 && strstr(after.path, "Elsewhere")) { moved = time_now() - t0; break; }
+        }
+    }
+    KV_CHECK(c, moved >= 0.0 && moved < 2.0 && after.id == before.id);
+    KV_CHECK(c, r.query(2, LibraryView::Genres, 0, ""));
+    { Array<LibraryRow> g = r.rows(2); bool kept = false; for (const LibraryRow& x : g) kept |= strcmp(x.name, "Moved Genre") == 0; KV_CHECK(c, kept); g.free(); }
+    // Removed: gone from every view; put back: the same track.
+    io_remove(q);
+    f64 removed = until_found(r, "qx2", 0);
+    KV_CHECK(c, removed >= 0.0 && removed < 2.0);
+    put_track_file(q, "Fresher Arrival Qx2", 1);
+    LibraryRow back{};
+    KV_CHECK(c, until_found(r, "qx2", 1, &back) >= 0.0 && back.id == before.id);
+    // A directory removed: its tracks leave the views, and so does it.
+    format(p, sizeof p, "%s/Gone Dir", music);
+    for (u32 i = 0; i < 3; ++i) { format(q, sizeof q, "%s/Gone Dir/%02u.flac", music, i); put_track_file(q, "Short Lived Qx3", i + 1); }
+    KV_CHECK(c, until_found(r, "qx3", 3) >= 0.0);
+    io_remove_tree(p);
+    f64 dir_gone = until_found(r, "qx3", 0);
+    KV_CHECK(c, dir_gone >= 0.0 && dir_gone < 2.0);
+    KV_INFO("test", "library changes: added %.2f s, changed %.2f s, moved %.2f s, removed %.2f s, a directory removed %.2f s",
+            added, changed, moved, removed, dir_gone);
+    u32 tracks_now = r.root(1).tracks;
+    r.stop();
+
+    // While stopped: one removed, one added. The start-up walk finds both.
+    format(p, sizeof p, "%s/Elsewhere/01 - Fresh.flac", music);
+    io_remove(p);
+    format(p, sizeof p, "%s/Later/01 - Late.flac", music);
+    put_track_file(p, "Late Comer Qx4", 1);
+    Rig s;
+    KV_CHECK(c, s.start(data, 0.3, 0.5));
+    KV_CHECK(c, s.until([] { return g_finished == 1; }));
+    KV_CHECK(c, find(s, "qx4", nullptr) == 1 && find(s, "qx2", nullptr) == 0 && s.root(1).tracks == tracks_now);
+    // The root emptied, as an unplugged disk leaves it: offline, its rows kept and marked.
+    char away[1100];
+    format(away, sizeof away, "%s/away", tmp);
+    KV_CHECK(c, rename(music, away) == 0 && io_make_dirs(music));
+    bool offline = s.until([&] { return s.root(1).state == (u8)LibraryRootState::Offline; }, 6.0);
+    KV_CHECK(c, offline && strstr(s.root(1).reason, "empty"));
+    LibraryRow marked{};
+    KV_CHECK(c, find(s, "qx4", &marked) == 1 && marked.offline == 1);
+    u64 read_before = s.scan().tags_read;
+    // Back: walked again, nothing read again, nothing missing.
+    io_remove(music);
+    KV_CHECK(c, rename(away, music) == 0);
+    bool back_on = s.until([&] { return s.root(1).state == (u8)LibraryRootState::Idle; }, 10.0);
+    KV_CHECK(c, back_on && s.root(1).tracks == tracks_now && s.scan().tags_read == read_before);
+    KV_CHECK(c, find(s, "qx4", &marked) == 1 && marked.offline == 0);
+    s.stop();
+
+    // A root that is polled (as a share is): an added file is found by the next walk of it.
+    Rig w;
+    KV_CHECK(c, w.start(data, 0.3, 0.5, true, 0.5));
+    KV_CHECK(c, w.until([] { return g_finished == 1; }));
+    format(p, sizeof p, "%s/Polled/01 - Polled.flac", music);
+    put_track_file(p, "Polled In Qx5", 1);
+    f64 polled = until_found(w, "qx5", 1);
+    KV_INFO("test", "library changes: a polled root's new file found in %.2f s (polled every 0.5 s)", polled);
+    KV_CHECK(c, polled >= 0.0 && polled < 3.0);
+    w.stop();
     io_remove_tree(tmp);
 }

@@ -198,6 +198,43 @@ void scan_overrides(Shared& sh, Index& ix, u32 root, const char* root_path) {
     }, &w);
 }
 
+// A track moved from one place in its root to another: its overrides go with it, from one
+// directory's file to the other's.
+void move_overrides(Shared& sh, u32 root, const char* from, const char* to) {
+    char rp[kPathMax];
+    if (!root_path_locked(sh, root, rp, sizeof rp)) return;
+    auto split = [](const char* rel, char* dir, u32 cap) { const char* s = strrchr(rel, '/'); format(dir, cap, "%.*s", s ? (int)(s - rel) : 0, rel); return s ? s + 1 : rel; };
+    char fd[kPathMax], td[kPathMax], fp[kPathMax], tp[kPathMax], problem[160];
+    const char* fname = split(from, fd, sizeof fd);
+    const char* tname = split(to, td, sizeof td);
+    override_path(fp, sizeof fp, sh.data_dir, rp, fd);
+    override_path(tp, sizeof tp, sh.data_dir, rp, td);
+    OverrideFile a;
+    if (!override_load(fp, &a, problem, sizeof problem) || !a.entries.len) { a.free(); return; }
+    TagValue v[64];
+    u32 n = override_values(a, fname, v, 64);
+    if (!n) { a.free(); return; }
+    OverrideFile b;
+    if (strcmp(fp, tp) != 0 && !override_load(tp, &b, problem, sizeof problem)) { override_set_aside(tp, problem); b.clear(); }
+    OverrideFile& dst = strcmp(fp, tp) == 0 ? a : b;
+    // Copied before the source's lines go (they point into it).
+    Strings keep;
+    u32 at[64];
+    for (u32 i = 0; i < n; ++i) at[i] = keep.add(v[i].text, v[i].len);
+    for (u32 i = 0; i < n; ++i) override_set(a, fname, v[i].field, "", true);
+    bool first[(u32)TagField::Count];
+    for (bool& f : first) f = true;
+    for (u32 i = 0; i < n; ++i) {
+        // A field given twice is two values: the first replaces, the others join it.
+        if (first[(u32)v[i].field]) { override_set(dst, tname, v[i].field, keep.at(at[i]), false); first[(u32)v[i].field] = false; }
+        else dst.entries.push(OverrideFile::Entry{dst.s.add(tname), (u8)v[i].field, dst.s.add(keep.at(at[i]))});
+    }
+    override_save(fp, a);
+    if (&dst != &a) override_save(tp, dst);
+    atomic_add_fetch(&sh.overrides_epoch, 1u, MO_RELEASE);
+    a.free(); b.free(); keep.free();
+}
+
 void write_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     Index ix;
@@ -215,6 +252,16 @@ void write_thread(void* arg) {
     Array<u8> fields, sources;
     Array<Note> notes;
     f64 last_commit = 0.0;
+    struct WalkNo { u32 root, walk; };
+    Array<WalkNo> walk_no;          // each root's walk under way, or its last
+    auto walk_of = [&](u32 root) -> u32 {
+        for (const WalkNo& x : walk_no) if (x.root == root) return x.walk;
+        u32 n = up ? ix.current_walk(root) : 0;
+        walk_no.push(WalkNo{root, n});
+        return n;
+    };
+    if (up) ix.forget_missing(30); // a month missing is forgotten
+    Array<char> moves;
     for (;;) {
         // At the end, what was already given is still done (the list of roots saved), then it stops.
         os_mutex_lock(&sh.lock);
@@ -283,15 +330,91 @@ void write_thread(void* arg) {
                 if (up) ix.remove_root(m->root);
                 break;
             case WriteKind::SaveRoots: save = true; break;
+            case WriteKind::WalkStart: {
+                u32 n = up ? ix.next_walk(m->root) : 0;
+                bool set = false;
+                for (WalkNo& x : walk_no) if (x.root == m->root) { x.walk = n; set = true; }
+                if (!set) walk_no.push(WalkNo{m->root, n});
+                Note s{NoteKind::WalkStarted};
+                s.root = m->root;
+                notes.push(s);
+                break;
+            }
             case WriteKind::Walked: {
+                if (!up || !is_live(m->root)) break;
                 Note n{NoteKind::Walked};
                 n.root = m->root;
                 n.seconds = m->seconds;
+                u32 had = ix.count_tracks(m->root);
+                if (m->root_failed) {
+                    // Gone, or cannot be listed: offline; nothing marked missing.
+                    Note o{NoteKind::Offline};
+                    o.root = m->root;
+                    format(o.reason, sizeof o.reason, "%s", m->value);
+                    notes.push(o);
+                } else if (m->files == 0 && had > 0) {
+                    // Empty where it held tracks: an unmounted disk leaves its mount point so. Offline,
+                    // and nothing under it forgotten.
+                    Note o{NoteKind::Offline};
+                    o.root = m->root;
+                    u64 was = ix.root_volume(m->root);
+                    if (was && m->volume && was != m->volume) format(o.reason, sizeof o.reason, "the disk it was on is not there: its directory is empty, on another disk");
+                    else format(o.reason, sizeof o.reason, "it is empty, where it held %u tracks", had);
+                    notes.push(o);
+                } else {
+                    // What the walk did not see is missing; what it found that is one of those, moved.
+                    moves.clear();
+                    ix.after_walk(m->root, walk_of(m->root), &moves);
+                    for (u32 at = 0; at < moves.len;) {
+                        const char* from = moves.data + at;
+                        const char* to = from + strlen(from) + 1;
+                        move_overrides(sh, m->root, from, to);
+                        at += (u32)(strlen(from) + strlen(to) + 2);
+                    }
+                    if (m->volume) ix.set_root_volume(m->root, m->volume);
+                }
                 walked.push(n);
+                break;
+            }
+            case WriteKind::TakeIn: {
+                // An override file the watcher saw change: whose, and taken in if it is new to us.
+                if (!up) break;
+                char base[kPathMax];
+                format(base, sizeof base, "%s/overrides/", sh.data_dir);
+                usize bn = strlen(base);
+                if (strncmp(m->path, base, bn) != 0) break;
+                const char* under = m->path + bn; // "home/me/Music/Artist/Album/overrides.txt"
+                os_mutex_lock(&sh.lock);
+                u32 root = 0;
+                char rel_dir[kPathMax] = "";
+                for (const Shared::RootLine& r : sh.root_lines) {
+                    const char* rp = r.path[0] == '/' ? r.path + 1 : r.path;
+                    usize n = strlen(rp);
+                    if (strncmp(under, rp, n) == 0 && under[n] == '/') {
+                        root = r.id;
+                        const char* rest = under + n + 1;
+                        const char* last = strrchr(rest, '/');
+                        format(rel_dir, sizeof rel_dir, "%.*s", last ? (int)(last - rest) : 0, rest);
+                    }
+                }
+                os_mutex_unlock(&sh.lock);
+                IoStat st;
+                if (root && io_stat(m->path, &st) && ix.override_seen(m->path) != st.mtime_ns) {
+                    take_in_overrides(sh, ix, root, rel_dir, m->path, st.mtime_ns);
+                    touch(root);
+                }
                 break;
             }
             case WriteKind::Batch: {
                 Batch& b = *m->batch;
+                // What went first: a rename is a removal and an addition, and the addition is
+                // known for the track moved by finding it missing.
+                if (up) for (const GoneMsg& g : b.gone) {
+                    if (!is_live(g.root)) continue;
+                    if (g.dir) ix.mark_missing_under(g.root, b.s.at(g.path));
+                    else ix.mark_missing(g.root, b.s.at(g.path));
+                    touch(g.root);
+                }
                 if (up) {
                     for (const DirMsg& d : b.dirs) {
                         if (!is_live(d.root)) continue;
@@ -305,14 +428,20 @@ void write_thread(void* arg) {
                     for (const TrackMsg& t : b.tracks) {
                         if (!is_live(t.root)) continue;
                         const char* dp = b.s.at(t.dir);
-                        if (!dir_path || dir_root != t.root || strcmp(dp, dir_path) != 0) { dir_id = ix.find_dir(t.root, dp); dir_root = t.root; dir_path = dp; }
+                        if (!dir_path || dir_root != t.root || strcmp(dp, dir_path) != 0) {
+                            dir_id = ix.find_dir(t.root, dp);
+                            if (!dir_id) dir_id = ix.ensure_dir(t.root, dp); // a watcher's file in a directory not yet a row
+                            dir_root = t.root; dir_path = dp;
+                        }
                         TrackRec r;
                         r.root = t.root; r.dir = dp; r.path = b.s.at(t.path); r.name = b.s.at(t.name); r.shown = b.s.at(t.shown);
                         r.size = t.size; r.mtime = t.mtime;
                         r.title = b.s.at(t.title); r.artist = b.s.at(t.artist); r.album = b.s.at(t.album);
                         r.track = t.track; r.disc = t.disc;
                         bool fresh, changed, unread;
-                        u64 id = ix.put_track(r, dir_id, &fresh, &changed, &unread);
+                        char moved[kPathMax];
+                        u64 id = ix.put_track(r, dir_id, walk_of(t.root), &fresh, &changed, &unread, moved, sizeof moved);
+                        if (moved[0]) move_overrides(sh, t.root, moved, r.path);
                         if (id && unread) {
                             // A track in the slot's directory goes with the slot's; the rest in walk order.
                             if (slot.on && slot.dir && slot.dir == dir_id) slot_more.add(id, t.root, r.path, t.size, t.mtime);
@@ -321,6 +450,7 @@ void write_thread(void* arg) {
                     }
                 }
                 for (const DirMsg& d : b.dirs) touch(d.root);
+                for (const TrackMsg& t : b.tracks) touch(t.root);
                 b.free();
                 mem_free(m->batch);
                 break;
@@ -433,6 +563,7 @@ void write_thread(void* arg) {
         mem_free(m);
     }
     work.free(); live.free(); touched.free(); walked.free(); texts.free(); fields.free(); sources.free(); notes.free();
+    walk_no.free(); moves.free();
     ix.close();
 }
 
@@ -493,6 +624,8 @@ void read_thread(void* arg) {
                 if (stop_check(&check)) { r.stopped = true; atomic_add_fetch(&sh.cancelled, (u64)1, MO_RELAXED); }
             }
             r.seconds = time_now() - t0;
+            for (u32 i = 0; i < r.count; ++i)
+                for (const Shared::RootLine& l : roots.lines) if (l.id == r.rows[i].root && l.offline) r.rows[i].offline = 1;
             if (up && ix.damaged) { ix.close(); up = false; } // the writer will make it again; open it afresh next time
             os_mutex_lock(&sh.lock);
             sh.reading_window = 0;
@@ -549,7 +682,7 @@ struct Library {
     f64      rate_at = 0.0;
     u64      rate_files = 0, rate_tags = 0;
     char     data_dir[kPathMax] = "";
-    OsThread tagger;
+    OsThread tagger, watcher;
     Array<Reading> reading;
     Array<ReadAsk> waiting;       // asked, not yet in the queue (it was full)
 };
@@ -731,6 +864,13 @@ void commands(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     }
 }
 
+void set_offline(Library& L, u32 root, bool offline) {
+    os_mutex_lock(&L.sh->lock);
+    for (Shared::RootLine& l : L.sh->root_lines) if (l.id == root) l.offline = offline;
+    os_cond_signal(&L.sh->watch_wake);
+    os_mutex_unlock(&L.sh->lock);
+}
+
 void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     Array<Note> notes;
     Array<Result> results;
@@ -752,6 +892,9 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
         switch (n.kind) {
         case NoteKind::Counts:
             row.tracks = n.tracks; row.dirs = n.dirs; row.failed = n.failed; row.unread = n.unread;
+            os_mutex_lock(&L.sh->lock);
+            for (Shared::RootLine& l : L.sh->root_lines) if (l.id == r->id) l.tracks = n.tracks;
+            os_mutex_unlock(&L.sh->lock);
             break;
         case NoteKind::Walked:
             r->walked = true;
@@ -761,6 +904,15 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
         case NoteKind::Offline:
             row.state = (u8)LibraryRootState::Offline;
             format(row.reason, sizeof row.reason, "%s", n.reason);
+            set_offline(L, r->id, true);
+            break;
+        case NoteKind::WalkStarted:
+            // Walked again (at start-up, back from offline, events lost): its state from the walk.
+            r->walked = false;
+            r->finished = false;
+            row.state = (u8)LibraryRootState::Walking;
+            row.reason[0] = 0;
+            set_offline(L, r->id, false);
             break;
         case NoteKind::Committed: break;
         }
@@ -770,7 +922,10 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     for (RootInfo& r : L.roots) {
         if (!roots) break;
         LibraryRoot& row = root_row(roots, r);
-        if (row.state == (u8)LibraryRootState::Offline) { if (r.walked && !r.finished) { r.finished = true; ctx.emit(LibraryScanFinished{r.id, row.tracks, r.walk_seconds}); } continue; }
+        if (row.state == (u8)LibraryRootState::Offline) {
+            if (r.walked && !r.finished && !atomic_load(&L.sh->tags_active, MO_RELAXED)) { r.finished = true; ctx.emit(LibraryScanFinished{r.id, row.tracks, r.walk_seconds}); }
+            continue;
+        }
         if (!r.walked) row.state = (u8)LibraryRootState::Walking;
         else if (row.unread) row.state = (u8)LibraryRootState::Reading;
         else {
@@ -931,12 +1086,17 @@ bool library_startup(Engine& e, ModuleInstance& self) {
     new (L->sh) Shared();
     Shared& sh = *L->sh;
     os_mutex_init(&sh.lock);
-    os_cond_init(&sh.scan_wake); os_cond_init(&sh.write_wake); os_cond_init(&sh.read_wake); os_cond_init(&sh.tag_wake);
+    os_cond_init(&sh.scan_wake); os_cond_init(&sh.write_wake); os_cond_init(&sh.read_wake); os_cond_init(&sh.tag_wake); os_cond_init(&sh.watch_wake);
+    sh.quiet_seconds = g_config.quiet_seconds;
+    sh.offline_seconds = g_config.offline_seconds;
+    sh.poll_seconds = g_config.poll_seconds;
+    sh.poll_roots = g_config.poll_roots;
     format(sh.index_path, sizeof sh.index_path, "%s/index.sqlite", L->data_dir);
     format(sh.data_dir, sizeof sh.data_dir, "%s", L->data_dir);
     format(sh.roots_path, sizeof sh.roots_path, "%s/roots.txt", L->data_dir);
     if (!os_thread_start(&L->writer, write_thread, &sh) || !os_thread_start(&L->reader, read_thread, &sh) ||
-        !os_thread_start(&L->scan, scan_thread, &sh) || !os_thread_start(&L->tagger, tag_thread, &sh)) {
+        !os_thread_start(&L->scan, scan_thread, &sh) || !os_thread_start(&L->tagger, tag_thread, &sh) ||
+        !os_thread_start(&L->watcher, watch_thread, &sh)) {
         KV_ERROR("library", "the library's threads will not start");
         return false; // shutdown joins what started
     }
@@ -953,7 +1113,9 @@ void library_shutdown(Engine& e, ModuleInstance&) {
     os_mutex_lock(&sh.lock);
     sh.quit = true;
     os_cond_broadcast(&sh.scan_wake); os_cond_broadcast(&sh.write_wake); os_cond_broadcast(&sh.read_wake); os_cond_broadcast(&sh.tag_wake);
+    os_cond_broadcast(&sh.watch_wake);
     os_mutex_unlock(&sh.lock);
+    if (L->watcher.handle) os_thread_join(&L->watcher);
     if (L->tagger.handle) os_thread_join(&L->tagger);
     // Reads still in the queue: cancelled, and their bytes freed if they came anyway.
     if (IoQueue* io = platform_io(e)) {
@@ -976,6 +1138,7 @@ void library_shutdown(Engine& e, ModuleInstance&) {
     sh.walks.free(); sh.drops.free(); sh.writes.free(); sh.asks.free(); sh.notes.free(); sh.results.free(); sh.root_lines.free();
     sh.jobs.free(); sh.read_asks.free(); sh.read_dones.free();
     os_cond_destroy(&sh.scan_wake); os_cond_destroy(&sh.write_wake); os_cond_destroy(&sh.read_wake); os_cond_destroy(&sh.tag_wake);
+    os_cond_destroy(&sh.watch_wake);
     os_mutex_destroy(&sh.lock);
     mem_free(L->sh);
     L->sh = nullptr;

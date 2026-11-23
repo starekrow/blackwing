@@ -6,13 +6,14 @@ in an index as soon as its directory is listed, playable, with a title, artist a
 guessed from its path. Queries are windows kept open over the index, answered off the main
 thread. Its API is events and tables, as the player's is.
 
-**Status:** slice 3, milestone 6: roots, the names pass, the tags pass, the priority slot,
-the index, windows over every view, and the user's overrides. Watching for changes is the
-milestone after it.
+**Status:** slice 3, milestone 7: roots, the names pass, the tags pass, the priority slot,
+the index, windows over every view, the user's overrides, and changes: the watcher,
+missing files, moves, roots that are polled and roots that go offline.
 
 ## How it works
 
-**Five threads.**
+**Six threads**: the five below, and a watch thread with the engine's `FsWatcher` (see
+Changes).
 
 ```
 main thread (library.pump)      scan thread        tagger thread          writer thread         reader thread
@@ -100,6 +101,34 @@ hand while the program was not running counts. A file that will not parse is ren
 aside (`overrides.txt.broken-<time>`), never written over, with a warning naming the line,
 and its overrides are not used.
 
+**Changes.** Each root that is not offline is watched with the engine's `FsWatcher`, on
+a thread of its own, and so is the overrides tree. Its events are hints: a path it names is
+looked at again once it has been quiet for a moment (a second; a file being written
+changes many times), and what is there is believed. A file there is a row with its size and
+time (read again if they changed); a file not there is gone; a directory gone takes what
+was under it; lost events are a walk of the root; an override file changed is taken in.
+Every root is also walked at start-up, since things change while the program is not
+running, and a walk marks what it did not see.
+
+- **A file that goes is missing, not deleted.** Its row, its values and its overrides are
+  kept, it leaves every view and the search, and it comes back as itself if the file does.
+  Missing for a month, it is forgotten (at start-up).
+- **A move keeps the track.** A new path whose name, size and time are those of exactly one
+  missing track of the root is that track moved: it keeps its id, its values, and its
+  overrides, which move from one directory's file to the other's. A rename to another name
+  is a new track (and the old one missing).
+- **A root that cannot be trusted to report is polled**: one on a share (`FsWatcher` polls
+  it under `Auto`, KR12), one the OS will not watch (its watches run out; it is added again
+  with `Poll`), or every root with `poll_roots`; every `poll_seconds` (a minute).
+- **A root that goes away is offline, not forgotten**: its directory is gone or cannot be
+  listed, or it is empty where it held tracks (an unplugged disk leaves its mount point
+  so; with KR13's volume the reason says whether it is another disk). Nothing under it is
+  marked missing; its rows stay in every view with `offline` set. Every root is looked at
+  again every `offline_seconds` (a minute): an offline one that has something in it is
+  walked again (and nothing is read again that did not change), and one that is empty is
+  walked, and the walk says offline. Removals the watcher reports from a root that is now
+  empty are not believed file by file for the same reason.
+
 **The index** is sqlite (vendored, built as C), in WAL mode, at `<data>/index.sqlite`,
 with tables for the roots, the directories, the tracks (with the merge of their tags and
 their audio), every source's values (`tagvals`), and an FTS5 table over the tracks' title,
@@ -186,7 +215,7 @@ Header `korvid/blackwing_library/library.h`:
 | `LibraryRow` | component | a row of `library.rows`: `query`, `index`, `id`, `kind` (directory, track, artist, album, genre), names, numbers, `count`, `albums`, `date`, `path`, `reason` |
 | `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `cancelled`, `names_per_second`, `tags_per_second`, `slot`, `dir` |
 | `kLibraryMaxWindow`, `kLibraryMaxRows` | constants | 512 rows a window, 4096 in all |
-| `LibraryConfig`, `library_configure` | record, function | `data_dir`, before `engine_init` |
+| `LibraryConfig`, `library_configure` | record, function | `data_dir`, `quiet_seconds` (1), `offline_seconds` (60), `poll_seconds` (60), `poll_roots`; before `engine_init` |
 | `library_scan(e)` | function | the resource, for code outside the schedule |
 
 Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the record.
@@ -207,6 +236,11 @@ Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the reco
   value, and still by the path), and in the groupings. The audio file is not touched, nor
   its time.
 - **An override file is read whole**, up to 1 MB; it is one directory's.
+- **A change on a local disk is in the index within a second or so**: a file added or
+  changed 0.6 s, moved 0.4 s, removed 0.6 s, a directory removed 0.35 s, with the quiet
+  moment at 0.3 s (in the tests); with the default second, add 0.7 s.
+- **Watching a large root costs its first walk some time**: the watcher's watches are set
+  up while the walk runs (fifty thousand files: found by name at 2.3 s instead of 1.6).
 - **What is kept goes with the generation**: while a scan commits, an open grouping or
   search is made again with each refill.
 - **A root is walking, then reading, then idle**, and `LibraryScanFinished` comes when it is
@@ -245,7 +279,12 @@ in the albums; the file in Blackwing's data says so in words; the audio file's b
 time are unchanged; the index deleted and made again keeps them; the file edited by hand
 while stopped is taken in at the next start; the root removed and added again keeps
 them; a cleared title is the file's own again; a file that will not parse is set aside.
-Then a wide search replaced at once by a narrow one for the same window, forty times over
+Then changes, with the quiet moment at 0.3 s: a file added,
+its title changed, moved with an override on it (the same id and the override after), removed
+and put back (the same id), a directory removed, each within two seconds; a file removed and
+one added while stopped, found by the start-up walk; the root emptied (offline, "empty", its
+rows still found and marked offline) and filled again (idle, nothing read again); and a root
+polled every half second finding a new file. Then a wide search replaced at once by a narrow one for the same window, forty times over
 four thousand files: only the narrow one is ever shown (and nearly every wide one is
 stopped in sqlite).
 Clean under ASan, UBSan and TSan.

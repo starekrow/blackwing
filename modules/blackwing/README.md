@@ -28,7 +28,8 @@ SECONDS`, `player seekby SECONDS`, `player volume DB`, `player mute on|off`, `pl
 STAGE PARAM VALUE`, `player eq BAND DB`, `player eq preset NAME`, `player eq presets`,
 `player remove ROW`, `player move ROW [BEFORE]`, `player insert BEFORE FILE...`, `player
 clear`, `player stop`, `player status`, `library add DIR`, `library remove ROOT`, `library
-status`, `library find WORDS`, `library play N` (the N-th the last find listed), `quit`. Ctrl-C
+status`, `library find WORDS`, `library play N` (the N-th the last find listed), `library
+override N FIELD [VALUE...|--clear]` (no value hides the field), `quit`. Ctrl-C
 stops cleanly. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
 a bad command line, 3 if a dev build leaked.
 

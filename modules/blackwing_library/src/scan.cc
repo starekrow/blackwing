@@ -31,6 +31,8 @@ struct RootWalk {
     u32     head = 0;
     f64     started = 0.0;
     u32     files = 0;
+    bool    root_failed = false;    // its own directory could not be listed
+    char    reason[96] = "";
     Strings early;              // directories listed ahead of the walk, for the slot: not listed again
     bool    has_more() const { return head < queue.bytes.len; }
 };
@@ -97,24 +99,7 @@ bool on_entry(void* user, const IoDirEntry& e) {
         return true;
     }
     if (!e.st.is_file || !audio_name(e.name)) return true;
-    TrackMsg t{};
-    t.root = l.w->root;
-    t.dir = l.b->s.add(l.rel);
-    t.path = l.b->s.add(rel, n);
-    t.name = l.b->s.add(name);
-    char text[kPathMax];
-    shown(rel, text, sizeof text);
-    t.shown = l.b->s.add(text);
-    TagRead g = tags_from_path(rel, Span<u8>(l.tag_mem, 1u << 16));
-    auto value = [&](TagField f) { const TagValue* v = tags_find(g.values, f, TagSource::Path); return v ? v->text : ""; };
-    t.title = l.b->s.add(value(TagField::Title));
-    t.artist = l.b->s.add(value(TagField::Artist));
-    t.album = l.b->s.add(value(TagField::Album));
-    t.track = parse_u32(value(TagField::TrackNumber));
-    t.disc = parse_u32(value(TagField::DiscNumber));
-    t.size = e.st.size;
-    t.mtime = e.st.mtime_ns;
-    l.b->tracks.push(t);
+    add_track(*l.b, l.w->root, rel, n, e.st.size, e.st.mtime_ns, l.tag_mem);
     ++l.found;
     return true;
 }
@@ -133,12 +118,16 @@ void send(Shared& sh, Batch*& b, f64* since) {
     *since = 0.0;
 }
 
-void send_walked(Shared& sh, u32 root, f64 seconds) {
+void send_walk(Shared& sh, WriteKind kind, u32 root, f64 seconds = 0.0, u32 files = 0, bool failed = false, u64 volume = 0, const char* reason = "") {
     WriteMsg* m = (WriteMsg*)mem_alloc(sizeof(WriteMsg));
     new (m) WriteMsg{};
-    m->kind = WriteKind::Walked;
+    m->kind = kind;
     m->root = root;
     m->seconds = seconds;
+    m->files = files;
+    m->root_failed = failed;
+    m->volume = volume;
+    format(m->value, sizeof m->value, "%s", reason);
     os_mutex_lock(&sh.lock);
     sh.writes.push(m);
     os_cond_signal(&sh.write_wake);
@@ -146,6 +135,32 @@ void send_walked(Shared& sh, u32 root, f64 seconds) {
 }
 
 } // namespace
+
+void add_track(Batch& b, u32 root, const char* rel, u32 n, u64 size, i64 mtime, u8* tag_mem) {
+    TrackMsg t{};
+    t.root = root;
+    const char* slash = strrchr(rel, '/');
+    char dir[kPathMax];
+    format(dir, sizeof dir, "%.*s", slash ? (int)(slash - rel) : 0, rel);
+    t.dir = b.s.add(dir);
+    t.path = b.s.add(rel, n);
+    char name[512];
+    shown(slash ? slash + 1 : rel, name, sizeof name);
+    t.name = b.s.add(name);
+    char text[kPathMax];
+    shown(rel, text, sizeof text);
+    t.shown = b.s.add(text);
+    TagRead g = tags_from_path(rel, Span<u8>(tag_mem, 1u << 16));
+    auto value = [&](TagField f) { const TagValue* v = tags_find(g.values, f, TagSource::Path); return v ? v->text : ""; };
+    t.title = b.s.add(value(TagField::Title));
+    t.artist = b.s.add(value(TagField::Artist));
+    t.album = b.s.add(value(TagField::Album));
+    t.track = parse_u32(value(TagField::TrackNumber));
+    t.disc = parse_u32(value(TagField::DiscNumber));
+    t.size = size;
+    t.mtime = mtime;
+    b.tracks.push(t);
+}
 
 bool audio_name(const char* name) {
     const char* dot = strrchr(name, '.');
@@ -186,19 +201,17 @@ void list_one(Shared& sh, RootWalk& w, const char* rel_in, Batch*& batch, f64* s
     atomic_add_fetch(&sh.files_found, (u64)l.found, MO_RELAXED);
     w.files += l.found;
     if (!listed && rel[0] == 0) {
-        // The root itself: offline, with the reason. Its rows, if it had any, stay.
-        Note n{NoteKind::Offline};
-        n.root = w.root;
-        format(n.reason, sizeof n.reason, "%s", errno_words(err));
-        os_mutex_lock(&sh.lock);
-        sh.notes.push(n);
-        os_mutex_unlock(&sh.lock);
+        // The root itself: offline, with the reason, which the walk's end carries to the
+        // writer (in order after its start). Its rows, if it had any, stay.
+        w.root_failed = true;
+        format(w.reason, sizeof w.reason, "%s", errno_words(err));
     }
 }
 
 void scan_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     Array<RootWalk*> walks;
+    Array<u32> started;
     Batch* batch = nullptr;
     f64 since = 0.0;
     u8* tag_mem = (u8*)mem_alloc(1u << 16);
@@ -207,13 +220,18 @@ void scan_thread(void* arg) {
         os_mutex_lock(&sh.lock);
         while (!sh.quit && sh.walks.len == 0 && sh.drops.len == 0 && walks.len == 0 && !sh.walk_next_root) os_cond_wait(&sh.scan_wake, &sh.lock);
         if (sh.quit) { os_mutex_unlock(&sh.lock); break; }
+        started.clear();
         for (const Walk& w : sh.walks) {
+            bool walking = false;
+            for (const RootWalk* x : walks) walking |= x->root == w.root;
+            if (walking) continue; // asked again while it is walked: the walk under way will do
             RootWalk* r = (RootWalk*)mem_alloc(sizeof(RootWalk));
             new (r) RootWalk{};
             r->root = w.root;
             format(r->path, sizeof r->path, "%s", w.path);
             r->queue.add("");
             walks.push(r);
+            started.push(w.root);
         }
         sh.walks.clear();
         for (u32 id : sh.drops) {
@@ -228,6 +246,9 @@ void scan_thread(void* arg) {
             }
         }
         sh.drops.clear();
+        os_mutex_unlock(&sh.lock);
+        for (u32 id : started) send_walk(sh, WriteKind::WalkStart, id); // before any of its batches
+        os_mutex_lock(&sh.lock);
         u32 next_root = sh.walk_next_root;
         char next[kPathMax];
         format(next, sizeof next, "%s", sh.walk_next);
@@ -264,7 +285,9 @@ void scan_thread(void* arg) {
         if (batch && (batch->dirs.len + batch->tracks.len >= kBatchRecords || time_now() - since >= kBatchSeconds)) send(sh, batch, &since);
         if (!w.has_more()) {
             send(sh, batch, &since);
-            send_walked(sh, w.root, time_now() - w.started);
+            IoStat st;
+            u64 volume = io_stat(w.path, &st) ? st.volume : 0;
+            send_walk(sh, WriteKind::Walked, w.root, time_now() - w.started, w.files, w.root_failed, volume, w.reason);
             w.queue.free();
             w.early.free();
             mem_free(&w);
@@ -276,6 +299,7 @@ void scan_thread(void* arg) {
     if (batch) { batch->free(); mem_free(batch); }
     for (RootWalk* r : walks) { r->queue.free(); r->early.free(); mem_free(r); }
     walks.free();
+    started.free();
     mem_free(tag_mem);
 }
 

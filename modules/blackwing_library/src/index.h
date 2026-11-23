@@ -12,7 +12,7 @@ struct sqlite3_stmt;
 
 namespace kv::lib {
 
-constexpr u32 kSchema = 5; // a file with another version is deleted and made again
+constexpr u32 kSchema = 6; // a file with another version is deleted and made again
 
 // Sort keys and group identities (keys.cc).
 u32 sort_key(const char* s, char* out, u32 cap);
@@ -77,7 +77,28 @@ struct Index {
     // The track's id: a new row, or the old one with its size and time brought up to date.
     // *fresh says which; *changed whether its size or time differ from the last look;
     // *unread whether its tags want reading (new, changed, or never read at this size and time).
-    u64  put_track(const TrackRec& t, u64 dir, bool* fresh, bool* changed, bool* unread);
+    // `walk` is the root's walk that saw it. A new path whose name, size and time are a
+    // missing track's is that track moved: it keeps its id, and *moved_from (cap bytes) says
+    // where it was. A missing track seen again is not missing.
+    u64  put_track(const TrackRec& t, u64 dir, u32 walk, bool* fresh, bool* changed, bool* unread, char* moved_from = nullptr, u32 cap = 0);
+    // Gone: a file, or everything under a directory. Missing, not deleted: its row, values
+    // and overrides are kept, it leaves every view, and it comes back if the file does.
+    void mark_missing(u32 root, const char* rel);
+    void mark_missing_under(u32 root, const char* rel_dir);
+    // After a whole walk of a root: what it did not see is missing; and a track it found new
+    // whose name, size and time are one gone missing is that one moved (the new row goes,
+    // the old takes its path). The moves, as (from, to) paths within the root.
+    void after_walk(u32 root, u32 walk, Array<char>* moves);
+    // Missing for longer than `days`: forgotten.
+    void forget_missing(u32 days);
+    // A directory's id, made (with its parents) if the index has none: for a file a watcher
+    // reports in a directory the walk never listed.
+    u64  ensure_dir(u32 root, const char* rel);
+    // A root's walks are numbered, across runs: a track's `seen` is the last that saw it.
+    u32  next_walk(u32 root);
+    u32  current_walk(u32 root);
+    u64  root_volume(u32 root);
+    void set_root_volume(u32 root, u64 volume);
     // What a read of a track's tags found: every source's values, the merge, the audio.
     struct Tags {
         u64 track = 0, size = 0; i64 mtime = 0;

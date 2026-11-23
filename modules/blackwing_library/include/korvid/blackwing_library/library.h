@@ -179,6 +179,10 @@ struct LibraryConfig {
     // Where the index and the list of roots are kept; "" or null: the per-user data
     // directory (platform_pref_path) and "library/" under it.
     const char* data_dir = nullptr;
+    f64  quiet_seconds   = 1.0;  // a changed file is looked at once it has been quiet this long
+    f64  offline_seconds = 60.0; // an offline root is looked at again this often
+    f64  poll_seconds    = 60.0; // a root the OS will not report on (a share) is polled this often
+    bool poll_roots      = false; // poll every root, whatever the OS offers (for a share it does not know, and tests)
 };
 // Before engine_init.
 void library_configure(const LibraryConfig& config);

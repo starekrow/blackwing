@@ -30,11 +30,13 @@ struct Strings {
 // What the walk found, on its way to the writer: offsets into `s`.
 struct DirMsg   { u32 root; u32 path, parent, name, reason; u8 state; };
 struct TrackMsg { u32 root; u32 dir, path, name, shown, title, artist, album; u64 size; i64 mtime; u32 track, disc; };
+struct GoneMsg  { u32 root; u32 path; bool dir; };
 struct Batch {
     Strings         s;
     Array<DirMsg>   dirs;
     Array<TrackMsg> tracks;
-    void free() { s.free(); dirs.free(); tracks.free(); }
+    Array<GoneMsg>  gone;     // what a watcher said went, and is not there
+    void free() { s.free(); dirs.free(); tracks.free(); gone.free(); }
 };
 
 // The tags pass. The writer says which tracks want reading (new, or changed since they
@@ -75,11 +77,14 @@ struct SlotMsg {
 };
 
 // For the writer, in the order sent.
-enum class WriteKind : u8 { AddRoot, RemoveRoot, Batch, Walked, SaveRoots, Tags, Slot, Override };
+enum class WriteKind : u8 { AddRoot, RemoveRoot, Batch, WalkStart, Walked, SaveRoots, Tags, Slot, Override, TakeIn };
 struct WriteMsg {
     WriteKind kind;
     u32       root = 0;
     f64       seconds = 0.0;
+    u32       files = 0;          // Walked: audio files the walk found
+    bool      root_failed = false; // Walked: the root's own directory could not be listed
+    u64       volume = 0;          // Walked: the file system the root is on
     Batch*    batch = nullptr;
     TagBatch* tags = nullptr;
     SlotMsg*  slot = nullptr;
@@ -96,7 +101,7 @@ struct ReadAsk  { u32 job = 0, gen = 0; u64 at = 0, len = 0; bool slot = false; 
 struct ReadDone { u32 job = 0, gen = 0; u64 at = 0; void* data = nullptr; usize size = 0; i32 err = 0; bool ok = false; };
 
 // For the main thread.
-enum class NoteKind : u8 { Counts, Walked, Offline, Committed };
+enum class NoteKind : u8 { Counts, Walked, Offline, Committed, WalkStarted };
 struct Note {
     NoteKind kind;
     u32 root = 0;
@@ -116,7 +121,7 @@ struct Result {
 };
 struct Ask { LibraryQuery q; u32 seq = 0; };
 
-// For the scan thread.
+// For the scan thread: a root to walk whole.
 struct Walk { u32 root; char path[kPathMax]; };
 
 struct Shared {
@@ -142,6 +147,12 @@ struct Shared {
     Array<ReadAsk>   read_asks;
     Array<ReadDone>  read_dones;
     OsCond           tag_wake;
+    OsCond           watch_wake;
+    // Settings the threads read.
+    f64              quiet_seconds = 1.0;
+    f64              offline_seconds = 60.0;
+    f64              poll_seconds = 60.0;
+    bool             poll_roots = false;
     // main -> scan: a directory to list before the rest
     u32              walk_next_root = 0;
     char             walk_next[kPathMax] = "";
@@ -159,7 +170,7 @@ struct Shared {
     char walking_dir[256] = ""; // under the lock
     bool rebuilt = false;
     // The roots, as the writer saves them: under the lock.
-    struct RootLine { u32 id; char path[kPathMax]; };
+    struct RootLine { u32 id; char path[kPathMax]; bool offline = false; u32 tracks = 0; };
     Array<RootLine> root_lines;
 };
 
@@ -167,6 +178,9 @@ void scan_thread(void* shared);
 void write_thread(void* shared);
 void read_thread(void* shared);
 void tag_thread(void* shared);
+void watch_thread(void* shared);
+// A track's record for the writer, with the guess from its path: the walk's and the watcher's.
+void add_track(Batch& b, u32 root, const char* rel, u32 rel_len, u64 size, i64 mtime, u8* tag_mem);
 
 // The audio files the walk lists, by extension.
 bool audio_name(const char* name);
