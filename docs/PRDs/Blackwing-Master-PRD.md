@@ -442,9 +442,10 @@ Slices, as a proposal; each gets its own PRD when it starts.
    *Done when* a fresh install aimed at fifty thousand tracks is playing a chosen one
    within seconds, and nothing in the corpus stops the scan.
    *Built* Nov 23, 2026, through milestone 8; the slice's PRD has what is still owed.
-4. **The development face.** `ui_dev` over the API and nothing else.
+4. **The development face** ([Blackwing-Slice-4-PRD.md](Blackwing-Slice-4-PRD.md)). `ui_dev` over the API and nothing else; the
+   window; the session (B28).
    *Done when* everything in slices 1 to 3 can be driven and watched from it, and from a
-   Lua script with no face at all.
+   Lua script with no face at all, and it starts as it was left.
 5. **The system.** `media_platform`; the Windows and macOS backends of both platform
    modules; hot-plug.
    *Done when* the media keys and the OS's now-playing surface work on all three, and

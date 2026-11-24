@@ -392,8 +392,8 @@ from the engine, written down while the reasons are fresh. B33, script modules, 
 
 | ID | Requirement | Where | Priority |
 |---|---|---|---|
-| KR17 | A resource can have a field table without becoming sim state | `core` | P1, wanted by B33 |
-| KR18 | Events can be emitted and read from Lua by their field tables | `script` | P1, wanted by B33 |
+| KR17 | A resource can have a field table without becoming sim state | `core` | P0, blocks slice 4 milestones 4 and 5 (was P1, for B33) |
+| KR18 | Events can be emitted and read from Lua by their field tables | `script` | P0, blocks slice 4 milestone 5 (was P1, for B33) |
 | KR19 | Event types and ktables can be registered after `engine_init` | `core` | P1, wanted by B33 |
 
 ### KR17: a cosmetic resource's fields
@@ -450,6 +450,201 @@ block, load text only and open some of Lua's libraries. `kv_lua_newstate` takes 
 `Allocator`, and the rest is the host's to do on its own state, so this needs nothing
 from the engine.
 
+## Found in planning slice 4
+
+Nov 23, 2026. From [Blackwing-Slice-4-PRD.md](Blackwing-Slice-4-PRD.md), the development
+face, before any of it is built: the first window, the first face, the session, and the
+API from a script. Not yet put to Korvid. KR17 and KR18, above, were P1 and now block
+this slice: the face's Tables panel, the session and a script's `ctx:resource` all read a
+resource by its fields, and a script that cannot emit an event cannot drive anything.
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR20 | A window's loop can run ticks with no frame drawn, and draws only when something to draw changed | `frameloop` | P0, blocks slice 4 milestone 1 |
+| KR21 | A window says when it is hidden and when it is shown again | `platform` | P0, blocks slice 4 milestone 1 |
+| KR22 | A virtualized list over rows of which the model holds only a window | `krome` | P0, blocks slice 4 milestone 3 |
+| KR23 | The event trace can be read as data | `core` | P2 |
+| KR24 | Preferences storage on every platform: where settings go, and a small store kept there | `platform` | P1, wanted by slice 4 milestone 6 |
+| KR25 | A decent JPEG decoder | `image` | P1, wanted by BL25 and slice 6 |
+
+### KR20: ticks without frames
+
+**What was run into.** The player does its work in ticks: it feeds the audio path its
+pieces and publishes the position, at the clock's rate, for as long as something plays.
+`frameloop` paced on demand decides one thing per pass, whether to tick and draw, so a
+tick comes with a frame and a frame with a tick. A player in such a window has two bad
+choices. It can ask for a frame every tick while it plays (`engine_want_frame`), and
+then a window nobody is touching is presented sixty times a second. Or it can leave the
+loop alone, and then it is ticked four times a second and when I/O is pending, which
+plays only as long as the lead holds out. Paced continuously it draws at every vsync,
+which is the first choice again.
+
+**What is asked.** A pacing in which the two are separate: a module can ask for ticks at
+the clock's rate for as long as it wants them, with no frame drawn or presented, and a
+frame is drawn only when something to draw changed or someone asked for one. With no
+ticks wanted and nothing changed, the loop sleeps as on-demand pacing does now. Ticks
+must go on while the window is hidden (KR21), being resized, or having its title bar
+dragged.
+
+Whether this is a third `Pacing`, or `frameloop` offering its window and renderer to a
+loop the program owns (as `frameloop_step` nearly does, but it pumps, ticks and renders
+as one), is the engine's choice. Blackwing has a loop of its own already and would use
+either.
+
+**Done when** a windowed program whose module asks for ticks and changes nothing on
+screen runs its Sim at the clock's rate for ten seconds and presents no frame; and one
+that asks for neither wakes no more often than on-demand pacing does today.
+
+**Workaround today.** None good. `blackwing` could grow its headless loop a window and a
+renderer by doing what `frameloop`'s startup does, which is the mechanical part of every
+game written a second time.
+
+### KR21: a hidden window
+
+**What was run into.** The master PRD's B25: a hidden face runs nothing. A face that is
+minimized, wholly covered, on another workspace or behind a locked screen should stop
+refilling its lists and writing its models, and the loop should stop drawing. Nothing in
+the platform's headers says a window is in any of those states, so a face cannot know.
+
+**What is asked.** An event when the window stops being visible and one when it is
+visible again, and the state readable in between. As good as each OS can tell: minimized
+everywhere; covered or on another workspace where the OS or the compositor says so
+(occlusion on macOS and Windows, a suspended surface on Wayland). Where it cannot be
+told, the window is taken to be shown.
+
+**Done when** a module is told within a frame or two that its window was minimized and
+that it was restored, on each desktop; and the loop draws no frame for a window it knows
+is hidden.
+
+**Workaround today.** None. A face that is hidden but changing would go on being laid
+out and painted for nobody.
+
+### KR22: a list over a window of rows
+
+**What was run into.** Krome's virtualized `each` builds only the rows in view, from a
+list the model holds whole: ten thousand rows in the model, thirty in the tree. The
+library's lists are fifty thousand tracks, each row several long strings, and the
+library hands them out as windows of at most 512 rows that come back a tick or two after
+they are asked for. Holding all fifty thousand in a model is holding the index twice,
+and they are not there to hold when the list first draws.
+
+**What is asked.** A virtualized list that is told how many rows there are, and holds
+only some of them:
+
+- it lays out and scrolls as if every row were there;
+- it says which rows are in view when that changes (an event, with the range), so the
+  screen's owner can ask for them;
+- the model supplies a run of rows and where the run starts, and may replace it at any
+  time;
+- a row in view that the model does not hold is drawn from a placeholder block of the
+  same height;
+- rows replaced under a list at rest change in place: the scroll does not move and the
+  rows that did not change are not built again.
+
+Fixed-height rows are enough, as now.
+
+**Done when** a list of fifty thousand rows whose model never holds more than a few
+hundred can be dragged from end to end by its scrollbar with no frame longer than a
+refresh, showing placeholders where rows have not come.
+
+**Workaround today.** The face does a scroll box's arithmetic itself: a spacer above, the
+rows it holds, a spacer below, and a behaviour that watches the scroll. It can be made
+to work and is a virtualized list written outside the kernel that has one.
+
+### KR23: the event trace as data
+
+**What was run into.** `ui_dev`'s Events panel shows every event as it passes, with its
+type, who emitted it and its fields. `--trace-events` already has all of that, in dev
+builds, and prints it as log lines. A module cannot receive it.
+
+**What is asked.** A hook a module can set to be handed each delivered event: its type's
+name, its field table, the emitter's name and the bytes. Dev builds only is acceptable.
+
+**Workaround today.** A handler per event type, in the face. It shows the types the face
+was written to know, and a type added next slice is missed until someone adds its
+handler.
+
+### KR24: preferences storage
+
+**What was run into.** Slice 4 saves the session: the queue, the place, the volume and
+the equalizer, the window's size and position, which panel was showing. The engine has
+one per-user directory, `platform_pref_path`, documented for Linux and macOS, and it is
+the data directory (`$XDG_DATA_HOME`, `Application Support`). Blackwing has three kinds
+of thing to keep, and each OS has a different place for each:
+
+| kind | what | Linux | elsewhere |
+|---|---|---|---|
+| settings | the session, the face chosen, per-device choices | `$XDG_CONFIG_HOME` | `%APPDATA%`; `~/Library/Preferences` or the defaults system; the app's own storage on a phone |
+| data | the user's overrides: made by hand, not to be lost | `$XDG_DATA_HOME` | `%APPDATA%`; `Application Support`; backed-up storage on a phone |
+| cache | the library's index: rebuilt if deleted | `$XDG_CACHE_HOME` | `%LOCALAPPDATA%`; `~/Library/Caches`; the cache directory a phone may empty |
+
+Today all three go in the one directory. A backup carries a 120 MB index it does not
+need, and a user who looks where settings live finds none.
+
+**What is asked.** Two things, of which the first is enough to stop being wrong:
+
+1. **The three places by name**, on every platform Korvid runs on, Windows and the
+   phones included: settings, data and cache directories for an organisation and an
+   application, made if need be. `platform_pref_path` stays as the data directory.
+2. **A small store of settings** kept in the settings place: named values (numbers,
+   strings, a struct by its field table as `save` writes one), read at start-up before
+   any module needs them, written whole so that a crash or a full disk leaves the old
+   store and never half of the new, and written off the main thread. Two programs, or
+   two runs, writing the same store must not interleave. Where an OS has a native store
+   that tools and backups expect (the defaults system on Apple's), using it is the
+   engine's choice; a file in the settings directory is fine.
+
+A queue of ten thousand paths is not a setting, and Blackwing will keep it as a file of
+its own in the settings directory, so the store does not have to be sized for it.
+
+**Done when** a program can ask for each of the three directories on Linux, Windows,
+macOS, Android and iOS and gets the place that OS's users and backup tools expect; and a
+value set, followed by a kill, is the old value or the new one at the next start.
+
+**Workaround today.** The session as a file under `platform_pref_path`, written to a
+temporary name and renamed (`io_rename`). Right on no platform, and wrong in the same
+way on all of them.
+
+### KR25: a JPEG decoder
+
+**What was run into.** Most album art is JPEG: the picture inside an ID3v2 or FLAC tag,
+and `cover.jpg` or `folder.jpg` beside the files. The `image` module reads PNG and PPM.
+Slice 3 left art unrecorded (BL25, owed), and no face shows it yet; this is asked ahead
+of both so that the decoder is not what art waits for.
+
+**What is asked.** JPEG decoding in `image`, as PNG is there: a plain function over
+bytes, with no engine state and no I/O, memory from an allocator. Decent means:
+
+- **Baseline and progressive**, 8 bits, greyscale and YCbCr at every subsampling in
+  use. A good share of art on disk is progressive. CMYK and Adobe's YCCK at least
+  decode to something recognisable; they turn up in scans.
+- **Orientation honoured**, from EXIF, or reported so the caller can.
+- **Decoded at a fraction of its size**: a half, a quarter, an eighth, by doing less
+  work and not by decoding whole and shrinking. A list of albums wants a hundred
+  thumbnails from pictures of three thousand pixels a side.
+- **Good upsampling of chroma**, not nearest: art is looked at.
+- **Safe on a hostile file.** Art comes from anywhere. Dimensions are checked against a
+  ceiling the caller gives before anything is allocated; a truncated or spoiled file
+  gives the rows it had or a reason, and never a read past its bytes. Fuzzed.
+- **The size without the pixels**: dimensions and components from the header alone, so
+  a caller can decide before it decodes.
+- **Usable from a task**, with nothing shared between calls.
+- **Fast enough to be forgotten**: a 1500 x 1500 cover to a 256-pixel thumbnail in a
+  few milliseconds on a laptop core.
+
+Arithmetic coding, 12-bit, lossless JPEG and JPEG 2000 are not asked for. A vendored
+decoder under a permissive licence is as good as one written; stb_image's has no
+scaled decode, which is the kind of thing "decent" is meant to rule out.
+
+**Done when** a set of real covers (baseline, progressive, each subsampling, rotated by
+EXIF, greyscale, CMYK, truncated) decodes to within rounding of a reference decoder at
+full size, and at an eighth in a small fraction of the full decode's time; and a fuzzer
+has run over it with the sanitizers on.
+
+**Workaround today.** None in use: art is not read. Blackwing could vendor a decoder in
+a module of its own, which every other Korvid program that meets a JPEG would then do
+again.
+
 ## Not asked for, and worth knowing
 
 - **`engine_frame` and `platform_pump` were all a custom loop needed.** The comment in
@@ -461,4 +656,12 @@ from the engine.
 - **`platform_pref_path` is already the per-user data directory** the library needs for
   its index and the user's overrides. Slice 3's first draft asked for one; it was there.
   The index is a cache and would sit better under the OS's cache directory
-  (`$XDG_CACHE_HOME`), which the engine does not name. Not asked for yet.
+  (`$XDG_CACHE_HOME`), which the engine does not name. Asked for since, in KR24.
+- **`frameloop` links sprites, scenes and a touchpad** into anything that wants a window.
+  A music player uses none of them. Not in the way, and not asked for.
+- **A face's Lua cannot read a table.** Krome's Lua state is its own by decision, and
+  only events cross it, so every screen of a face has C++ beside it carrying rows into
+  its model. Slice 4's `ui_dev` will show what that costs before anything is asked.
+- **Text.** A music library's titles are in every script, and Krome draws left to right
+  with no shaping. Slice 4 gathers a list of real titles and what each looks like; that
+  list, not a requirement here, is where the conversation starts.
