@@ -16,6 +16,7 @@
 // temporary name and renamed. The index is deleted and made again when it is another
 // version or sqlite says it is damaged, and the roots are walked again into it.
 #include "korvid/blackwing_library/module.h"
+#include "korvid/blackwing_library/schema.h"
 #include "lib.h"
 #include "overrides.h"
 #include "korvid/core/atomic.h"
@@ -663,6 +664,7 @@ struct Window {
     u32    id = 0;
     LibraryQuery q;
     u32    seq = 0;           // the newest ask sent for it
+    u32    answered = 0;      // the newest ask a result has come for
     bool   open = false;
     u64    shown_generation = 0;
     Array<Handle> rows;
@@ -934,6 +936,7 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     }
     for (Result& res : results) {
         Window* w = window(L, res.id);
+        if (w && res.seq == w->seq) w->answered = res.seq;
         if (w && res.seq == w->seq && rows && !res.stopped) {
             clear_rows(rows, *w);
             for (u32 i = 0; i < res.count; ++i) {
@@ -1042,6 +1045,11 @@ void library_pump(TickContext& ctx) {
     }
     s.unread = unread;
     s.active = busy || atomic_load(&L.sh->tags_active, MO_RELAXED) ? 1 : 0;
+    // The next tick at the clock's rate (engine_want_ticks) while a scan runs, a read is
+    // out, or a window has been asked for and not answered: an answer waits for a tick.
+    bool owed = s.active || L.reading.len || L.waiting.len;
+    for (const Window& w : L.windows) owed = owed || (w.open && w.seq != w.answered);
+    if (owed) engine_want_ticks(*ctx.engine);
     if (now - L.rate_at >= 1.0) {
         s.names_per_second = L.rate_at > 0.0 ? (f64)(s.files_found - L.rate_files) / (now - L.rate_at) : 0.0;
         s.tags_per_second = L.rate_at > 0.0 ? (f64)(s.tags_read - L.rate_tags) / (now - L.rate_at) : 0.0;
@@ -1188,35 +1196,10 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "library status", .help = "the roots and the scan", .fn = cmd_status},
 };
 
-constinit const FieldDesc k_root_fields[] = {KV_FIELDS(LibraryRoot, id, state, dirs, tracks, failed, unread, path, reason)};
-constinit const FieldDesc k_row_fields[] = {KV_FIELDS(LibraryRow, query, index, id, kind, missing, offline, root, track_number, disc_number, size, frames, rate, name, title, artist), // sixteen at most a list
-                                            KV_FIELDS(LibraryRow, album, path, reason, count, albums, date)};
-constinit const ComponentDesc k_components[] = {KV_COMPONENT(LibraryRoot, k_root_fields, CompCosmetic), KV_COMPONENT(LibraryRow, k_row_fields, CompCosmetic)};
 constinit const KTableDesc k_ktables[] = {
     {.name = ".roots", .components = "LibraryRoot", .capacity = 256, .id = &g_roots_ktable, .cosmetic = true},
     {.name = ".rows", .components = "LibraryRow", .capacity = kLibraryMaxRows, .id = &g_rows_ktable, .cosmetic = true},
 };
-constinit const FieldDesc k_f_add[] = {KV_FIELDS(LibraryAddRoot, path)};
-constinit const FieldDesc k_f_remove[] = {KV_FIELDS(LibraryRemoveRoot, root)};
-constinit const FieldDesc k_f_query[] = {KV_FIELDS(LibraryQuery, id, view, sort, parent, text, first, count)};
-constinit const FieldDesc k_f_close[] = {KV_FIELDS(LibraryClose, id)};
-constinit const FieldDesc k_f_prio[] = {KV_FIELDS(LibraryPrioritize, path, dir, query, count, tracks)};
-constinit const FieldDesc k_f_override[] = {KV_FIELDS(LibraryOverride, track, field, value, clear)};
-constinit const FieldDesc k_f_result[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation, seconds)};
-constinit const FieldDesc k_f_changed[] = {KV_FIELDS(LibraryChanged, generation)};
-constinit const FieldDesc k_f_finished[] = {KV_FIELDS(LibraryScanFinished, root, tracks, seconds)};
-constinit const EventTypeDesc k_events[] = {
-    KV_EVENT_EX(LibraryAddRoot, k_f_add, 0),
-    KV_EVENT_EX(LibraryRemoveRoot, k_f_remove, 0),
-    KV_EVENT_EX(LibraryQuery, k_f_query, 0),
-    KV_EVENT_EX(LibraryClose, k_f_close, 0),
-    KV_EVENT_EX(LibraryPrioritize, k_f_prio, 0),
-    KV_EVENT_EX(LibraryOverride, k_f_override, 0),
-    KV_EVENT_EX(LibraryResult, k_f_result, 0),
-    KV_EVENT_EX(LibraryChanged, k_f_changed, 0),
-    KV_EVENT_EX(LibraryScanFinished, k_f_finished, 0),
-};
-constinit const ResourceDesc k_resources[] = {{".scan"}};
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = library_pump,
      .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize, LibraryOverride",
@@ -1229,10 +1212,10 @@ constinit const SystemDesc k_systems[] = {
 
 KV_MODULE_DEFINE(blackwing_library_module) = {
     .name       = "library",
-    .events     = k_events,
-    .components = k_components,
+    .events     = k_library_events,
+    .components = k_library_components,
     .ktables    = k_ktables,
-    .resources  = k_resources,
+    .resources  = k_library_resources,
     .systems    = k_systems,
     .commands   = k_commands,
     .startup    = library_startup,

@@ -1,0 +1,14 @@
+// The development face's one screen: its panels, each a definition in a file of its own
+// with its model and handlers in a script beside it. ui_dev opens this; a panel whose file
+// does not load is given a stand-in that says why (ui_dev.cc), and the rest work.
+
+use "krome/std"
+use "ui_dev/widgets"
+use "ui_dev/transport"
+script "ui_dev/transport.lua"
+
+screen shell {
+    col [page] w=fill h=fill pad=8 gap=8 {
+        transport-panel
+    }
+}

@@ -2,7 +2,8 @@
 
 Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 `hifi_platform`, `blackwing_player` and `blackwing` have code (slice 1), `hifi_eq`
-(slice 2), and `blackwing_tags` and `blackwing_library` (slice 3); the rest are skeletons. The
+(slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev` and
+`blackwing_window` (slice 4, under way); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
@@ -19,6 +20,7 @@ Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 | [ui_wsz](ui_wsz/README.md) | the classic face: Winamp `.wsz` skins |
 | [ui_clean](ui_clean/README.md) | the clean face |
 | [ui_compact](ui_compact/README.md) | the clean face, compact |
+| [blackwing_window](blackwing_window/README.md) | what every face shares of the window: closing it ends the run |
 | [blackwing](blackwing/README.md) | the application: the executable around the player, the library and a face |
 
 ```

@@ -349,15 +349,57 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, held > 4000 && held <= 4000 + 221);
         r.pull(512); r.pull(2048);
         KV_CHECK(c, r.t().position == held && r.t().state == (u8)PlayerState::Paused && r.t().item == 1);
+        // Paused, with everything it asked for in: the player wants no tick (a loop sleeps).
+        r.step(4);
+        KV_CHECK(c, !r.e.ticks_wanted);
         HifiDeviceFormat f; u64 frames;
         const u8* d = r.seg_data(0, &f, &frames);
         KV_CHECK(c, d && all_zero(d + held * 4, (usize)(frames - held) * 4)); // silence from the end of the ramp
         r.say(PlayerPlay{});
         r.step();
-        KV_CHECK(c, r.t().state == (u8)PlayerState::Playing);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Playing && r.e.ticks_wanted); // playing: every tick, at the clock's rate
         KV_CHECK(c, r.play_until('Q', 0));
         KV_CHECK(c, log_is("S1 E1 Q0") && r.o().underruns == 0);
+        // Stopped at the queue's end: nothing is wanted again.
+        r.step(4);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Stopped && !r.e.ticks_wanted);
         r.stop();
+    }
+
+    // A main thread held for two seconds (a compositor stalling a resize, a dragged title
+    // bar) is not heard: the device, on its own clock, plays from the lead while no tick
+    // runs, and the player catches up after.
+    c.begin("player stalled");
+    {
+        g_nlog = 0;
+        PlayerConfig pc;
+        pc.device = "capture"; // none given: the player's own, on the wall clock
+        player_configure(pc);
+        CliConfig cli; cli.no_stdin = true;
+        cli_configure(cli);
+        PlatformMounts mounts; mounts.none = true;
+        platform_configure_mounts(mounts);
+        static const ModuleDesc* const list[] = {&platform_module, &cli_module, &blackwing_player_module, &k_listener};
+        Engine e;
+        KV_CHECK(c, engine_init(e, list));
+        PlayerEnqueue q{};
+        format(q.path, sizeof q.path, "%s", data("tone_16_2ch_8000_long.flac"));
+        e.events.emit(q);
+        e.events.emit(PlayerPlay{});
+        auto run = [&](f64 seconds) {
+            f64 until = time_now() + seconds;
+            while (time_now() < until && !heard('Q', 0)) { platform_pump(e); engine_frame(e, e.clock.tick_dt); time_sleep(0.002); }
+        };
+        run(0.7);
+        KV_CHECK(c, heard('S', 1) && player_transport(e)->state == (u8)PlayerState::Playing);
+        u64 before = player_transport(e)->position;
+        time_sleep(2.0); // no pump, no tick
+        run(0.05);
+        u64 after = player_transport(e)->position;
+        KV_CHECK(c, after - before > 8000 * 19 / 10 && after - before < 8000 * 23 / 10); // it played through: two seconds of an 8 kHz file
+        run(3.0);
+        KV_CHECK(c, log_is("S1 E1 Q0") && !ev('E', 1).damaged && player_output(e)->underruns == 0);
+        engine_shutdown(e);
     }
 
     // What cannot be played fails alone, in words, and the next plays. A file cut short

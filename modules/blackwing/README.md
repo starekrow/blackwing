@@ -1,13 +1,14 @@
 # blackwing
 
-The application: the executable around `blackwing_player` and `blackwing_library`. For
-now it is headless. It plays the files named on its command line and exits when the queue
-is done, or keeps a library and plays from it until told to quit; it says what is
-happening on stdout.
+The application: the executable around `blackwing_player`, `blackwing_library` and a
+face. With a face it is a window; with none it plays the files named on its command
+line and exits when the queue is done, or keeps a library and plays from it until told
+to quit, and says what is happening on stdout.
 
 ## Using it
 
 ```
+blackwing [options]                  the window, with the development face
 blackwing [options] play FILE...     play the files in order, then exit
 blackwing [options] library [DIR...] keep the library, adding the directories to it, until quit
 blackwing help                       the commands the engine knows
@@ -15,12 +16,19 @@ blackwing help                       the commands the engine knows
 
 | option | what |
 |---|---|
+| `--face NAME` | which face is up: `dev`, or `none` (no window). Without a command it is `dev`; with one, `none` unless said |
 | `--device NAME` | the output device: `default` (PipeWire on Linux), or `capture` (no hardware) |
-| `--capture-to FILE` | play into the capture device and write what reached it, as raw PCM, at exit |
+| `--capture-to FILE` | play into the capture device and write what reached it, as raw PCM, at exit (with no face) |
 | `--lead SECONDS` | how far ahead of the playhead audio is kept (5) |
 | `--data DIR` | where the library keeps its index and its list of roots (the per-user data directory's `library/`) |
 | `--verbose` | the engine's INFO lines |
 | `--trace-events` | every event as it is delivered, with who emitted it (dev builds) |
+| `--run-seconds N` | ends the run after N seconds: tests and measurements |
+| `--cli-port N` | the engine's command line on a loopback port |
+| `--size WxH`, `--renderer auto\|gpu\|cpu`, `--screenshot FILE`, `--screenshot-frame N`, `--borderless`, `--no-vsync`, `--hitch-ms N`, `--goldberg PORT`, `--no-goldberg` | the frame loop's own, passed to it when there is a face |
+
+With no display, `blackwing` alone says so and exits 1; a command given `--face dev`
+says so and runs with no face. `play`, `library` and `help` need no display.
 
 With a terminal on stdin, the engine's command line is live while it plays: `player
 pause`, `player play`, `player next`, `player previous`, `player jump ROW`, `player seek
@@ -29,8 +37,9 @@ STAGE PARAM VALUE`, `player eq BAND DB`, `player eq preset NAME`, `player eq pre
 `player remove ROW`, `player move ROW [BEFORE]`, `player insert BEFORE FILE...`, `player
 clear`, `player stop`, `player status`, `library add DIR`, `library remove ROOT`, `library
 status`, `library find WORDS`, `library play N` (the N-th the last find listed), `library
-override N FIELD [VALUE...|--clear]` (no value hides the field), `quit`. Ctrl-C
-stops cleanly. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
+override N FIELD [VALUE...|--clear]` (no value hides the field), `quit`; and with a
+face, `window status [reset]`, `window minimize`, `window restore`, `window stall
+SECONDS`. Ctrl-C stops cleanly, and so does closing the window. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
 a bad command line, 3 if a dev build leaked.
 
 ## How it works
@@ -45,11 +54,28 @@ player and the library do not know each other: this is the glue. So is one more 
 `PlayerEnqueue`, heard as the player hears it, becomes `LibraryPrioritize` for its path, so
 playing a file has its tags read next.
 
-The loop is this executable's own, not `tool_main`'s. It runs the engine's ticks at the
-clock's rate while something is playing or about to, or the library is walking, and four
-times a second otherwise.
-With `hifi` holding the device, a player left paused wakes four times a second and does
-nothing else: 0.03% of a core on the Linux laptop.
+**Two loops, one rule.** The player asks for the next tick (`engine_want_ticks`) while it
+plays, or has anything on its way to the ear or off the disk; the library asks while it
+scans or owes a window an answer. A loop runs ticks at the clock's rate while anyone
+asks, and four times a second when no one does.
+
+- **With a face** the loop is Korvid's frame loop (`frameloop_main`, given a command line
+  this file makes), paced `Decoupled`: those ticks, a frame only when a screen changed,
+  and no frame while the window is hidden. The engine holds every module linked. The
+  command line's files become the engine's commands in the first tick
+  (`blackwing.tick`), which also ends the run on Ctrl-C; closing the window ends it too
+  ([blackwing_window](../blackwing_window/README.md)). The frame loop shuts everything
+  down, memory included, so nothing of this file's runs after it.
+- **With none** the loop is this file's own, forty lines over `engine_frame` and
+  `platform_pump`, and the engine is started from five modules by name (`platform`,
+  `cli`, `player`, `library`, `blackwing`): the frame loop, the window, Krome and the
+  face are linked and left out, so nothing asks for a display.
+
+With `hifi` holding the device, a player left paused with no face wakes four times a
+second and does nothing else: 0.03% of a core on the Linux laptop. With the face up it
+draws nothing and ticks as rarely, but the frame loop polls the window every 4 ms:
+about 230 wakeups a second, 2.5% of a core
+([the notes](../../docs/design/slice-4-notes.md), KR26).
 
 ## Platform notes
 
@@ -58,6 +84,8 @@ nothing else: 0.03% of a core on the Linux laptop.
 - **stdin is a command line only when it is a terminal**, and only on POSIX so far.
 
 ## See also
+
+- [ui_dev](../ui_dev/README.md): the development face.
 
 - [blackwing_player](../blackwing_player/README.md): everything this executable says to
   the player, and hears from it.

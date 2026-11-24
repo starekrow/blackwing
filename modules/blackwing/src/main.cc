@@ -1,23 +1,34 @@
-// blackwing: the player's executable, headless for now.
+// blackwing: the player's executable.
 //
+//   blackwing [options]                  the window, with the development face
 //   blackwing [options] play FILE...     plays the files in order and exits after the last
 //   blackwing [options] library [DIR...] keeps the library (adding DIRs to it) until quit
 //   blackwing help                       the commands the engine knows
 //
+//   --face NAME          which face is up: dev, or none (no window). Without a command it is
+//                        dev; with one it is none unless said
 //   --device NAME        the output device: "default", or "capture" (no hardware)
-//   --capture-to FILE    with the capture device: what reached it, as raw PCM, written at exit
+//   --capture-to FILE    with the capture device: what reached it, as raw PCM, written at exit (no face)
 //   --lead SECONDS       how far ahead of the playhead audio is kept (5)
 //   --verbose            the engine's INFO lines
 //   --trace-events       every event as it is delivered (dev builds), with who emitted it
 //   --data DIR           where the library keeps its index and its roots (the per-user data directory)
+//   --run-seconds N      ends the run after N seconds (tests, measurements)
+//   --cli-port N         the engine's command line on a loopback port
+//   --size WxH, --renderer auto|gpu|cpu, --screenshot FILE, --borderless, --hitch-ms N,
+//   --goldberg PORT, --no-goldberg       the frame loop's own, with a face
 //
 // `play` is sugar for the player's own commands (player add, player play), which are also
 // what a terminal on stdin may type while it plays: player pause, player play, player next,
 // player stop, player status, quit. Everything goes to the player as events; this file
 // calls nothing of it but its configuration.
 //
-// The loop is this file's own. It ticks the engine at its clock's rate while something is
-// playing, and four times a second when nothing is, so a player left paused costs nothing.
+// Two loops, one rule: the player ticks at the clock's rate while it or the library asks
+// (engine_want_ticks), and four times a second when nothing does, so a player left paused
+// costs nothing. With a face the loop is Korvid's frame loop, paced Decoupled: those
+// ticks, and a frame only when a screen changed, none while the window is hidden. With
+// none it is this file's own, over an engine that holds no window module at all, so it
+// runs on a machine with no display.
 #include "korvid/blackwing/module.h"
 #include "korvid/blackwing_library/library.h"
 #include "korvid/blackwing_player/player.h"
@@ -30,8 +41,10 @@
 #include "korvid/core/memory.h"
 #include "korvid/core/name.h"
 #include "korvid/core/time.h"
+#include "korvid/frameloop/frameloop.h"
 #include "korvid/hifi_platform/capture.h"
 #include "korvid/platform/module.h"
+#include "korvid/ui_dev/ui_dev.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +61,13 @@ constinit u32 g_interrupted = 0; // atomic: set by SIGINT
 constinit bool g_keep = false;    // the library is kept: the end of the queue is not the end of the run
 constexpr u32 kFindWindow = 0xB1AC0001; // the window `library find` fills
 constinit bool g_find_said = true;       // the last find's answer has been printed: refills of its window are not
+
+// What the command line asked for, done in the first tick, once every module is up: the
+// engine's own commands, a line each.
+constinit char** g_start_args = nullptr;
+constinit int    g_start_count = 0;
+constinit bool   g_start_library = false, g_start_play = false, g_started = false;
+constinit int    g_code = 0; // the exit status, where the run's end is the engine's to reach
 
 void on_sigint(int) { atomic_store(&g_interrupted, 1u, MO_RELAXED); }
 
@@ -122,6 +142,34 @@ void on_result(TickContext& ctx, Span<const LibraryResult> events) {
     }
     fflush(stdout);
 }
+
+// The first tick: the command line's files or directories, as the engine's own commands.
+// Every tick: an interrupt ends the run as closing the window does.
+void blackwing_tick(TickContext& ctx) {
+    Engine& e = *ctx.engine;
+    if (!g_started) {
+        g_started = true;
+        bool failed = false;
+        for (int i = 0; i < g_start_count && !failed; ++i) {
+            char line[1200];
+            if (strchr(g_start_args[i], '"') || strlen(g_start_args[i]) > 1000) { fprintf(stderr, "blackwing: cannot name this file on the command line: %s\n", g_start_args[i]); failed = true; break; }
+            format(line, sizeof line, g_start_library ? "library add \"%s\"" : "player add \"%s\"", g_start_args[i]);
+            failed = !cli_run(e, line, nullptr, nullptr);
+        }
+        if (!failed && g_start_play) failed = !cli_run(e, "player play", nullptr, nullptr);
+        if (failed) { g_code = 2; engine_request_quit(e); }
+        engine_want_ticks(e); // the commands are events: the player acts on them in the next tick, which should not wait for a heartbeat
+    }
+    if (atomic_load(&g_interrupted, MO_RELAXED) && !e.quit_requested) {
+        fputs("\ninterrupted\n", stdout);
+        g_code = 130;
+        engine_request_quit(e);
+    }
+}
+
+constinit const SystemDesc k_systems[] = {
+    {.name = ".tick", .phase = Phase::PreSim, .fn = blackwing_tick, .main_thread = true, .runs = RunWhen::Always},
+};
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".started",     KV_ON(PlayerTrackStarted, on_started),   .phase = Phase::PostSim},
@@ -203,6 +251,7 @@ constinit const CliCommandDesc k_commands[] = {
 
 KV_MODULE_DEFINE(blackwing_module) = {
     .name     = "blackwing",
+    .systems  = k_systems,
     .handlers = k_handlers,
     .commands = k_commands,
 };
@@ -210,9 +259,36 @@ KV_MODULE_DEFINE(blackwing_module) = {
 namespace {
 
 void usage() {
-    fputs("usage: blackwing [--device NAME] [--capture-to FILE] [--lead SECONDS] [--data DIR] [--verbose] [--trace-events] play FILE...\n"
+    fputs("usage: blackwing [options]                  the window, with the development face\n"
+          "       blackwing [options] play FILE...\n"
           "       blackwing [options] library [DIR...]\n"
-          "       blackwing help\n", stderr);
+          "       blackwing help\n"
+          "options: --face dev|none, --device NAME, --capture-to FILE, --lead SECONDS, --data DIR, --verbose, --trace-events,\n"
+          "         --run-seconds N, --cli-port N; with a face: --size WxH, --renderer auto|gpu|cpu, --screenshot FILE,\n"
+          "         --borderless, --hitch-ms N, --goldberg PORT, --no-goldberg\n", stderr);
+}
+
+// Whether there is a display to open a window on. Where the OS always has one, yes.
+bool have_display() {
+#if defined(__linux__)
+    const char* x = getenv("DISPLAY");
+    const char* w = getenv("WAYLAND_DISPLAY");
+    return (x && x[0]) || (w && w[0]);
+#else
+    return true;
+#endif
+}
+
+// The engine with no face: the modules a machine with no display can start. The frame
+// loop, the window, Krome and the faces are linked in and left out.
+constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "blackwing"};
+constinit const ModuleDesc* g_headless[KV_COUNTOF(k_headless)] = {};
+Span<const ModuleDesc* const> headless_modules() {
+    u32 n = 0;
+    for (const ModuleDesc* m : kv_module_list())
+        for (const char* name : k_headless)
+            if (strcmp(m->name, name) == 0 && n < KV_COUNTOF(g_headless)) g_headless[n++] = m;
+    return Span<const ModuleDesc* const>(g_headless, n);
 }
 
 // What the capture device was given, to a file: each device's frames as they were, one
@@ -232,57 +308,125 @@ bool write_capture(HifiCapture* cap, const char* path) {
     return true;
 }
 
-int run(int argc, char** argv) {
+// The frame loop's options that pass through to it as they are, and whether each takes a value.
+struct PassOption { const char* name; bool value; };
+constinit const PassOption k_pass[] = {
+    {"--size", true}, {"--renderer", true}, {"--screenshot", true}, {"--screenshot-frame", true}, {"--hitch-ms", true},
+    {"--goldberg", true}, {"--no-goldberg", false}, {"--borderless", false}, {"--no-vsync", false},
+};
+
+constinit const FrameLoopConfig k_window = {
+    .title  = "Blackwing",
+    .width  = 1280,
+    .height = 800,
+    .cpu_scale = 1,           // every pixel: text
+    .exit_on_escape = false,  // Escape closes a menu, not the player
+    .report_every_seconds = 0,
+    .pacing = Pacing::Decoupled,
+};
+
+int run(int argc, char** argv, bool* engine_owns_exit) {
     const char* device = "default";
     const char* capture_to = nullptr;
     const char* data_dir = nullptr;
+    const char* face = nullptr;
+    const char* run_seconds = nullptr;
+    const char* cli_port = nullptr;
     f64 lead = 5.0;
     bool verbose = false, trace = false;
+    // What the frame loop is given, should there be a face: its own options, as they came.
+    static char* loop_argv[48];
+    int loop_argc = 0;
+    loop_argv[loop_argc++] = argv[0];
     int first = 1;
     for (; first < argc && strncmp(argv[first], "--", 2) == 0; ++first) {
-        if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) device = argv[++first];
+        const PassOption* pass = nullptr;
+        for (const PassOption& o : k_pass) if (strcmp(argv[first], o.name) == 0) pass = &o;
+        if (pass && (!pass->value || first + 1 < argc)) {
+            if (loop_argc + 2 < (int)KV_COUNTOF(loop_argv)) { loop_argv[loop_argc++] = argv[first]; if (pass->value) loop_argv[loop_argc++] = argv[++first]; }
+        }
+        else if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) device = argv[++first];
         else if (strcmp(argv[first], "--capture-to") == 0 && first + 1 < argc) capture_to = argv[++first];
         else if (strcmp(argv[first], "--lead") == 0 && first + 1 < argc) lead = atof(argv[++first]);
         else if (strcmp(argv[first], "--data") == 0 && first + 1 < argc) data_dir = argv[++first];
+        else if (strcmp(argv[first], "--face") == 0 && first + 1 < argc) face = argv[++first];
+        else if (strcmp(argv[first], "--run-seconds") == 0 && first + 1 < argc) run_seconds = argv[++first];
+        else if (strcmp(argv[first], "--cli-port") == 0 && first + 1 < argc) cli_port = argv[++first];
         else if (strcmp(argv[first], "--verbose") == 0) verbose = true;
         else if (strcmp(argv[first], "--trace-events") == 0) trace = true;
         else { fprintf(stderr, "blackwing: unknown option %s\n", argv[first]); usage(); return 2; }
     }
-    if (first >= argc) { usage(); return 2; }
-    const char* command = argv[first];
+    const char* command = first < argc ? argv[first] : "";
     bool help = strcmp(command, "help") == 0;
     bool play = strcmp(command, "play") == 0;
     bool library = strcmp(command, "library") == 0;
-    if ((!help && !play && !library) || (play && first + 1 >= argc) || lead <= 0.0) { usage(); return 2; }
-    g_keep = library;
+    bool bare = !command[0];
+    if ((!bare && !help && !play && !library) || (play && first + 1 >= argc) || lead <= 0.0) { usage(); return 2; }
+    if (!face) face = bare ? "dev" : "none";
+    bool window = strcmp(face, "dev") == 0;
+    if (!window && strcmp(face, "none") != 0) { fprintf(stderr, "blackwing: there is no face called %s (dev, none)\n", face); return 2; }
+    if (help) window = false;
+    if (window && capture_to) { fputs("blackwing: --capture-to writes at exit, which a run with a face does not reach; use --device capture, or --face none\n", stderr); return 2; }
+    // No display: say so, and run with no face if there is something to do without one.
+    if (window && !have_display()) {
+        if (bare) { fputs("blackwing: there is no display to open a window on (play, library and help need none)\n", stderr); return 1; }
+        fputs("blackwing: there is no display; running with no face\n", stderr);
+        window = false;
+    }
+    g_keep = library || window; // a face, or a kept library: the end of the queue is not the end of the run
+    g_start_args = argv + first + 1;
+    g_start_count = bare || help ? 0 : argc - first - 1;
+    g_start_library = library;
+    g_start_play = play;
     if (capture_to) device = "capture";
 
     LogLevel was = log_level();
     if (!verbose && was < LogLevel::Warn) log_set_level(LogLevel::Warn);
 
     HifiCapture* capture = nullptr;
-    if (strcmp(device, "capture") == 0) {
+    if (capture_to) {
         HifiCaptureDesc cd;
         cd.wall_clock = true;
-        cd.keep_bytes = capture_to ? (usize)1 << 30 : 0; // a gigabyte if it is wanted, none of it if not
+        cd.keep_bytes = (usize)1 << 30; // a gigabyte of what reached it
         capture = hifi_capture_create(cd);
     }
     PlayerConfig pc;
     pc.device = device;
-    pc.device_backend = capture;
+    pc.device_backend = capture; // none: the capture device, asked for by name, is the player's own
     pc.lead_seconds = lead;
     player_configure(pc);
     LibraryConfig lc;
     lc.data_dir = data_dir;
     library_configure(lc);
-
-    CliConfig cli;
 #if !defined(_WIN32)
-    cli.stdin_ = isatty(0) != 0; // a terminal may type commands while it plays; a pipe is left alone
-    cli.no_stdin = !cli.stdin_;
+    signal(SIGINT, on_sigint);
+    bool terminal = isatty(0) != 0; // a terminal may type commands while it plays; a pipe is left alone
 #else
-    cli.no_stdin = true;
+    bool terminal = false;
 #endif
+
+    if (window) {
+        // The frame loop's run: it makes the engine from the whole module list, opens the
+        // window and the renderer, loops, and shuts everything down, memory included.
+        static char quiet[] = "--quiet", stdin_flag[] = "--cli-stdin", trace_flag[] = "--trace-events", port_flag[] = "--cli-port", run_flag[] = "--run-seconds";
+        if (!verbose && !trace) loop_argv[loop_argc++] = quiet;
+        if (terminal) loop_argv[loop_argc++] = stdin_flag;
+        if (trace) loop_argv[loop_argc++] = trace_flag;
+        if (cli_port) { loop_argv[loop_argc++] = port_flag; loop_argv[loop_argc++] = (char*)cli_port; }
+        if (run_seconds) { loop_argv[loop_argc++] = run_flag; loop_argv[loop_argc++] = (char*)run_seconds; }
+        loop_argv[loop_argc] = nullptr;
+        *engine_owns_exit = true;
+        int code = frameloop_main(loop_argc, loop_argv, k_window);
+        return code ? code : g_code;
+    }
+
+    UiDevConfig no_face;
+    no_face.enabled = false;
+    ui_dev_configure(no_face);
+    CliConfig cli;
+    cli.stdin_ = terminal;
+    cli.no_stdin = !terminal;
+    if (cli_port) cli.port = (u16)atoi(cli_port);
     cli_configure(cli);
     PlatformMounts mounts;
     mounts.none = true; // files are named by the OS's paths, not found in asset mounts
@@ -292,38 +436,27 @@ int run(int argc, char** argv) {
     Engine e;
     e.trace.print = trace;
     if (trace && !KV_DEV) KV_WARN("blackwing", "--trace-events: the event trace exists in dev builds only");
-    if (!engine_init(e, kv_module_list())) {
+    if (!engine_init(e, headless_modules())) {
         code = 1;
     } else {
-        bool failed = false;
         // The trace is INFO lines. Turned on after the engine is up, they come almost alone.
         if (trace && log_level() > LogLevel::Info) log_set_level(LogLevel::Info);
         if (help) {
             cli_run(e, "help", print_line, nullptr);
         } else {
-            for (int i = first + 1; i < argc && !failed; ++i) {
-                char line[1200];
-                if (strchr(argv[i], '"') || strlen(argv[i]) > 1000) { fprintf(stderr, "blackwing: cannot name this file on the command line: %s\n", argv[i]); failed = true; break; }
-                format(line, sizeof line, library ? "library add \"%s\"" : "player add \"%s\"", argv[i]);
-                failed = !cli_run(e, line, nullptr, nullptr) || failed;
-            }
-            if (!failed && play) failed = !cli_run(e, "player play", nullptr, nullptr);
-            if (failed) code = 2;
-#if !defined(_WIN32)
-            signal(SIGINT, on_sigint);
-#endif
-            f64 last = time_now();
-            while (!failed && !e.quit_requested && !atomic_load(&g_interrupted, MO_RELAXED)) {
+            f64 limit = run_seconds ? atof(run_seconds) : -1.0;
+            f64 start = time_now(), last = start;
+            while (!e.quit_requested) {
                 f64 now = time_now();
+                if (limit >= 0.0 && now - start >= limit) break;
                 platform_pump(e);
                 engine_frame(e, now - last);
                 last = now;
-                const PlayerTransport* t = player_transport(e);
-                const LibraryScan* ls = library_scan(e);
-                bool busy = (t && (t->state == (u8)PlayerState::Playing || t->state == (u8)PlayerState::Starting)) || (ls && ls->active);
-                time_sleep(busy ? e.clock.tick_dt : 0.25);
+                // The next tick at the clock's rate while a module asked for it (the player
+                // while it plays, the library while it scans), and four times a second otherwise.
+                time_sleep(e.ticks_wanted ? e.clock.tick_dt : 0.25);
             }
-            if (atomic_load(&g_interrupted, MO_RELAXED)) { fputs("\ninterrupted\n", stdout); code = 130; }
+            code = g_code;
             const PlayerOutput* o = player_output(e);
             if (o && o->underruns) printf("%u underruns\n", o->underruns);
         }
@@ -331,7 +464,7 @@ int run(int argc, char** argv) {
         engine_shutdown(e); // the player closes its device here, so the capture is whole
     }
     if (capture) {
-        if (capture_to && code != 1 && !write_capture(capture, capture_to) && code == 0) code = 1;
+        if (code != 1 && !write_capture(capture, capture_to) && code == 0) code = 1;
         hifi_capture_destroy(capture);
     }
     log_set_level(was);
@@ -343,7 +476,9 @@ int run(int argc, char** argv) {
 } // namespace kv
 
 int main(int argc, char** argv) {
-    int code = kv::run(argc, argv);
+    bool engine_owns_exit = false; // the frame loop's run: names and memory are shut down by it
+    int code = kv::run(argc, argv, &engine_owns_exit);
+    if (engine_owns_exit) return code;
     kv::names_shutdown();
     kv::u64 live = kv::mem_live_allocations();
     if (live && (KV_DEV || KV_DEBUG)) {

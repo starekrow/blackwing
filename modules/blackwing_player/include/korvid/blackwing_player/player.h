@@ -178,7 +178,7 @@ struct PlayerOutput {
 
 struct PlayerConfig {
     const char* device         = "default";  // hifi_platform's device name
-    void*       device_backend = nullptr;    // for "capture": the HifiCapture*
+    void*       device_backend = nullptr;    // for "capture": the HifiCapture*; null: one of the player's own, on the wall clock, keeping nothing
     f64         lead_seconds   = 5.0;
     usize       memory_bytes   = 256u << 20; // the files' bytes held at once, across every item
     u32         piece_bytes    = 256u << 10; // what a file is read in: a power of two, a page or more

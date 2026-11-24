@@ -20,6 +20,7 @@
 // for a decoded item is seconds later. An item flushed out of hifi (a stop, a next)
 // keeps what it has read, and can go back in.
 #include "korvid/blackwing_player/module.h"
+#include "korvid/blackwing_player/schema.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/cli.h"
 #include "korvid/core/engine.h"
@@ -30,6 +31,7 @@
 #include "korvid/hifi/hifi.h"
 #include "korvid/hifi_codec/decoder.h"
 #include "korvid/hifi_eq/stages.h"
+#include "korvid/hifi_platform/capture.h"
 #include "korvid/platform/io.h"
 #include "korvid/platform/module.h"
 #include <new>
@@ -92,6 +94,7 @@ struct Return    { u32 item = 0; u32 piece = 0; u64 fence = 0; };
 
 struct Player {
     Hifi*  hifi = nullptr;
+    HifiCapture* capture = nullptr; // the capture device's, when the player made its own
     Item*  items = nullptr;   // kMaxItems slots; an item stays in its slot whatever the list does
     u32*   order = nullptr;   // the list: slot indices, in order
     u32    count = 0;         // items in the list
@@ -972,6 +975,20 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
 }
 
 // Phase PreSim, main thread, every tick, paused or not.
+// Whether the next tick is wanted at the clock's rate (engine_want_ticks): while something
+// is playing or about to, and while anything asked for has yet to be heard or read. A loop
+// that paces ticks apart from frames, or sleeps between them, reads this; paused or
+// stopped with nothing on its way, the player asks for nothing and costs nothing.
+bool wants_ticks(const Player& p) {
+    if (p.want_play && !p.paused) return true;
+    if (p.nreads || p.nreturns || p.output.joining) return true;
+    if (p.seek_item && !p.paused) return true;
+    for (u32 i = 0; i < kStages; ++i)
+        for (u32 j = 0; j < k_chain[i]->params.len; ++j)
+            if (p.sent_gen[i][j]) return true;
+    return false;
+}
+
 void player_pump(TickContext& ctx) {
     Player& p = ctx.state_as<Player>();
     KTable* queue = ctx.write_ktable(g_queue_ktable);
@@ -982,6 +999,7 @@ void player_pump(TickContext& ctx) {
     take_returns(p);
     advance(ctx, p, queue);
     publish(ctx, p, queue);
+    if (wants_ticks(p)) engine_want_ticks(*ctx.engine);
 }
 
 bool player_startup(Engine& e, ModuleInstance& self) {
@@ -1002,6 +1020,15 @@ bool player_startup(Engine& e, ModuleInstance& self) {
     hc.stages = k_chain;
     hc.device = g_config.device ? g_config.device : "default";
     hc.device_backend = g_config.device_backend;
+    // The capture device with none given: one of the player's own, on the wall clock,
+    // keeping nothing. A run with no hardware, for as long as the player lasts.
+    if (!hc.device_backend && strcmp(hc.device, "capture") == 0) {
+        HifiCaptureDesc cd;
+        cd.wall_clock = true;
+        cd.keep_bytes = 0;
+        p->capture = hifi_capture_create(cd);
+        hc.device_backend = p->capture;
+    }
     hc.lead_seconds = g_config.lead_seconds;
     p->hifi = hifi_create(hc);
     if (!p->hifi) { KV_ERROR("player", "the audio path's thread could not start"); return false; }
@@ -1030,6 +1057,8 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
     if (!p) return;
     hifi_destroy(p->hifi); // first: after this nobody reads the items' spans
     p->hifi = nullptr;
+    if (p->capture) hifi_capture_destroy(p->capture);
+    p->capture = nullptr;
     IoQueue* io = platform_io(e);
     for (u32 k = 0; k < kMaxItems; ++k) {
         Item& it = p->items[k];
@@ -1232,53 +1261,10 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "player status", .help = "the transport, the device and the queue", .fn = cmd_status},
 };
 
-constinit const FieldDesc k_item_fields[] = {KV_FIELDS(PlayerItem, id, pos, state, damaged, channels, bits, rate, frames, size, bytes_read, path, reason)};
-constinit const FieldDesc k_stage_fields[] = {KV_FIELDS(PlayerStage, index, flat, params_len, name, param_names, params)};
-constinit const ComponentDesc k_components[] = {KV_COMPONENT(PlayerItem, k_item_fields, CompCosmetic), KV_COMPONENT(PlayerStage, k_stage_fields, CompCosmetic)};
 constinit const KTableDesc k_ktables[] = {
     {.name = ".queue", .components = "PlayerItem", .capacity = kMaxItems, .id = &g_queue_ktable, .cosmetic = true},
     {.name = ".chain", .components = "PlayerStage", .capacity = kHifiMaxStages, .id = &g_chain_ktable, .cosmetic = true},
 };
-// Each event describes its fields, so --trace-events (and describe) print them.
-constinit const FieldDesc k_f_PlayerEnqueue[] = {KV_FIELDS(PlayerEnqueue, path, before)};
-constinit const FieldDesc k_f_PlayerPlay[] = {KV_FIELDS(PlayerPlay, unused)};
-constinit const FieldDesc k_f_PlayerPause[] = {KV_FIELDS(PlayerPause, unused)};
-constinit const FieldDesc k_f_PlayerStop[] = {KV_FIELDS(PlayerStop, unused)};
-constinit const FieldDesc k_f_PlayerNext[] = {KV_FIELDS(PlayerNext, unused)};
-constinit const FieldDesc k_f_PlayerPrevious[] = {KV_FIELDS(PlayerPrevious, unused)};
-constinit const FieldDesc k_f_PlayerJump[] = {KV_FIELDS(PlayerJump, item)};
-constinit const FieldDesc k_f_PlayerSeek[] = {KV_FIELDS(PlayerSeek, item, frame)};
-constinit const FieldDesc k_f_PlayerSeekBy[] = {KV_FIELDS(PlayerSeekBy, seconds)};
-constinit const FieldDesc k_f_PlayerSeeked[] = {KV_FIELDS(PlayerSeeked, item, frame, seq)};
-constinit const FieldDesc k_f_PlayerSetParam[] = {KV_FIELDS(PlayerSetParam, stage, param, value)};
-constinit const FieldDesc k_f_PlayerParamChanged[] = {KV_FIELDS(PlayerParamChanged, stage, param, value, seq)};
-constinit const FieldDesc k_f_PlayerQueueEdit[] = {KV_FIELDS(PlayerQueueEdit, op, item, before)};
-constinit const FieldDesc k_f_PlayerTrackStarted[] = {KV_FIELDS(PlayerTrackStarted, item, rate, channels, bits, frames, seq)};
-constinit const FieldDesc k_f_PlayerTrackEnded[] = {KV_FIELDS(PlayerTrackEnded, item, frames, seq, damaged, reason)};
-constinit const FieldDesc k_f_PlayerTrackFailed[] = {KV_FIELDS(PlayerTrackFailed, item, seq, reason)};
-constinit const FieldDesc k_f_PlayerQueueEnded[] = {KV_FIELDS(PlayerQueueEnded, seq)};
-constinit const FieldDesc k_f_HifiUnderrun[] = {KV_FIELDS(HifiUnderrun, count, seq)};
-constinit const EventTypeDesc k_events[] = {
-    KV_EVENT_EX(PlayerEnqueue, k_f_PlayerEnqueue, 0),
-    KV_EVENT_EX(PlayerPlay, k_f_PlayerPlay, 0),
-    KV_EVENT_EX(PlayerPause, k_f_PlayerPause, 0),
-    KV_EVENT_EX(PlayerStop, k_f_PlayerStop, 0),
-    KV_EVENT_EX(PlayerNext, k_f_PlayerNext, 0),
-    KV_EVENT_EX(PlayerPrevious, k_f_PlayerPrevious, 0),
-    KV_EVENT_EX(PlayerJump, k_f_PlayerJump, 0),
-    KV_EVENT_EX(PlayerSeek, k_f_PlayerSeek, 0),
-    KV_EVENT_EX(PlayerSeekBy, k_f_PlayerSeekBy, 0),
-    KV_EVENT_EX(PlayerSeeked, k_f_PlayerSeeked, 0),
-    KV_EVENT_EX(PlayerSetParam, k_f_PlayerSetParam, 0),
-    KV_EVENT_EX(PlayerParamChanged, k_f_PlayerParamChanged, 0),
-    KV_EVENT_EX(PlayerQueueEdit, k_f_PlayerQueueEdit, 0),
-    KV_EVENT_EX(PlayerTrackStarted, k_f_PlayerTrackStarted, 0),
-    KV_EVENT_EX(PlayerTrackEnded, k_f_PlayerTrackEnded, 0),
-    KV_EVENT_EX(PlayerTrackFailed, k_f_PlayerTrackFailed, 0),
-    KV_EVENT_EX(PlayerQueueEnded, k_f_PlayerQueueEnded, 0),
-    KV_EVENT_EX(HifiUnderrun, k_f_HifiUnderrun, 0),
-};
-constinit const ResourceDesc k_resources[] = {{".transport"}, {".output"}};
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = player_pump,
      .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerQueueEdit",
@@ -1291,10 +1277,10 @@ constinit const SystemDesc k_systems[] = {
 
 KV_MODULE_DEFINE(blackwing_player_module) = {
     .name       = "player",
-    .events     = k_events,
-    .components = k_components,
+    .events     = k_player_events,
+    .components = k_player_components,
     .ktables    = k_ktables,
-    .resources  = k_resources,
+    .resources  = k_player_resources,
     .systems    = k_systems,
     .commands   = k_commands,
     .startup    = player_startup,

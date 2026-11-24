@@ -222,10 +222,19 @@ Header `korvid/blackwing_library/library.h`:
 
 Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the record.
 
+Header `korvid/blackwing_library/schema.h`: the API as the engine reads it: the field
+table of every event, row and resource above (`library.scan`'s too: cosmetic, described
+and never hashed), and the tables a module record names (`k_library_events`,
+`k_library_components`, `k_library_resources`), for the library and for a stand-in in
+its place.
+
 ## Behaviour worth knowing
 
 - **What comes back arrives in a later tick.** A window is answered on the reader's thread;
   `LibraryResult` comes in the tick after the answer.
+- **It asks for its ticks** (`engine_want_ticks`) while a scan runs, a tag read is out, or
+  a window has been asked for and not answered, so an answer does not wait for a resting
+  loop's next heartbeat.
 - **The walk is fast, and the index follows it.** On the built-in disk fifty thousand files
   are listed in about 0.5 s and are rows within about 1.8 s; their tags are read at about
   5,500 files a second with the cache warm, and in 16 s for all of them with it cold. A

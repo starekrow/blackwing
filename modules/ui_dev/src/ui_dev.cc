@@ -1,0 +1,231 @@
+// ui_dev: the development face. One Krome screen (assets/shell.kim) of panels, each a
+// definition in a file of its own. This file is the face's frame: it opens the screen,
+// stands in for a panel whose file does not load, sleeps while the window is hidden, and
+// hands each tick to the panels' two halves: a table read into the model (.sync), an
+// event of the screen's turned into a command (.events).
+//
+// It reads the player's and the library's tables through the context, by name, and emits
+// their commands. It calls nothing of either: their headers are declarations.
+#include "korvid/ui_dev/module.h"
+#include "face.h"
+#include "korvid/blackwing_player/player.h"
+#include "korvid/core/array.h"
+#include "korvid/core/format.h"
+#include "korvid/core/log.h"
+#include "korvid/kim/kim.h"
+#include "korvid/krome/krome.h"
+#include "korvid/platform_hid/events.h"
+#include <string.h>
+
+namespace kv {
+
+namespace {
+
+constinit UiDevConfig g_ui_dev_config = {};
+
+constexpr const char* kShellFile = "ui_dev/shell.kimb";
+constexpr const char* kShellScreen = "shell";
+constexpr const char* kFallback = "ui_dev/failed";
+// The panels, by the name of their files (ui_dev/<name>.kim, .lua) and of their
+// definition (<name>-panel).
+constinit const char* const k_panels[] = {"transport"};
+constexpr u32 kPanels = KV_COUNTOF(k_panels);
+// A command's answer is a tick or two away: the face asks for this many ticks after it
+// emits one, so the answer is not left waiting for the loop's next heartbeat.
+constexpr u32 kAwakeTicks = 4;
+
+Face* face(Engine& e) { return engine_module_state_as<Face>(e, "ui_dev"); }
+
+// Text that can sit inside a quoted string of markup or Lua and be shown as it is: no
+// quote, no backslash, no brace (a brace in a text reads the model), no line break.
+void plain(char* out, usize cap, const char* in) {
+    usize n = 0;
+    for (; *in && n + 1 < cap; ++in) {
+        char c = *in;
+        if (c == '"' || c == '\\') c = '\'';
+        else if (c == '{') c = '(';
+        else if (c == '}') c = ')';
+        else if ((unsigned char)c < 0x20) c = ' ';
+        out[n++] = c;
+    }
+    out[n] = 0;
+}
+
+void open_shell(Face& f) {
+    Engine& e = *f.e;
+    if (!f.screen.is_null()) krome_close(e, f.screen);
+    krome_close(e, name_intern(kFallback));
+    krome_clear_errors(e);
+    f.screen = krome_open(e, kShellFile, kShellScreen);
+    f.ready = false;
+    f.fresh = true;
+    f.stats.failed = false;
+    ++f.attempts;
+    face_forget(f);
+}
+
+// A panel's file did not load: a definition of the same name that says so, and a script
+// that does nothing, given to Krome in the files' place.
+void stub_panel(Face& f, u32 panel, const char* why) {
+    char text[640], said[320];
+    plain(said, sizeof said, why);
+    format(text, sizeof text, "use \"krome/std\"\nuse \"ui_dev/widgets\"\ndef %s-panel {\n    panel-broken \"%s\" \"%s\"\n}\n", k_panels[panel], k_panels[panel], said);
+    char path[96];
+    format(path, sizeof path, "ui_dev/%s.kim", k_panels[panel]);
+    Array<u8> out{};
+    KimErrors errors;
+    if (kim_compile(text, strlen(text), path, out, errors)) {
+        format(path, sizeof path, "ui_dev/%s.kimb", k_panels[panel]);
+        krome_provide(*f.e, path, out.data, out.len);
+    }
+    out.free();
+    format(path, sizeof path, "ui_dev/%s.lua", k_panels[panel]);
+    static const char k_nothing[] = "return { model = {}, on = {} }\n";
+    krome_provide(*f.e, path, k_nothing, sizeof k_nothing - 1);
+    f.stubbed |= 1u << panel;
+    ++f.stats.broken;
+    KV_WARN("ui_dev", "the %s panel did not load: %s", k_panels[panel], why);
+}
+
+// The shell did not build. Each mistake that names a panel's file makes that panel a
+// stand-in, and the shell is opened again; a mistake that names none (the shell's own, or
+// the prelude's) leaves a screen that lists them, and nothing else of the face.
+void shell_failed(Face& f) {
+    Engine& e = *f.e;
+    const KimErrors* errors = krome_errors(e);
+    u32 stubs = 0;
+    for (u32 p = 0; p < kPanels; ++p) {
+        if (f.stubbed & (1u << p)) continue;
+        char mark[64];
+        format(mark, sizeof mark, "ui_dev/%s.", k_panels[p]);
+        for (u32 i = 0; errors && i < errors->count; ++i) {
+            const KimError& x = errors->list[i];
+            if (!(x.file && strstr(x.file, mark)) && !strstr(x.text, mark)) continue;
+            char why[320];
+            errors->format_one(i, why, sizeof why);
+            stub_panel(f, p, why);
+            ++stubs;
+            break;
+        }
+    }
+    if (stubs && f.attempts <= kPanels + 1) { open_shell(f); return; }
+
+    // No panel to blame: the errors, where the face would be.
+    char src[4096];
+    usize n = (usize)format(src, sizeof src, "return col { bg = \"#10131a\", color = \"#e6e9ef\", pad = 16, gap = 6, w = \"fill\", h = \"fill\",\n"
+                                             "  text { \"The development face did not load. The player is not affected.\", size = 16 },\n");
+    for (u32 i = 0; errors && i < errors->count && n + 420 < sizeof src; ++i) {
+        char why[320], said[320];
+        errors->format_one(i, why, sizeof why);
+        plain(said, sizeof said, why);
+        KV_ERROR("ui_dev", "%s", why);
+        n += (usize)format(src + n, sizeof src - n, "  text { \"%s\", size = 13, color = \"#ff9a9a\" },\n", said);
+    }
+    if (!errors || !errors->count) n += (usize)format(src + n, sizeof src - n, "  text { \"%s would not open.\", size = 13, color = \"#ff9a9a\" },\n", kShellFile);
+    format(src + n, sizeof src - n, "}\n");
+    krome_close(e, f.screen);
+    f.screen = Name{};
+    krome_open_source(e, kFallback, src);
+    f.stats.failed = true;
+}
+
+// ---- the units -----------------------------------------------------------------------------
+
+// The screen's events, by name: each panel is offered it, and the first to know it emits
+// its command.
+void on_event(TickContext& ctx, Span<const KromeEvent> events) {
+    Face& f = ctx.state_as<Face>();
+    if (f.screen.is_null()) return;
+    for (const KromeEvent& ev : events) {
+        if (ev.screen != f.screen.hash) continue;
+        Name name{ev.event};
+        if (transport_event(ctx, f, name, ev.value)) {
+            ++f.stats.commands;
+            f.awake = kAwakeTicks;
+            engine_want_ticks(*ctx.engine);
+        }
+    }
+}
+
+// Hidden, the face reads nothing and writes nothing; seen again, it writes everything.
+void on_visibility(TickContext& ctx, Span<const WindowVisibility> events) {
+    Face& f = ctx.state_as<Face>();
+    for (const WindowVisibility& v : events) {
+        if (f.hidden && v.visible) f.fresh = true;
+        f.hidden = !v.visible;
+    }
+}
+
+void ui_dev_sync(TickContext& ctx) {
+    Face& f = ctx.state_as<Face>();
+    Engine& e = *ctx.engine;
+    if (f.awake) { --f.awake; engine_want_ticks(e); }
+    if (f.screen.is_null()) return;
+    if (f.hidden) { ++f.stats.asleep; return; }
+    if (!f.ready) {
+        if (!krome_ready(e, f.screen)) {
+            // Loading, or failed: failed when nothing is still on its way and a mistake was found.
+            const KimErrors* errors = krome_errors(e);
+            if (errors && errors->total && krome_settled(e)) shell_failed(f);
+            return;
+        }
+        f.ready = true;
+        f.fresh = true;
+    }
+    if (f.fresh) { face_forget(f); f.fresh = false; }
+    ++f.stats.syncs;
+    transport_sync(ctx, f);
+}
+
+bool ui_dev_startup(Engine& e, ModuleInstance& self) {
+    Face* f = arena_push<Face>(self.arena);
+    if (!f) return false;
+    self.set_state(f);
+    f->e = &e;
+    if (g_ui_dev_config.enabled && g_ui_dev_config.open) open_shell(*f);
+    return true;
+}
+
+constinit const HandlerDesc k_handlers[] = {
+    {.name = ".events", KV_ON(KromeEvent, on_event), .phase = Phase::PreSim, .emits = "PlayerPlay, PlayerPause"},
+    {.name = ".visibility", KV_ON(WindowVisibility, on_visibility), .phase = Phase::PreSim},
+};
+constinit const SystemDesc k_systems[] = {
+    {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync, .reads = "player.transport", .main_thread = true, .runs = RunWhen::Always},
+};
+
+} // namespace
+
+void ui_dev_configure(const UiDevConfig& config) { g_ui_dev_config = config; }
+
+void ui_dev_open(Engine& e) {
+    Face* f = face(e);
+    if (!f || !g_ui_dev_config.enabled) return;
+    f->attempts = 0;
+    open_shell(*f);
+}
+
+Name ui_dev_screen(Engine& e) {
+    Face* f = face(e);
+    return f ? f->screen : Name{};
+}
+
+bool ui_dev_ready(Engine& e) {
+    Face* f = face(e);
+    return f && f->ready;
+}
+
+UiDevStats ui_dev_stats(Engine& e) {
+    Face* f = face(e);
+    return f ? f->stats : UiDevStats{};
+}
+
+KV_MODULE_DEFINE(ui_dev_module) = {
+    .name     = "ui_dev",
+    .systems  = k_systems,
+    .handlers = k_handlers,
+    .startup  = ui_dev_startup,
+    .memory   = {.reserve = 256 * 1024},
+};
+
+} // namespace kv

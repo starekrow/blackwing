@@ -1,0 +1,28 @@
+// ui_dev's own few styles over krome/std: dense, plain, no design of its own. Every panel
+// uses this.
+
+use "krome/std"
+
+style dev-panel {
+    bg=well radius=6 pad=8 gap=6 border=1 border-color=raised-edge
+}
+
+style dev-title {
+    color=muted size=12
+}
+
+style dev-value {
+    size=13
+}
+
+// A panel that did not load: where it would be, the file, the line and the message.
+style dev-broken {
+    bg=danger radius=6 pad=8 gap=4 border=1 border-color=raised-edge
+}
+
+def panel-broken name why {
+    col [dev-broken] w=fill {
+        text "{name}: this panel did not load" size=13
+        text "{why}" size=12 color=muted
+    }
+}

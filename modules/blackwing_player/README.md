@@ -113,12 +113,20 @@ Header `korvid/blackwing_player/player.h`:
 
 Header `korvid/blackwing_player/module.h`: `blackwing_player_module`, the record.
 
+Header `korvid/blackwing_player/schema.h`: the API as the engine reads it. The field
+table of every event, row and resource above, and the tables a module record names
+(`k_player_events`, `k_player_components`, `k_player_resources`). The player's record
+names them; so does a stand-in for the player, a module called `player` that publishes
+tables of its own making, which is what a face's tests run against
+([ui_dev](../ui_dev/README.md)).
+
 What the module registers with the engine, as module `player`:
 
 - the ktable `player.queue` (component `PlayerItem`, cosmetic, 4096 rows, the list's rows);
 - the ktable `player.chain` (component `PlayerStage`, cosmetic, a row per stage: `gain`,
   `eq`);
-- the resources `player.transport` and `player.output`;
+- the resources `player.transport` and `player.output`, each with a field table and
+  cosmetic: described by their fields, to `describe` and a script, and never hashed;
 - the eighteen event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
@@ -127,6 +135,14 @@ What the module registers with the engine, as module `player`:
 ## Behaviour worth knowing
 
 - **A command acts in the tick after it was emitted**, when the pump reads it.
+- **It asks for its ticks.** While it plays or is about to, and while anything asked for
+  has yet to be heard or read (a seek, a parameter, a piece), the pump calls
+  `engine_want_ticks` each tick. Paused or stopped with nothing on its way it asks for
+  nothing, and a loop that paces ticks apart from frames, or sleeps between them, lets it
+  rest. Whoever emits a command while it rests should ask for a tick with it.
+- **The capture device, asked for by name with none given** (`device = "capture"`,
+  `device_backend` null), is one the player makes: on the wall clock, keeping nothing,
+  closed with the player. A run with no hardware.
 - **Every event describes its fields**, so `--trace-events` prints them
   (`PlayerTrackStarted{item=1, rate=44100, ...}`).
 - **Events of different types have no order within a tick.** An Ended and a Started
