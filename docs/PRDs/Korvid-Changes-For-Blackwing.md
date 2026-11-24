@@ -1,6 +1,6 @@
 # Korvid changes for Blackwing — quick requirements
 
-Nov 22, 2026 · updated Nov 23 with what Korvid took
+Nov 22, 2026 · updated Nov 23 with what Korvid took, and with what skin import needs
 
 ## What this is
 
@@ -11,7 +11,9 @@ asked, and how to tell it is done. The findings themselves are in
 
 Each was written before Korvid took it, with Blackwing's workaround named so the cost of
 waiting was clear. Korvid's slices 10 and 11 took all twenty-five: Status has where each
-landed and what Blackwing does with it now.
+landed and what Blackwing does with it now. KR28 to KR42 are new, from the skin import
+note, and are for work in no phase yet. KR26 and KR27 are slice 4's and are written up
+with it.
 
 One of these blocked the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
 backend, and a project cannot link PipeWire today without editing the engine.
@@ -52,6 +54,7 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR23 | `engine_set_event_hook`, dev builds | not yet: `ui_dev`'s Events panel |
 | KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | not yet: slice 4, milestone 6; the session file and the index can move |
 | KR25 | `image/jpeg.h`: baseline, progressive, scaled, EXIF, fuzzed | not yet: BL25 and slice 6 |
+| KR28 to KR42 | not asked of Korvid before: from the skin import note | nothing built: skin import is in no phase |
 
 Where Korvid's answer differs from what was asked:
 
@@ -685,6 +688,249 @@ has run over it with the sanitizers on.
 **Workaround today.** None in use: art is not read. Blackwing could vendor a decoder in
 a module of its own, which every other Korvid program that meets a JPEG would then do
 again.
+
+## Found in the skin import note
+
+Nov 23, 2026. From [the skin import note](../design/skin-import-2026-11-23.md): what
+converting other players' skins (`.wal`, `.wmz`, `.vlt`, `.xmpskin`) into Krome skins
+needs Krome and the window to be able to draw and do. Nothing of it is built and skin
+import is in no phase of the master PRD yet, so none of these blocks anything and none
+has a priority beyond "wanted by skin import". They are read against Krome's module page
+as it stood on this date.
+
+No workarounds are given. The note decides that the converter does not work around a
+missing capability: a skin that needs one waits for it.
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR28 | An image node draws a region of a file | `krome` | wanted by skin import, all four formats |
+| KR29 | A strip of frames, the frame chosen by a bound value or played at a rate | `krome` | wanted by skin import |
+| KR30 | A node placed at an offset in its parent, each edge tied to a parent edge or kept in proportion | `krome` | wanted by skin import |
+| KR31 | An image stretched, tiled, or stretched with fixed borders | `krome` | wanted by skin import |
+| KR32 | Bitmap fonts: glyphs as regions of an image | `krome`, `asset` | wanted by skin import, and by `ui_wsz` |
+| KR33 | Hit testing through a mask image: by alpha, by colour, by palette index | `krome` | wanted by skin import |
+| KR34 | A look computed from an image's pixels: scaled per channel, hue-shifted, gamma-shifted, within a mask | `krome` | wanted by skin import |
+| KR35 | Positions and sizes ease, and a screen's script can ask for a timer | `krome` | wanted by skin import |
+| KR36 | A slider whose thumb follows a path, and a radial one | `krome` | wanted by skin import (`.vlt`) |
+| KR37 | Text that scrolls when it does not fit | `krome` | wanted by skin import |
+| KR38 | A screen opened from a directory of uncooked files at runtime | `krome`, `kim` | wanted by skin import |
+| KR39 | A window with no frame, shaped by its image's alpha | the window's modules | wanted by skin import, all four formats |
+| KR40 | Several windows up at once, each showing a screen | the window's modules, `krome` | wanted by skin import |
+| KR41 | Regions of a screen that drag its window, and grips that resize it | the window's modules, `krome` | wanted by skin import |
+| KR42 | Windows that snap to each other and to the screen's edges, and move together | the window's modules | wanted by skin import |
+
+"The window's modules" is `platform_hid` and `frameloop` on Korvid's side and
+`blackwing_window` on this one; where each of KR39 to KR42 is cut between them is part
+of the answer.
+
+### KR28: a region of an image
+
+**What was run into.** Every format keeps many pictures in one file and names them by
+rectangle: VLC's `SubBitmap`, a `.wal` element's `x`, `y`, `w`, `h`, a WMP button
+group's states, XMPlay's buttons cut from their panel. Krome's `image` draws a whole
+file.
+
+**What is asked.** A source rectangle on an image and on a look's image, in the file's
+pixels.
+
+**Done when** a node draws the 20 x 20 at (40, 0) of a sheet, and its `hover` look draws
+the 20 x 20 beside it, from one texture.
+
+### KR29: a strip of frames
+
+**What was run into.** A knob in XMPlay is any number of states stacked vertically, the
+state picked by the control's value. VLC's `nbframes`, `fps` and `loop` play a strip as
+an animation. WMP's `CUSTOMSLIDER` and a `.wal` `animatedlayer` are the same two uses.
+
+**What is asked.** An image that is N frames of a strip, down or across: the frame bound
+to a model value (`0..1` or an index), or played at a rate for a number of loops. A
+playing strip wakes an on-demand window only for its next frame, and a still one costs
+nothing (B25).
+
+**Done when** a 64-state knob follows a bound value, and a 12-frame strip at 10 frames a
+second plays twice and rests on its last frame with the window asleep after it.
+
+### KR30: placement by offset and edge
+
+**What was run into.** These skins place by coordinate. VLC ties a control's two
+corners each to a corner of its container (`lefttop`, `rightbottom`) or keeps a
+proportion (`xkeepratio`); a `.wal` measures `x`, `y`, `w`, `h` each from the near or
+far edge (`relat*`). A Krome stack places a child at one of nine anchors.
+
+**What is asked.** In a stack, a child's offset from its anchor, and each of its four
+edges tied to a parent edge at a distance, or to a fraction of the parent. Offsets can be
+bound to the model (KR36 needs that).
+
+**Done when** a node 10 from the left and 10 from the right of its parent stretches with
+it, one 30 from the right and 8 from the bottom keeps its size and follows the corner,
+and one at a third of the width stays at a third.
+
+### KR31: stretched, tiled and bordered images
+
+**What was run into.** A resizable skin window is a picture made to fit: VLC's `resize`
+is `mosaic` (tiled) or `scale`; XMPlay's info window grows in the bands its mask marks
+(indexes 253 to 255) between corners that do not; `.wal` frames are the same in nine
+pieces.
+
+**What is asked.** An image's fit: natural, stretched, tiled, or stretched with fixed
+borders on any of its four sides (the nine-slice `sprite_ui` has for sprites).
+
+**Done when** one frame image with 8-pixel borders draws at 200 x 100 and at 640 x 480
+with its corners unscaled, and a tiled background repeats from its top left.
+
+### KR32: bitmap fonts
+
+**What was run into.** Classic and modern Winamp skins and VLC's draw their time
+display and often their titles from a picture of glyphs: fixed cells in a grid, in a
+stated order (VLC's `BitmapFont` of `type` `digits` or `text`). Krome's fonts are
+TrueType from the asset module.
+
+**What is asked.** A font that is an image, a cell size and the characters it holds in
+order, used by a text node as any font is. A character it lacks draws as a stated
+fallback glyph, or nothing, by the font's choice.
+
+**Done when** a time display draws `12:34` from a strip of digits, and a title with a
+character the font lacks still lays out.
+
+### KR33: hit testing through a mask
+
+**What was run into.** These skins are not made of rectangles. A WMP button group has a
+`mappingImage` with each button's area filled in one colour. An XMPlay panel has an
+8-bit mask whose palette index names the control under each pixel. Everywhere, a round
+button should not take a press at its transparent corner. Krome hits a node's rect.
+
+**What is asked.** A node hit only where a mask says: where its own image's alpha is
+over a threshold; or where a mask image has a given colour, or a given palette index.
+One mask shared by many nodes is held once.
+
+**Done when** two buttons whose rects overlap take presses by the mask's colours, and a
+press on a button's transparent corner goes to what is under it.
+
+### KR34: a look computed from pixels
+
+**What was run into.** XMPlay has no hover or pressed art: it multiplies the panel's own
+pixels under a control's mask by `scaler_lit` and `scaler_pressed`, RGB factors usually
+above 1. WMP images take `hueShift` and `saturation`. A `.wal` colour theme shifts the
+bitmaps of a gamma group. Krome has `tint`, a multiply by a colour of at most 1, over a
+node's whole rect.
+
+**What is asked.** On a look: a per-channel scale that can exceed 1, a hue shift and a
+saturation, applied to the node's image and confined to its mask (KR33) where it has
+one. A theme token can carry one, so a colour theme is a theme.
+
+**Done when** a masked control brightens by 1.2 on hover with no second image, and
+switching theme recolours every image of a group.
+
+### KR35: easing of place and size, and timers
+
+**What was run into.** A `.wal` drawer slides open; a WMP view's `ontimer` fires every
+`timerInterval` milliseconds to move or blink something. Krome's `transition` eases
+colours and opacity, and says "sizes and positions do not move"; a screen's script has
+no clock.
+
+**What is asked.** `transition` covers a node's size and its offsets (KR30), and says
+when it arrives. A screen's script can ask to be called once after a delay, or at an
+interval, on the Frame cycle's clock; a timer wakes an on-demand window as a caret's
+blink does, and a hidden window's timers do not run (B25).
+
+**Done when** a panel bound to `open` slides 120 pixels in 0.2 s and its handler is told
+at the end, and a 500 ms timer costs two wakeups a second and none while hidden.
+
+### KR36: sliders along a path, and radial ones
+
+**What was run into.** A VLC `Slider` runs its thumb along Bezier `points`, not a line,
+and a `RadialSlider` picks one of `nbimages` by angle between `minangle` and `maxangle`.
+
+**What is asked.** Perhaps nothing new in the kernel: with bound offsets (KR30) and
+frames (KR29), both are Lua behaviours, and std could carry them. Asked for is that the
+two are checked to be writable that way, and whichever part is not is named.
+
+**Done when** std (or a prelude of Blackwing's) has a slider whose thumb follows a
+three-point curve and a dial of 32 frames, with the keys a slider takes.
+
+### KR37: text that scrolls
+
+**What was run into.** A title longer than its box scrolls: Winamp's song ticker, VLC's
+`scrolling="auto"`, XMPlay's title (smooth or by block, `pos_titlescroll`). Krome clips.
+
+**What is asked.** A text node that, when its one line does not fit, moves it: at a
+rate, smoothly or by a step, looping or bouncing; still when it fits; draggable by the
+pointer where the skin says so. It wakes the window only while it moves and it is in
+view.
+
+**Done when** a long title scrolls in a 120-pixel box at a stated rate, a short one sits
+still and costs nothing, and the window sleeps when the text is hidden.
+
+### KR38: a screen from a directory, uncooked
+
+**What was run into.** A converted skin is a directory a user has, not an asset in the
+pack: `.kim`, images, Lua, fonts. Krome reads `.kimb` through the asset module or from
+`krome_provide`, and `.kim` becomes `.kimb` in `kimc` or goldberg's cook.
+
+**What is asked.** A way for a program to open a screen from a directory at runtime: the
+markup compiled in process (`kim` and `kimb` as a library call, with the check's errors
+by file and line), and its images, fonts and scripts resolved inside that directory and
+nowhere else. Reload works on it as on a cooked screen.
+
+**Done when** a skin directory dropped beside a running Blackwing opens, a path that
+climbs out of it is refused with its name, and saving its `.kim` rebuilds the screen.
+
+### KR39: a shaped window with no frame
+
+**What was run into.** None of these skins sits in a system window. Each is its own
+outline: XMPlay by alpha or a see-through colour, WMP by `transparencyColor` and
+`clippingColor`, VLC by `alphacolor` or a PNG's alpha.
+
+**What is asked.** A window with no decorations whose shape is what its content's alpha
+says: drawn with per-pixel alpha where the OS composites, and input passing through
+where it is clear. What each platform can and cannot do (Wayland, X11 with and without a
+compositor, Win32, macOS) is stated.
+
+**Done when** a round skin shows the desktop at its corners, and a click there reaches
+the window behind.
+
+### KR40: several windows
+
+**What was run into.** A VLC theme is several `Window`s (main, playlist, equalizer)
+shown and hidden by actions; `.wal` containers are the same; XMPlay's panels slide out
+of the main one and its info window stands apart.
+
+**What is asked.** More than one window up at once, each showing a Krome screen or
+layer, opened, closed, shown and hidden at runtime; one keyboard focus across them; each
+paced on demand on its own.
+
+**Done when** a main window and a playlist window are up, one is hidden and shown again
+with its scroll kept, and neither draws while the other changes.
+
+### KR41: drag regions and resize grips
+
+**What was run into.** With no frame (KR39) the skin says where the window is grabbed:
+VLC's `Image action="move"` and `resizeSE`, XMPlay's "Heading" mask index, a `.wal`
+layer with `move="1"` or `resize="bottomright"`.
+
+**What is asked.** A node flag that makes a press on it drag its window, and one that
+makes it a resize grip for an edge or corner, through the OS's own move and resize where
+there is one (Wayland allows no other way). The window's size bounds come from the
+screen (VLC's `minwidth` to `maxheight`).
+
+**Done when** a skin with no frame is dragged by its title area and resized by its
+corner between its bounds, on each desktop platform.
+
+### KR42: windows that snap
+
+**What was run into.** VLC's `Anchor`s make windows stick to each other within a `range`
+and move together, the `priority` saying which leads; a theme's `magnet` snaps a window
+to the screen's edges. Winamp's windows dock the same way, and XMPlay's panels are
+attached.
+
+**What is asked.** A window can be told where it is and moved by the program, so
+snapping and following are the program's to do; and what each platform refuses is
+stated (Wayland gives a client no global position, so there this may be one window drawn
+as several, or not offered).
+
+**Done when** a playlist window dragged within 10 pixels of the main one snaps to it and
+then follows it, where the platform allows, and the note on each platform says what was
+done instead where it does not.
 
 ## Not asked for, and worth knowing
 
