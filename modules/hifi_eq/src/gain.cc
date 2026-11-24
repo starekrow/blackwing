@@ -15,8 +15,8 @@ struct Gain {
 };
 
 constinit const StageParam k_gain_params[] = {
-    {.name = "gain_db", .initial = 0.0, .lo = -100.0, .hi = 0.0},
-    {.name = "mute",    .initial = 0.0, .lo = 0.0,    .hi = 1.0},
+    {.name = "gain_db", .initial = 0.0, .lo = -100.0, .hi = 0.0, .step = 0.5, .unit = "dB"},
+    {.name = "mute",    .initial = 0.0, .lo = 0.0,    .hi = 1.0, .step = 1.0},
 };
 
 void* gain_open(const AudioFormat& f, Span<u8> memory) {

@@ -77,8 +77,27 @@ void face_set_bool(Face& f, const char* key, bool value) {
     wrote(f);
 }
 
+void face_set_doc(Face& f, const char* key, JsonBuilder& b, JsonRef root) {
+    if (f.screen.is_null()) return;
+    JsonDoc doc;
+    Array<u8> out{};
+    if (b.finish(root, doc)) {
+        kbor_write(doc, out);
+        if (!shown(f, key, hash_bytes(out.data, out.len, 0x27D4EB2F165667C5ull))) {
+            krome_set_doc(*f.e, f.screen, key, out.data, out.len);
+            wrote(f);
+        }
+    }
+    out.free();
+}
+
 void face_forget(Face& f) {
     for (u32 i = 0; i < f.nkeys; ++i) f.keys[i].shown = 0;
+}
+
+void face_forget(Face& f, const char* key) {
+    for (u32 i = 0; i < f.nkeys; ++i)
+        if (f.keys[i].key == key || strcmp(f.keys[i].key, key) == 0) f.keys[i].shown = 0;
 }
 
 } // namespace kv

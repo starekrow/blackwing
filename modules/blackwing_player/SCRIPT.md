@@ -41,6 +41,7 @@ acted on in the tick after the host applies the slice it was emitted in.
 | `PlayerEnqueue` | `path` string, `before` integer (0: the end) | `player.queue` | adds a file to the queue |
 | `PlayerQueueEdit` | `op` integer (a `PlayerEditOp`), `item`, `before` integers | `player.queue` | `Remove`, `Move` or `Clear` |
 | `PlayerSetParam` | `stage`, `param` integers, `value` number | `player.params` | sets a parameter of a stage of the chain, by index |
+| `PlayerApplyPreset` | `stage`, `preset` integers | `player.params` | sets every parameter of a stage to a preset's values: a `player.presets` row's `stage` and `index` |
 
 The fields `unused` of the six commands that carry nothing are not shown: emit them with
 `{}`.
@@ -112,6 +113,33 @@ Component `PlayerStage`, a row per stage of the chain, in order.
 
 Lua lists count from 1 and parameters from 0: parameter `p` is `params[p + 1]`.
 
+### `player.params`
+
+Component `PlayerParam`, a row per parameter of every stage: what it is called, what it
+may be, and the value heard. Enough to draw a control for a stage nobody has heard of.
+Fixed at start-up but for `value`.
+
+| field | Lua | what |
+|---|---|---|
+| `stage` | integer | its stage's `index` |
+| `index` | integer | its own within the stage, from 0: what `PlayerSetParam.param` takes |
+| `value` | number | heard: the same number as `player.chain`'s `params[index + 1]` |
+| `lo`, `hi` | numbers | what a value is kept within |
+| `initial` | number | what a new chain starts with |
+| `step` | number | the smallest change worth offering; 0: any. 0 to 1 in steps of 1 is a switch |
+| `name` | string | `"gain_db"`, `"b3.gain"`; 15 bytes at most |
+| `unit` | string | `"dB"`, `"Hz"`; `""` when it has none |
+
+### `player.presets`
+
+Component `PlayerPreset`, a row per preset a stage carries, fixed at start-up.
+
+| field | Lua | what |
+|---|---|---|
+| `stage` | integer | the stage it is a preset of |
+| `index` | integer | within the stage, from 0: what `PlayerApplyPreset.preset` takes |
+| `name` | string | `"flat"`, `"rock"` |
+
 ## Resources
 
 ### `player.transport`
@@ -140,6 +168,8 @@ A script's snapshot of it is as of its slice: `position` is where the playhead w
 | `exact` | integer, 0 or 1 | every sample reaching the device is the file's own |
 | `sample` | integer, a `HifiSampleFormat` | `S16` 0, `S24` 1, `S32` 2, `F32` 3 |
 | `channels`, `rate` | integers | the device's format |
+| `bits` | integer | the significant bits the device's word carries exactly: 16, 24 or 32 (24 for a float word); 0 with no device |
+| `float_word` | integer, 0 or 1 | its word is a float |
 | `lead_frames` | integer | decoded and ready, not yet taken by the device |
 | `underruns` | integer | ever |
 | `joining` | integer, 0 or 1 | a recut or a jump is being joined |
@@ -177,3 +207,7 @@ In `kv.enum`, both ways:
 Listed in [the spec](../../docs/specs/script-modules.md#what-this-needs): field tables
 for its two resources, two guest slots in the chain, the host's decoders asked after the
 linked ones, and a queue row with no file.
+
+Changed by slice 4, which is the first thing to read this surface from outside the
+player: the resources have their field tables; `player.params` and `player.presets` are
+new, with `PlayerApplyPreset`; `player.output` says the device word's `bits`.

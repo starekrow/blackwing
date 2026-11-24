@@ -1,0 +1,10 @@
+// The Chain panel's stages before anything is known of them. ui_dev writes this
+// definition again from player.params and player.presets when it has read them, and gives
+// Krome that in this file's place (chain.cc).
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def chain-stages {
+    text "no chain yet" [dev-title]
+}

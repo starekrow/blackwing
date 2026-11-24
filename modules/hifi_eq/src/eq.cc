@@ -120,10 +120,10 @@ struct ParamTable {
                 for (const char* w = what[k]; *w; ++w) n[at++] = *w;
                 n[at] = 0;
             }
-            p[i * 4 + 0] = StageParam{names[i * 4 + 0], (f64)k_default[i].kind, 0.0, 2.0};
-            p[i * 4 + 1] = StageParam{names[i * 4 + 1], k_default[i].freq, 10.0, 24000.0};
-            p[i * 4 + 2] = StageParam{names[i * 4 + 2], 0.0, -24.0, 24.0};
-            p[i * 4 + 3] = StageParam{names[i * 4 + 3], k_default[i].q, 0.1, 10.0};
+            p[i * 4 + 0] = StageParam{names[i * 4 + 0], (f64)k_default[i].kind, 0.0, 2.0, 1.0, ""};
+            p[i * 4 + 1] = StageParam{names[i * 4 + 1], k_default[i].freq, 10.0, 24000.0, 0.0, "Hz"};
+            p[i * 4 + 2] = StageParam{names[i * 4 + 2], 0.0, -24.0, 24.0, 0.5, "dB"};
+            p[i * 4 + 3] = StageParam{names[i * 4 + 3], k_default[i].q, 0.1, 10.0, 0.01, ""};
         }
     }
 };
@@ -208,12 +208,34 @@ constinit const EqPreset k_presets[] = {
     {"extreme", {{EqBand::LowShelf, 31.25, 24.0, 0.707}, {EqBand::Peak, 62.5, 24.0, 4.0}, {EqBand::Peak, 125.0, 24.0, 10.0}, {EqBand::Peak, 250.0, 24.0, 0.3}, {EqBand::Peak, 500.0, 24.0, 10.0}, {EqBand::Peak, 1000.0, 24.0, 1.41}, {EqBand::Peak, 2000.0, 24.0, 10.0}, {EqBand::Peak, 4000.0, 24.0, 0.5}, {EqBand::Peak, 8000.0, 24.0, 10.0}, {EqBand::HighShelf, 16000.0, 24.0, 2.0}}},
 };
 
+// The presets as the stage contract has them: a value for each of the forty parameters.
+constexpr u32 kEqPresets = KV_COUNTOF(k_presets);
+struct PresetTable {
+    f64         values[kEqPresets][kEqBands * 4];
+    StagePreset list[kEqPresets];
+    constexpr PresetTable() : values(), list() {
+        for (u32 i = 0; i < kEqPresets; ++i) {
+            for (u32 b = 0; b < kEqBands; ++b) {
+                EqBand band = k_presets[i].bands[b];
+                if (band.freq == 0.0) { band = k_default[b]; band.gain_db = 0.0; } // a band left out: the default one, flat
+                values[i][b * 4 + 0] = (f64)band.kind;
+                values[i][b * 4 + 1] = band.freq;
+                values[i][b * 4 + 2] = band.gain_db;
+                values[i][b * 4 + 3] = band.q;
+            }
+            list[i] = StagePreset{k_presets[i].name, Span<const f64>(values[i], kEqBands * 4)};
+        }
+    }
+};
+constinit const PresetTable k_preset_table;
+
 } // namespace
 
 constinit const StageDesc k_eq_stage = {
     .name         = "eq",
     .memory_bytes = sizeof(Eq),
     .params       = k_params.p,
+    .presets      = k_preset_table.list,
     .open         = eq_open,
     .set          = eq_set,
     .process      = eq_process,

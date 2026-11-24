@@ -51,6 +51,8 @@ constexpr u32 kNone       = ~0u;
 constinit PlayerConfig g_config = {};
 constinit u32 g_queue_ktable = 0;
 constinit u32 g_chain_ktable = 0;
+constinit u32 g_params_ktable = 0;
+constinit u32 g_presets_ktable = 0;
 
 // The chain, fixed in this slice: gain, then the equalizer.
 constinit const StageDesc* const k_chain[] = {&k_gain_stage, &k_eq_stage};
@@ -119,6 +121,7 @@ struct Player {
     // The chain as the player sees it: each parameter's value heard, and a change sent
     // and not yet heard (its generation, 0: none).
     Handle chain_rows[kStages];
+    Handle param_rows[kStages][kHifiMaxParams];
     f64    heard_value[kStages][kHifiMaxParams] = {};
     f64    sent_value[kStages][kHifiMaxParams] = {};
     u32    sent_gen[kStages][kHifiMaxParams] = {};
@@ -462,6 +465,14 @@ void resync(Player& p, KTable* queue, u64 place_id, u32 fallback) {
     hifi_replace_after(p.hifi, place->id, &src, n);
 }
 
+// A parameter sent to hifi, kept within its range: heard a callback or two later.
+void set_param(Player& p, u32 stage, u32 param, f64 value) {
+    const StageParam& sp = k_chain[stage]->params[param];
+    f64 v = value < sp.lo ? sp.lo : value > sp.hi ? sp.hi : value;
+    p.sent_value[stage][param] = v;
+    p.sent_gen[stage][param] = hifi_set_param(p.hifi, stage, param, v);
+}
+
 void commands(TickContext& ctx, Player& p, KTable* queue) {
     bool edited = false;          // the list changed after the place: what hifi has may be wrong
     u64 place_id = p.cursor < p.count ? at(p, p.cursor).id : 0;
@@ -579,15 +590,22 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         u32 k = pos_of(p, *it);
         jump_to(p, queue, k, to, k == p.cursor && heard_now(p, *it));
     }
+    // A preset is its stage's parameters, each set: sent in one tick, so one recut renders
+    // them all. Before the single changes, so one made with it in the same tick wins.
+    for (const PlayerApplyPreset& x : ctx.received<PlayerApplyPreset>()) {
+        if (x.stage >= kStages || x.preset >= k_chain[x.stage]->presets.len) {
+            KV_ERROR("player", "there is no preset %u of stage %u", x.preset, x.stage);
+            continue;
+        }
+        const StagePreset& preset = k_chain[x.stage]->presets[x.preset];
+        for (u32 j = 0; j < preset.values.len && j < k_chain[x.stage]->params.len; ++j) set_param(p, x.stage, j, preset.values[j]);
+    }
     for (const PlayerSetParam& x : ctx.received<PlayerSetParam>()) {
         if (x.stage >= kStages || x.param >= k_chain[x.stage]->params.len) {
             KV_ERROR("player", "there is no parameter %u of stage %u", x.param, x.stage);
             continue;
         }
-        const StageParam& sp = k_chain[x.stage]->params[x.param];
-        f64 v = x.value < sp.lo ? sp.lo : x.value > sp.hi ? sp.hi : x.value;
-        p.sent_value[x.stage][x.param] = v;
-        p.sent_gen[x.stage][x.param] = hifi_set_param(p.hifi, x.stage, x.param, v);
+        set_param(p, x.stage, x.param, x.value);
     }
     for (const PlayerSeekBy& x : ctx.received<PlayerSeekBy>()) {
         if (p.cursor >= p.count) continue;
@@ -617,13 +635,18 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
 // The chain's rows: the values heard, and whether each stage is flat with them.
 void publish_chain(TickContext& ctx, Player& p) {
     KTable* chain = ctx.write_ktable(g_chain_ktable);
+    KTable* params = ctx.write_ktable(g_params_ktable);
     if (!chain) return;
     for (u32 i = 0; i < kStages; ++i) {
         PlayerStage& r = chain->rows_of<PlayerStage>()[p.chain_rows[i].index()];
         const StageDesc& d = *k_chain[i];
         AudioFormat f{48000, 2, 24};
         void* st = d.open(f, Span<u8>(p.shadow[i], d.memory_bytes ? d.memory_bytes : 1));
-        for (u32 j = 0; j < d.params.len && j < 48; ++j) { d.set(st, j, p.heard_value[i][j]); r.params[j] = p.heard_value[i][j]; }
+        for (u32 j = 0; j < d.params.len && j < 48; ++j) {
+            d.set(st, j, p.heard_value[i][j]);
+            r.params[j] = p.heard_value[i][j];
+            if (params && !p.param_rows[i][j].is_null()) params->rows_of<PlayerParam>()[p.param_rows[i][j].index()].value = p.heard_value[i][j];
+        }
         r.flat = d.flat(st);
     }
 }
@@ -965,6 +988,8 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     PlayerOutput& o = p.output;
     o.open = s.device_open; o.shared = s.shared; o.exact = s.exact;
     o.sample = (u8)s.format.sample; o.channels = s.format.channels; o.rate = s.format.rate;
+    o.bits = s.device_open ? (u8)hifi_sample_bits(s.format.sample) : 0;
+    o.float_word = s.device_open && s.format.sample == HifiSampleFormat::F32;
     o.lead_frames = s.lead_frames; o.underruns = s.underruns;
     o.bytes_held = p.committed;
     o.joining = s.joining;
@@ -1034,6 +1059,8 @@ bool player_startup(Engine& e, ModuleInstance& self) {
     if (!p->hifi) { KV_ERROR("player", "the audio path's thread could not start"); return false; }
     // The chain's rows, one per stage, at the stages' initial values.
     KTable* chain = engine_ktable(e, g_chain_ktable);
+    KTable* params = engine_ktable(e, g_params_ktable);
+    KTable* presets = engine_ktable(e, g_presets_ktable);
     for (u32 i = 0; i < kStages; ++i) {
         const StageDesc& d = *k_chain[i];
         p->shadow[i] = (u8*)mem_alloc(d.memory_bytes ? d.memory_bytes : 1);
@@ -1047,6 +1074,22 @@ bool player_startup(Engine& e, ModuleInstance& self) {
             r.params[j] = p->heard_value[i][j] = p->sent_value[i][j] = d.params[j].initial;
         }
         if (chain) p->chain_rows[i] = chain->spawn(r);
+        for (u32 j = 0; params && j < d.params.len && j < kHifiMaxParams; ++j) {
+            const StageParam& sp = d.params[j];
+            PlayerParam pr{};
+            pr.stage = i; pr.index = j;
+            pr.value = pr.initial = sp.initial;
+            pr.lo = sp.lo; pr.hi = sp.hi; pr.step = sp.step;
+            format(pr.name, sizeof pr.name, "%s", sp.name);
+            format(pr.unit, sizeof pr.unit, "%s", sp.unit);
+            p->param_rows[i][j] = params->spawn(pr);
+        }
+        for (u32 j = 0; presets && j < d.presets.len; ++j) {
+            PlayerPreset pr{};
+            pr.stage = i; pr.index = j;
+            format(pr.name, sizeof pr.name, "%s", d.presets[j].name);
+            presets->spawn(pr);
+        }
     }
     return engine_publish(e, self, ".transport", &p->transport) && engine_publish(e, self, ".output", &p->output);
 }
@@ -1145,21 +1188,16 @@ void cmd_set(CliContext& ctx, Span<const char* const> args) {
 }
 // player eq <band> <dB>; player eq preset <name>; player eq presets.
 void cmd_eq(CliContext& ctx, Span<const char* const> args) {
+    // The equalizer is stage 1; its presets are data it carries, which player.presets shows.
+    Span<const StagePreset> presets = k_chain[1]->presets;
     if (args.len == 1 && strcmp(args[0], "presets") == 0) {
-        for (const EqPreset& p : eq_presets()) ctx.print("%s", p.name);
+        for (const StagePreset& p : presets) ctx.print("%s", p.name);
         return;
     }
     if (args.len == 2 && strcmp(args[0], "preset") == 0) {
-        const EqPreset* p = eq_preset(args[1]);
-        if (!p) { ctx.fail("there is no preset '%s' (player eq presets)", args[1]); return; }
-        // Forty changes in one tick: one recut renders them all.
-        for (u32 b = 0; b < kEqBands; ++b) {
-            EqBand band = eq_preset_band(*p, b);
-            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 0, (f64)band.kind});
-            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 1, band.freq});
-            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 2, band.gain_db});
-            ctx.engine->events.emit(PlayerSetParam{1, b * 4 + 3, band.q});
-        }
+        for (u32 i = 0; i < presets.len; ++i)
+            if (strcmp(presets[i].name, args[1]) == 0) { ctx.engine->events.emit(PlayerApplyPreset{1, i}); return; }
+        ctx.fail("there is no preset '%s' (player eq presets)", args[1]);
         return;
     }
     f64 band = 0.0, db = 0.0;
@@ -1264,11 +1302,13 @@ constinit const CliCommandDesc k_commands[] = {
 constinit const KTableDesc k_ktables[] = {
     {.name = ".queue", .components = "PlayerItem", .capacity = kMaxItems, .id = &g_queue_ktable, .cosmetic = true},
     {.name = ".chain", .components = "PlayerStage", .capacity = kHifiMaxStages, .id = &g_chain_ktable, .cosmetic = true},
+    {.name = ".params", .components = "PlayerParam", .capacity = kHifiMaxStages * kHifiMaxParams, .id = &g_params_ktable, .cosmetic = true},
+    {.name = ".presets", .components = "PlayerPreset", .capacity = 64, .id = &g_presets_ktable, .cosmetic = true},
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = player_pump,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerQueueEdit",
-     .writes = ".queue, .chain, .transport, .output",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
+     .writes = ".queue, .chain, .params, .presets, .transport, .output",
      .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, PlayerSeeked, PlayerParamChanged, HifiUnderrun",
      .main_thread = true, .runs = RunWhen::Always},
 };

@@ -27,8 +27,8 @@ constexpr const char* kShellFile = "ui_dev/shell.kimb";
 constexpr const char* kShellScreen = "shell";
 constexpr const char* kFallback = "ui_dev/failed";
 // The panels, by the name of their files (ui_dev/<name>.kim, .lua) and of their
-// definition (<name>-panel).
-constinit const char* const k_panels[] = {"transport"};
+// definition (<name>-panel). The shell names the same four.
+constinit const char* const k_panels[] = {"transport", "queue", "output", "chain"};
 constexpr u32 kPanels = KV_COUNTOF(k_panels);
 // A command's answer is a tick or two away: the face asks for this many ticks after it
 // emits one, so the answer is not left waiting for the loop's next heartbeat.
@@ -57,8 +57,11 @@ void open_shell(Face& f) {
     krome_close(e, name_intern(kFallback));
     krome_clear_errors(e);
     f.screen = krome_open(e, kShellFile, kShellScreen);
+    f.wanted = false;
     f.ready = false;
     f.fresh = true;
+    f.seek_drag = f.chain_drag = false;
+    f.q_first = f.q_count = 0;
     f.stats.failed = false;
     ++f.attempts;
     face_forget(f);
@@ -132,19 +135,37 @@ void shell_failed(Face& f) {
 // ---- the units -----------------------------------------------------------------------------
 
 // The screen's events, by name: each panel is offered it, and the first to know it emits
-// its command.
+// its command. The command's answer is a tick or two away, so the face asks for those.
 void on_event(TickContext& ctx, Span<const KromeEvent> events) {
     Face& f = ctx.state_as<Face>();
     if (f.screen.is_null()) return;
     for (const KromeEvent& ev : events) {
         if (ev.screen != f.screen.hash) continue;
-        Name name{ev.event};
-        if (transport_event(ctx, f, name, ev.value)) {
+        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || chain_event(ctx, f, ev)) {
             ++f.stats.commands;
             f.awake = kAwakeTicks;
             engine_want_ticks(*ctx.engine);
         }
     }
+}
+
+// Which rows a list of the screen's has built: kept for the panel that fills it.
+void on_view(TickContext& ctx, Span<const KromeView> views) {
+    static const Name q_view = name_intern("q_view");
+    Face& f = ctx.state_as<Face>();
+    for (const KromeView& v : views) {
+        if (f.screen.is_null() || v.screen != f.screen.hash) continue;
+        if (v.event == q_view.hash) { f.q_first = v.first; f.q_count = v.count; }
+        f.awake = kAwakeTicks;
+    }
+}
+
+// A frame was drawn. Whatever Krome said in it (a press, a list's new view) is an event
+// that the next tick delivers, and under a loop that ticks only when asked the next tick
+// may be a quarter second away. One is asked for: a frame costs a tick.
+void ui_dev_frame(TickContext& ctx) {
+    Face& f = ctx.state_as<Face>();
+    if (!f.screen.is_null() || f.wanted) engine_want_ticks(*ctx.engine);
 }
 
 // Hidden, the face reads nothing and writes nothing; seen again, it writes everything.
@@ -160,6 +181,7 @@ void ui_dev_sync(TickContext& ctx) {
     Face& f = ctx.state_as<Face>();
     Engine& e = *ctx.engine;
     if (f.awake) { --f.awake; engine_want_ticks(e); }
+    if (f.wanted) open_shell(f);
     if (f.screen.is_null()) return;
     if (f.hidden) { ++f.stats.asleep; return; }
     if (!f.ready) {
@@ -175,6 +197,9 @@ void ui_dev_sync(TickContext& ctx) {
     if (f.fresh) { face_forget(f); f.fresh = false; }
     ++f.stats.syncs;
     transport_sync(ctx, f);
+    queue_sync(ctx, f);
+    output_sync(ctx, f);
+    chain_sync(ctx, f);
 }
 
 bool ui_dev_startup(Engine& e, ModuleInstance& self) {
@@ -182,16 +207,24 @@ bool ui_dev_startup(Engine& e, ModuleInstance& self) {
     if (!f) return false;
     self.set_state(f);
     f->e = &e;
-    if (g_ui_dev_config.enabled && g_ui_dev_config.open) open_shell(*f);
+    // Opened in the first tick, not here: the files it is given by hand are compiled, and
+    // every module it reads is up by then.
+    f->wanted = g_ui_dev_config.enabled && g_ui_dev_config.open;
+    if (f->wanted) engine_want_ticks(e);
     return true;
 }
 
 constinit const HandlerDesc k_handlers[] = {
-    {.name = ".events", KV_ON(KromeEvent, on_event), .phase = Phase::PreSim, .emits = "PlayerPlay, PlayerPause"},
+    {.name = ".events", KV_ON(KromeEvent, on_event), .phase = Phase::PreSim,
+     .reads = "^player.queue, ^player.params", // as the phase found them: what the screen was showing
+     .emits = "PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit, PlayerEnqueue"},
+    {.name = ".view", KV_ON(KromeView, on_view), .phase = Phase::PreSim},
     {.name = ".visibility", KV_ON(WindowVisibility, on_visibility), .phase = Phase::PreSim},
 };
 constinit const SystemDesc k_systems[] = {
-    {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync, .reads = "player.transport", .main_thread = true, .runs = RunWhen::Always},
+    {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync,
+     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets", .main_thread = true, .runs = RunWhen::Always},
+    {.name = ".frame", .phase = Phase::Frame, .fn = ui_dev_frame, .main_thread = true},
 };
 
 } // namespace
@@ -202,7 +235,37 @@ void ui_dev_open(Engine& e) {
     Face* f = face(e);
     if (!f || !g_ui_dev_config.enabled) return;
     f->attempts = 0;
-    open_shell(*f);
+    f->wanted = true;
+    engine_want_ticks(e);
+}
+
+bool face_id(Name node, const char* prefix, u64* a, u64* b) {
+    const char* id = node.is_null() ? nullptr : name_str(node);
+    usize n = strlen(prefix);
+    if (!id || strncmp(id, prefix, n) != 0) return false;
+    const char* p = id + n;
+    if (*p < '0' || *p > '9') return false;
+    u64 v = 0;
+    for (; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (u64)(*p - '0');
+    *a = v;
+    if (!b) return *p == 0;
+    if (*p != '_' || p[1] < '0' || p[1] > '9') return false;
+    v = 0;
+    for (++p; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (u64)(*p - '0');
+    *b = v;
+    return *p == 0;
+}
+
+void face_clock(char* out, usize cap, u64 frames, u32 rate) {
+    u64 s = rate ? frames / rate : 0;
+    if (s >= 3600) format(out, cap, "%llu:%02llu:%02llu", (unsigned long long)(s / 3600), (unsigned long long)(s / 60 % 60), (unsigned long long)(s % 60));
+    else           format(out, cap, "%llu:%02llu", (unsigned long long)(s / 60), (unsigned long long)(s % 60));
+}
+
+const char* face_file_name(const char* path) {
+    const char* name = path;
+    for (const char* p = path; *p; ++p) if ((*p == '/' || *p == '\\') && p[1]) name = p + 1;
+    return name;
 }
 
 Name ui_dev_screen(Engine& e) {

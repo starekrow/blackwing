@@ -1,0 +1,21 @@
+// The Output panel: the device and the lead, as player.output has them, and why what
+// reaches the device is not the file's own samples when it is not.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def output-panel {
+    col [dev-panel] id=output w=fill {
+        row gap=8 middle w=fill {
+            text "Output" [dev-title]
+            text "{o_exact}" id=o_exact [dev-value]
+        }
+        dev-field "why not" "{o_why}"
+        dev-field "device" "{o_device}"
+        dev-field "lead" "{o_lead}"
+        dev-field "underruns" "{o_underruns}"
+        dev-field "files held" "{o_held}"
+        dev-field "last recut" "{o_recut}"
+        dev-field "last jump" "{o_jump}"
+    }
+}

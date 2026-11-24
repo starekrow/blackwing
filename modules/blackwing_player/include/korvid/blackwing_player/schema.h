@@ -14,7 +14,12 @@ namespace kv {
 
 inline constinit const FieldDesc k_player_item_fields[] = {KV_FIELDS(PlayerItem, id, pos, state, damaged, channels, bits, rate, frames, size, bytes_read, path, reason)};
 inline constinit const FieldDesc k_player_stage_fields[] = {KV_FIELDS(PlayerStage, index, flat, params_len, name, param_names, params)};
-inline constinit const ComponentDesc k_player_components[] = {KV_COMPONENT(PlayerItem, k_player_item_fields, CompCosmetic), KV_COMPONENT(PlayerStage, k_player_stage_fields, CompCosmetic)};
+inline constinit const FieldDesc k_player_param_fields[] = {KV_FIELDS(PlayerParam, stage, index, value, lo, hi, initial, step, name, unit)};
+inline constinit const FieldDesc k_player_preset_fields[] = {KV_FIELDS(PlayerPreset, stage, index, name)};
+inline constinit const ComponentDesc k_player_components[] = {
+    KV_COMPONENT(PlayerItem, k_player_item_fields, CompCosmetic), KV_COMPONENT(PlayerStage, k_player_stage_fields, CompCosmetic),
+    KV_COMPONENT(PlayerParam, k_player_param_fields, CompCosmetic), KV_COMPONENT(PlayerPreset, k_player_preset_fields, CompCosmetic),
+};
 // Each event describes its fields, so --trace-events (and describe) print them.
 inline constinit const FieldDesc k_f_PlayerEnqueue[] = {KV_FIELDS(PlayerEnqueue, path, before)};
 inline constinit const FieldDesc k_f_PlayerPlay[] = {KV_FIELDS(PlayerPlay, unused)};
@@ -27,6 +32,7 @@ inline constinit const FieldDesc k_f_PlayerSeek[] = {KV_FIELDS(PlayerSeek, item,
 inline constinit const FieldDesc k_f_PlayerSeekBy[] = {KV_FIELDS(PlayerSeekBy, seconds)};
 inline constinit const FieldDesc k_f_PlayerSeeked[] = {KV_FIELDS(PlayerSeeked, item, frame, seq)};
 inline constinit const FieldDesc k_f_PlayerSetParam[] = {KV_FIELDS(PlayerSetParam, stage, param, value)};
+inline constinit const FieldDesc k_f_PlayerApplyPreset[] = {KV_FIELDS(PlayerApplyPreset, stage, preset)};
 inline constinit const FieldDesc k_f_PlayerParamChanged[] = {KV_FIELDS(PlayerParamChanged, stage, param, value, seq)};
 inline constinit const FieldDesc k_f_PlayerQueueEdit[] = {KV_FIELDS(PlayerQueueEdit, op, item, before)};
 inline constinit const FieldDesc k_f_PlayerTrackStarted[] = {KV_FIELDS(PlayerTrackStarted, item, rate, channels, bits, frames, seq)};
@@ -46,6 +52,7 @@ inline constinit const EventTypeDesc k_player_events[] = {
     KV_EVENT_EX(PlayerSeekBy, k_f_PlayerSeekBy, 0),
     KV_EVENT_EX(PlayerSeeked, k_f_PlayerSeeked, 0),
     KV_EVENT_EX(PlayerSetParam, k_f_PlayerSetParam, 0),
+    KV_EVENT_EX(PlayerApplyPreset, k_f_PlayerApplyPreset, 0),
     KV_EVENT_EX(PlayerParamChanged, k_f_PlayerParamChanged, 0),
     KV_EVENT_EX(PlayerQueueEdit, k_f_PlayerQueueEdit, 0),
     KV_EVENT_EX(PlayerTrackStarted, k_f_PlayerTrackStarted, 0),
@@ -55,7 +62,7 @@ inline constinit const EventTypeDesc k_player_events[] = {
     KV_EVENT_EX(HifiUnderrun, k_f_HifiUnderrun, 0),
 };
 inline constinit const FieldDesc k_player_transport_fields[] = {KV_FIELDS(PlayerTransport, state, item, position, frames, rate, queued, left, place, place_pos, seek_item, seek_frame)};
-inline constinit const FieldDesc k_player_output_fields[] = {KV_FIELDS(PlayerOutput, open, shared, exact, sample, channels, rate, lead_frames, underruns, joining, bytes_held, recut_seconds, recuts, recut_render_seconds, jump_seconds)};
+inline constinit const FieldDesc k_player_output_fields[] = {KV_FIELDS(PlayerOutput, open, shared, exact, sample, channels, bits, float_word, rate, lead_frames, underruns, joining, bytes_held, recut_seconds, recuts, recut_render_seconds, jump_seconds)};
 // The two resources: described by their fields, never hashed (they follow a device's clock).
 inline constinit const ResourceDesc k_player_resources[] = {
     {.name = ".transport", .fields = k_player_transport_fields, .cosmetic = true},

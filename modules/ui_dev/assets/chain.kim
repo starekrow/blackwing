@@ -1,0 +1,20 @@
+// The Chain panel: each stage, flat or not, and every parameter with the value heard. The
+// stages' rows are a definition ui_dev writes from player.params and player.presets
+// (ui_dev/chain_stages), so a stage this file has never heard of gets its controls from
+// its own description.
+
+use "krome/std"
+use "ui_dev/widgets"
+use "ui_dev/chain_stages"
+
+def chain-panel {
+    col [dev-panel] id=chain w=fill h=fill {
+        row gap=8 middle w=fill {
+            text "Chain" [dev-title]
+            text "{c_summary}" id=c_summary [dev-value]
+        }
+        col id=c_list scroll w=fill h=fill gap=4 {
+            chain-stages
+        }
+    }
+}

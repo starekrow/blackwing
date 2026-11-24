@@ -5,10 +5,23 @@
 use "krome/std"
 use "ui_dev/widgets"
 use "ui_dev/transport"
+use "ui_dev/queue"
+use "ui_dev/output"
+use "ui_dev/chain"
 script "ui_dev/transport.lua"
+script "ui_dev/queue.lua"
+script "ui_dev/output.lua"
+script "ui_dev/chain.lua"
 
 screen shell {
     col [page] w=fill h=fill pad=8 gap=8 {
         transport-panel
+        row gap=8 w=fill h=fill {
+            queue-panel
+            col gap=8 w=420 h=fill {
+                output-panel
+                chain-panel
+            }
+        }
     }
 }

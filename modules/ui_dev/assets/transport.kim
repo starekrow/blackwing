@@ -1,5 +1,6 @@
 // The Transport panel: where the player is, in the device's time, and the commands that
-// move it. Its values are transport.lua's model, written by ui_dev from player.transport.
+// move it. Its values are transport.lua's model, written by ui_dev from player.transport;
+// its presses and its bar go out as events that ui_dev turns into the player's commands.
 
 use "krome/std"
 use "ui_dev/widgets"
@@ -8,13 +9,21 @@ def transport-panel {
     col [dev-panel] id=transport w=fill {
         row gap=8 middle w=fill {
             text "Transport" [dev-title]
-            text "{t_state}" id=t_state [dev-value]
-            spacer
-            text "{t_pos} / {t_len}" id=t_time [dev-value]
+            text "{t_state}" id=t_state [dev-value] w=64
+            text "{t_row}" id=t_row [dev-title]
+            text "{t_title}" id=t_title [dev-value] w=fill nowrap clip
+            text "{t_seeking}" id=t_seeking [dev-title]
+            text "{t_pos} / {t_len}" id=t_time [dev-value] w=110 right
         }
-        row gap=6 middle {
-            button "Play" id=play -> play
-            button "Pause" id=pause -> pause
+        row gap=6 middle w=fill {
+            dev-btn "Prev" id=previous -> previous
+            dev-btn "Play" id=play -> play
+            dev-btn "Pause" id=pause -> pause
+            dev-btn "Stop" id=stop -> stop
+            dev-btn "Next" id=next -> next
+            dev-btn "-10 s" id=back -> back
+            dev-btn "+10 s" id=on -> on
+            dev-slider id=seek @t_bar w=fill
         }
     }
 }

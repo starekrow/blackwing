@@ -40,7 +40,7 @@ return {
 |---|---|---|
 | `name` | `StageDesc::name` | 31 bytes at most; shown in `player.chain` |
 | `memory_bytes` | `memory_bytes` | the block the stage's whole Lua state lives in: its code, its values, its scratch buffers. 4 MB at most |
-| `params` | `params` | up to 48 of `{ name, initial, lo, hi }`; a name is 15 bytes at most |
+| `params` | `params` | up to 48 of `{ name, initial, lo, hi, step, unit }`; a name is 15 bytes at most, a unit 7. `step` (0: any) and `unit` (`""`: none) describe it to whoever draws a control for it, and may be left out |
 | `open(format)` | `open` | sets up for a stream of this rate and channel count, at the parameters' initial values. Returns the state: any Lua value. It must not fail |
 | `set(state, param, value)` | `set` | a parameter, by index from 0, as `PlayerSetParam.param` counts. `value` is already inside `[lo, hi]`: the host brings it there |
 | `process(state, frames)` | `process` | changes `#frames` interleaved frames in place. `frames` is a `kv.frames` buffer of `f64`, full scale ±1 |

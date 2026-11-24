@@ -88,8 +88,9 @@ Presets are data. Applying one is setting forty parameters, as above; there is n
 
 - `k_gain_stage`, `k_eq_stage`: the stages' records. A script cannot run them on audio of
   its own; it writes a stage ([hifi](../hifi/SCRIPT.md)).
-- A stage's parameter ranges as data. `StageParam`'s `lo` and `hi` are not in
-  `player.chain` today.
+
+A stage's parameter ranges, steps and units, and its presets, are data: the player
+publishes them as [`player.params` and `player.presets`](../blackwing_player/SCRIPT.md#playerparams).
 
 ## What hifi_eq changes for this
 

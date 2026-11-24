@@ -1,0 +1,51 @@
+// The Queue panel: every row of player.queue in the list's order, with its state and its
+// reason, and the edits. The list holds only the rows in view: it says which those are
+// (q_view), and ui_dev hands them over from the table.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def queue-panel {
+    col [dev-panel] id=queue w=fill h=fill {
+        row gap=8 middle w=fill {
+            text "Queue" [dev-title]
+            text "{q_summary}" id=q_summary [dev-value]
+            spacer
+            input id=q_path @q_path placeholder="a file's path" w=300 -> q_add
+            dev-btn "Add" id=q_add -> q_add
+            dev-btn "Clear" id=q_clear -> q_clear
+        }
+        row [dev-row] {
+            text "#" [dev-head] w=36
+            text "title" [dev-head] w=fill
+            text "state" [dev-head] w=60
+            text "format" [dev-head] w=130
+            text "held" [dev-head] w=64
+            text "reason" [dev-head] w=180
+            box w=150
+        }
+        col id=q_list scroll w=fill h=fill [list] {
+            each row in q_rows height=22 count=@q_total from=@q_first -> q_view {
+                row [dev-row] middle {
+                    text "{row.pos}" [dev-cell] w=36 color=@row.ink
+                    text "{row.title}" [dev-cell] w=fill color=@row.ink
+                    text "{row.state}" [dev-cell] w=60 color=@row.ink
+                    text "{row.format}" [dev-cell] w=130
+                    text "{row.held}" [dev-cell] w=64
+                    text "{row.reason}" [dev-cell] w=180
+                    row gap=2 w=150 {
+                        hit [dev-btn] id="qj_{row.id}" -> q_jump { text "play" size=11 }
+                        hit [dev-btn] id="qu_{row.id}" -> q_up { text "up" size=11 }
+                        hit [dev-btn] id="qd_{row.id}" -> q_down { text "down" size=11 }
+                        hit [dev-btn] id="qx_{row.id}" -> q_remove { text "x" size=11 }
+                    }
+                }
+                placeholder {
+                    row [dev-row] middle {
+                        text "..." [dev-cell] color=muted
+                    }
+                }
+            }
+        }
+    }
+}

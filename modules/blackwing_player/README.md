@@ -96,7 +96,10 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerSeek`, `PlayerSeekBy` | event type | in: `item` (0: the one playing) and `frame`; `seconds` on from the last seek |
 | `PlayerSeeked` | event type | out: `item`, `frame`, `seq`; a seek's target was heard |
 | `PlayerSetParam` | event type | in: `stage`, `param`, `value`; volume is stage 0, param 0 (dB), mute param 1 |
+| `PlayerApplyPreset` | event type | in: `stage`, `preset` (a `player.presets` row's `index`); every parameter of the stage, in one recut |
 | `PlayerParamChanged` | event type | out: `stage`, `param`, `value`, `seq`; the value is what is heard |
+| `PlayerParam` | component | a row of `player.params`: `stage`, `index`, `value` (heard), `lo`, `hi`, `initial`, `step`, `name`, `unit` |
+| `PlayerPreset` | component | a row of `player.presets`: `stage`, `index`, `name` |
 | `PlayerStage` | component | `index`, `flat`, `params_len`, `name`, `param_names`, `params` (the values heard) |
 | `PlayerTrackStarted` | event type | out: `item`, `rate`, `channels`, `bits`, `frames`, `seq`; the first frame was heard |
 | `PlayerTrackEnded` | event type | out: `item`, `frames`, `seq`, `damaged`, `reason`; the last frame was heard |
@@ -106,7 +109,7 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerItem` | component | `id`, `pos`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
 | `PlayerItemState`, `PlayerState` | enum | an item's state; the transport's |
 | `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `place_pos`, `seek_item`, `seek_frame` |
-| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts`, `recut_render_seconds`, `jump_seconds` |
+| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `bits`, `float_word`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts`, `recut_render_seconds`, `jump_seconds` |
 | `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
 | `player_item_state_name(s)`, `player_state_name(s)` | functions | "waiting", "playing"...; "stopped", "paused"... |
@@ -127,7 +130,10 @@ What the module registers with the engine, as module `player`:
   `eq`);
 - the resources `player.transport` and `player.output`, each with a field table and
   cosmetic: described by their fields, to `describe` and a script, and never hashed;
-- the eighteen event types above;
+- the ktable `player.params` (component `PlayerParam`, cosmetic, a row per parameter of
+  every stage: its range, step, unit and the value heard), and `player.presets`
+  (`PlayerPreset`, a row per preset a stage carries);
+- the nineteen event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
   `seekby`, `volume`, `mute`, `set`, `eq`, `remove`, `move`, `insert`, `clear`, `status`.
@@ -161,7 +167,11 @@ What the module registers with the engine, as module `player`:
   `position` counts from its target. `seek_item` and `seek_frame` say what a seek is on
   its way to; a `PlayerSeekBy` counts from there, so repeats add up.
 - **The equalizer is stage 1**: band b's gain is parameter `b * 4 + 2`. `player eq preset
-  NAME` sends a preset's forty values in one tick, which is one recut.
+  NAME` emits `PlayerApplyPreset`, and the pump sends the preset's forty values in one
+  tick, which is one recut; each is said (`PlayerParamChanged`) as it is heard.
+- **A stage is described, not known.** The player reads its chain's stages through
+  `hifi`'s contract: `player.params` and `player.presets` are whatever the stages say of
+  themselves. A face draws its controls from those rows and names no stage.
 - **Volume is a parameter like any other**: `PlayerSetParam` sends it to `hifi`, which
   renders the lead again with it and crossfades (a recut), and `PlayerParamChanged`
   comes when it is heard. A control dragged faster than recuts are heard is said once,

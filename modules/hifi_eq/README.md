@@ -28,6 +28,15 @@ unchanged comes within a bit of a straight render.
 **Presets are data** (`eq_presets()`): a name and ten bands, a band left out being the
 default band, flat. `flat`, `bass`, `treble`, `loudness`, `vocal`, `rock`, and
 `extreme` (every band at +24 dB, some narrow), which is there to prove the attenuation.
+The stage carries them in the contract's form too (`StageDesc::presets`: a name and a
+value for each of the forty parameters, made from the same table when the program is
+built), which is where the player takes them from: it publishes them as `player.presets`
+and applies one on `PlayerApplyPreset`, without knowing this module's names.
+
+**Parameters describe themselves** (`StageParam`): beside a name, a first value and a
+range, a step and a unit. The gain's level moves in steps of 0.5 dB and its mute is 0 to
+1 in steps of 1, a switch; a band's kind steps by 1, its gain by 0.5 dB, its Q by 0.01,
+and its frequency, in Hz, by anything.
 
 A stage changes nothing while it runs: a new value is a new render, joined by `hifi`'s
 crossfade, so the stage needs no smoothing of its own.

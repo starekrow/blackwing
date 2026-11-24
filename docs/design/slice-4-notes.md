@@ -104,3 +104,93 @@ Vulkan renderer. Counts are `window status` over ten seconds.
 
 **Not done here:** a window minimized by hand on Wayland (Korvid has not checked it
 either), covered windows, and the three disks, which are the close's.
+
+## Milestone 2, the player's panels
+
+Nov 23, 2026. The same machine and build.
+
+**As planned:** Transport, Queue, Output and Chain, against a stand-in and then the
+player, with the API's changes for parameters and presets.
+
+**What the API was missing**, found by writing the panels, and fixed in the player:
+
+- **A parameter's range, step and unit** (BD13). `StageParam` gains `step` and `unit`,
+  and the player publishes `player.params`: a row per parameter of every stage, with
+  what it may be and the value heard. A parameter that is 0 to 1 in steps of 1 is a
+  switch.
+- **Presets as data, and a command to apply one** (BD14). `StageDesc` gains `presets` (a
+  name and a value per parameter), the equalizer fills it from the table it had, the
+  player publishes `player.presets` and takes `PlayerApplyPreset`. `player eq preset` is
+  now that command, and `player.cc` no longer names a band.
+- **The device's word, in bits.** `player.output` had `sample`, a `HifiSampleFormat`,
+  which a face that includes no `hifi` header cannot read; and "the device's word is
+  narrower than the file's" cannot be said without it. It gains `bits` and `float_word`.
+- **Not fixed, noted: a table has no way to say it changed.** The Queue panel looks at
+  every row's `pos` each tick to find the thirty in view. At four thousand rows that is
+  four thousand cache lines sixty times a second while playing. A generation on the
+  table, or on the transport, would make it one compare. Left until it is measured at
+  the close.
+
+**The chain's controls are written from the table.** A list in Krome is rebuilt when its
+model value changes, and a parameter's row changes whenever its value is heard, which is
+all the time while its slider is dragged: the node under the pointer would be replaced
+mid-drag. So the Chain panel's rows are not a list. `ui_dev` writes a definition as
+markup from `player.params` and `player.presets` (a slider a parameter, a switch for one
+that is 0 or 1, a button a preset), compiles it and gives it to Krome in the place of a
+file that says only "no chain yet". Each parameter has two model keys by its stage and
+index: the value heard as text, and where the knob is. A parameter added while it runs
+changes the tables' signature and the definition is written again; the test adds one and
+finds its slider. This is "any parameter by its own description" (BD6), and the face
+names no stage.
+
+**A slider that says so.** std's slider writes the model and emits nothing, and the
+face's C++ hears only events. `dev-slider` (`widgets.lua`, thirty lines) is std's over 0
+to 1 that emits `slide` with its id as it moves and `slide_end` when let go. While a
+slider is held its knob is the pointer's and the face leaves its key alone; the readout
+beside it goes on showing the value heard (the exit criterion's "the value heard, not
+the value asked for"). The bar in Transport is the same widget: a press or a drag is a
+`PlayerSeek` each time it moves, and while a seek is on its way the bar stays where it
+was sent.
+
+**The queue is Krome's sparse list** (KR22): it lays out a thousand rows, says which
+sixty-odd it has built, and the face hands over those from the table, found by `pos` in
+one pass. A row that changes under it changes in place.
+
+**The handler reads the tables early.** Turning "move this row up" into a command needs
+the queue (which row is above). The handler emits what the player's pump reads, so it
+runs before the pump; the pump writes the table, so a plain read would run after it: a
+cycle, and the engine said so. The handler reads `^player.queue` and `^player.params`,
+the tables as the phase found them, which is what the screen was showing when the
+button was pressed. A resource cannot be read early, so the bar's length is the one the
+face last drew it against.
+
+**Found in Krome:**
+
+- **The check does not know `placeholder`.** A sparse list's block for a row it does not
+  hold is written `placeholder { ... }` inside the `each`. The builder knows the word;
+  `kimb_check` walks an each's children as nodes and refuses it, so the cook fails any
+  file that has one (Krome's own tests hand the builder a document and never check it).
+  Worked round with a definition of that name in `widgets.kim`, which the check accepts
+  and the builder never reaches. KR27.
+- **`krome_set` carries 56 bytes**, silently cut. The face's writer sends anything longer
+  as a document; the test first typed a path with it and got a file that was not there.
+- **A screen's files are checked when cooked**, each `use` included, so a prelude written
+  at run time needs a file to stand in its place: `chain_stages.kim`.
+
+**Tests** (`ui_dev`, 123 checks): against the stand-in, every transport command from its
+own control; the bar pressed, dragged and let go with a seek on its way; a thousand rows,
+scrolled, a row changing in place, each edit from a row's buttons, a path added; exact
+and each reason why not; the chain's controls from the descriptions, a slider dragged
+with its knob held and its readout heard, the switch, a preset, a parameter added while
+it runs; still and hidden as before, with every panel up. Then with no stand-in, the
+player itself on a capture device: a path typed into the edit a key at a time and
+entered, played, the volume dragged until the readout says what is heard and Output says
+why it is not exact, a preset, mute, a press on the bar, pause, play to the end, the row
+removed. The test emits no command. Under `address,undefined` too.
+
+**The position, with a bar**: 49 writes, layouts and paints in ten seconds of a track of
+4:05 across a bar 944 pixels wide: ten for the readout, 39 for the bar's pixels. In the
+window, a two-minute track drew about 27 frames a second: its bar moves eight pixels a
+second, and each change is presented twice (milestone 1). This is what "the bar's
+pixel" costs; the close decides whether it is too much.
+

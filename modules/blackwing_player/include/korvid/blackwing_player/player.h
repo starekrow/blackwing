@@ -56,6 +56,9 @@ struct PlayerSeekBy  { f64 seconds; };
 // by a recut, within a callback or two; PlayerParamChanged says when it is heard. A
 // control that is dragged may send one per tick: only the newest value is rendered.
 struct PlayerSetParam { u32 stage; u32 param; f64 value; };
+// Sets every parameter of a stage to a preset's values (player.presets' rows, by their
+// `index` within the stage): one recut renders them all, and each is said as it is heard.
+struct PlayerApplyPreset { u32 stage; u32 preset; };
 
 // ---- notifications: events the player emits --------------------------------------------
 // Each carries `seq`, which counts up by one across all of them. Events of different types
@@ -153,6 +156,29 @@ struct PlayerStage {
     f64  params[48];
 };
 
+// A row of the ktable "player.params": the component PlayerParam, one row per parameter
+// of every stage, fixed at startup but for `value`. Enough to draw a control for a stage
+// nobody has heard of: a slider from `lo` to `hi` in steps of `step`, a switch when that
+// is 0 to 1 in steps of 1. `value` is the value heard, as player.chain's `params` are.
+struct PlayerParam {
+    u32  stage;        // its stage's index (a player.chain row's)
+    u32  index;        // its own, within the stage: what PlayerSetParam's `param` is
+    f64  value;        // heard
+    f64  lo, hi;       // what a value is kept within
+    f64  initial;      // what a new chain starts with
+    f64  step;         // the smallest change worth offering; 0: any
+    char name[16];
+    char unit[8];      // "dB", "Hz"; "" when it has none
+};
+
+// A row of the ktable "player.presets": the component PlayerPreset, one row per preset a
+// stage carries, fixed at startup. PlayerApplyPreset{stage, index} applies it.
+struct PlayerPreset {
+    u32  stage;
+    u32  index;        // within the stage, from 0
+    char name[32];
+};
+
 // The resource "player.output": the device and the lead, as hifi reports them.
 struct PlayerOutput {
     u8   open      = 0; // a device is open
@@ -160,7 +186,8 @@ struct PlayerOutput {
     u8   exact     = 0; // every sample reaching it is the file's own: unshared, its bits held, every stage flat, no join under way
     u8   sample    = 0; // a HifiSampleFormat
     u16  channels  = 0;
-    u16  pad       = 0;
+    u8   bits      = 0; // the significant bits its word carries exactly: 16, 24 or 32 (24 for a float word)
+    u8   float_word = 0; // its word is a float
     u32  rate      = 0;
     u32  lead_frames = 0; // decoded and ready, not yet taken by the device
     u32  underruns = 0;   // ever

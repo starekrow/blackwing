@@ -49,7 +49,8 @@ void on_queue_ended(TickContext&, Span<const PlayerQueueEnded> ev) { for (auto& 
 void on_underrun(TickContext&, Span<const HifiUnderrun> ev)      { for (auto& e : ev) put(e.seq, 'U', e.count); }
 void on_seeked(TickContext&, Span<const PlayerSeeked> ev)        { for (auto& e : ev) put(e.seq, 'K', e.item, e.frame); }
 constinit f64 g_param_value = 0.0;
-void on_param(TickContext&, Span<const PlayerParamChanged> ev)   { for (auto& e : ev) { put(e.seq, 'P', e.param); g_param_value = e.value; } }
+constinit u32 g_nparam = 0; // PlayerParamChanged heard, ever: the log holds 256 of anything
+void on_param(TickContext&, Span<const PlayerParamChanged> ev)   { for (auto& e : ev) { put(e.seq, 'P', e.param); g_param_value = e.value; ++g_nparam; } }
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".started", KV_ON(PlayerTrackStarted, on_started), .phase = Phase::PostSim},
@@ -104,6 +105,7 @@ struct Rig {
 
     bool start(u32 delay = 0, u32 piece = 256u << 10, usize memory = 256u << 20, f64 lead = 5.0) {
         g_nlog = 0;
+        g_nparam = 0;
         HifiCaptureDesc cd;
         cd.delay_frames = delay;
         cd.keep_bytes = 16u << 20;
@@ -591,6 +593,61 @@ void test_player(TestCtx& c) {
         HifiDeviceFormat f; u64 frames = 0;
         const u8* d = r.seg_data(0, &f, &frames);
         KV_CHECK(c, heard('P', 1) && !row().flat && d && all_zero(d + (frames - 500) * 4, 500 * 4)); // muted: silence
+        KV_CHECK(c, r.o().underruns == 0);
+        r.stop();
+    }
+
+    // Parameters describe themselves (player.params), presets are data (player.presets),
+    // and applying one is a command: every parameter of the stage, in one recut.
+    c.begin("player params and presets");
+    {
+        Rig r;
+        KV_CHECK(c, r.start());
+        KTable* pt = engine_ktable(r.e, "player.params");
+        KTable* st = engine_ktable(r.e, "player.presets");
+        KV_CHECK(c, pt && st);
+        auto param = [&](u32 stage, u32 index) {
+            Span<PlayerParam> rows = pt->rows_of<PlayerParam>();
+            for (u32 i = 0; i < rows.len; ++i) if (pt->is_alive(i) && rows[i].stage == stage && rows[i].index == index) return rows[i];
+            return PlayerParam{};
+        };
+        u32 nparams = 0, npresets = 0, bass = ~0u;
+        for (u32 i = 0; i < pt->rows_of<PlayerParam>().len; ++i) nparams += pt->is_alive(i);
+        Span<PlayerPreset> presets = st->rows_of<PlayerPreset>();
+        for (u32 i = 0; i < presets.len; ++i) {
+            if (!st->is_alive(i)) continue;
+            ++npresets;
+            if (strcmp(presets[i].name, "bass") == 0 && presets[i].stage == 1) bass = presets[i].index;
+        }
+        KV_CHECK(c, nparams == 42 && npresets == 7 && bass == 1);
+        PlayerParam gain = param(0, 0), mute = param(0, 1), b3gain = param(1, 14), b0freq = param(1, 1);
+        KV_CHECK(c, strcmp(gain.name, "gain_db") == 0 && strcmp(gain.unit, "dB") == 0 && gain.lo == -100.0 && gain.hi == 0.0 && gain.step == 0.5 && gain.value == 0.0);
+        KV_CHECK(c, strcmp(mute.name, "mute") == 0 && mute.lo == 0.0 && mute.hi == 1.0 && mute.step == 1.0 && mute.unit[0] == 0);
+        KV_CHECK(c, strcmp(b3gain.name, "b3.gain") == 0 && b3gain.lo == -24.0 && b3gain.hi == 24.0 && strcmp(b0freq.unit, "Hz") == 0 && b0freq.initial == 31.25);
+
+        r.add(data("tone_16_2ch_8000_long.flac"));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(8000));
+        u32 still = 0;
+        while (r.t().position < 2000 && still < 1000) r.pace(&still);
+        r.say(PlayerApplyPreset{1, bass});
+        f64 until = time_now() + 2.0;
+        while (g_nparam < 40 && time_now() < until) r.pace(&still);
+        KTable* chain = engine_ktable(r.e, "player.chain");
+        KV_CHECK(c, g_nparam == 40);                                         // each of the forty, said as heard
+        KV_CHECK(c, param(1, 2).value == 6.0 && param(1, 6).value == 4.0 && param(1, 10).value == 2.0 && param(1, 14).value == 0.0);
+        KV_CHECK(c, chain && !chain->rows_of<PlayerStage>()[1].flat && chain->rows_of<PlayerStage>()[1].params[2] == 6.0 && !r.o().exact);
+        // A preset that is not there changes nothing.
+        r.say(PlayerApplyPreset{1, 99});
+        r.say(PlayerApplyPreset{0, 0});
+        for (u32 i = 0; i < 10; ++i) r.pace(&still);
+        KV_CHECK(c, g_nparam == 40 && param(1, 2).value == 6.0);
+        // Flat again: exact again.
+        r.say(PlayerApplyPreset{1, 0});
+        until = time_now() + 2.0;
+        while (g_nparam < 80 && time_now() < until) r.pace(&still);
+        for (u32 i = 0; i < 20; ++i) r.pace(&still);
+        KV_CHECK(c, g_nparam == 80 && param(1, 2).value == 0.0 && chain->rows_of<PlayerStage>()[1].flat && r.o().exact);
         KV_CHECK(c, r.o().underruns == 0);
         r.stop();
     }

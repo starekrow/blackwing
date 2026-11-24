@@ -1,7 +1,8 @@
-// ui_dev's own few styles over krome/std: dense, plain, no design of its own. Every panel
-// uses this.
+// ui_dev's own few styles and widgets over krome/std: dense, plain, no design of its own.
+// Every panel uses this. Its behaviours are widgets.lua.
 
 use "krome/std"
+script "ui_dev/widgets.lua"
 
 style dev-panel {
     bg=well radius=6 pad=8 gap=6 border=1 border-color=raised-edge
@@ -13,6 +14,69 @@ style dev-title {
 
 style dev-value {
     size=13
+}
+
+// A small button: a word in a row of them.
+style dev-btn {
+    pad=6,2 radius=4 bg=off-bg color=ink size=12 cursor=hand border=1 border-color=clear
+    hover { bg=item-hover }
+    pressed { bg=accent-down }
+    focused { border-color=ring }
+    disabled { color=off-ink }
+}
+
+def dev-btn label {
+    hit [dev-btn] {
+        text "{label}" size=12
+    }
+}
+
+// A row of a list, and its cells: one line each, clipped.
+style dev-row {
+    w=fill h=22 gap=8 pad=4,0
+    hover { bg=row-hover }
+}
+
+style dev-cell {
+    size=12 nowrap clip
+}
+
+style dev-head {
+    size=11 color=muted nowrap clip
+}
+
+// A label and a value, on one line.
+def dev-field label value {
+    row gap=8 middle w=fill {
+        text "{label}" w=92 color=muted size=12 nowrap
+        text "{value}" w=fill size=12
+    }
+}
+
+// A slider from 0 to 1 that says what is done to it: `slide` (its id, the value) while it
+// is pressed, dragged, stepped or wheeled, and `slide_end` when it is let go. std's slider
+// writes the model and says nothing, and ui_dev's C++ can only hear events.
+def dev-slider {
+    box [slider] behave=dev-slider dir=stack {
+        box [slider-track] middle {
+            box [slider-fill] part=fill
+        }
+        box dir=row w=fill middle pad=0,0,14,0 {
+            box part=lead w=0 h=1
+            box [slider-knob]
+        }
+    }
+}
+
+// A sparse list's block for a row it does not hold yet is written `placeholder { ... }`
+// inside its `each`. Krome's builder knows the word; its check, which the cook runs, does
+// not, and takes it for a node that is neither a kernel's nor a definition.
+// This definition satisfies the check and changes nothing: the builder finds the block by
+// its word before it looks any definition up. Asked of Korvid as KR27.
+def placeholder {
+    box {
+        slot
+    }
 }
 
 // A panel that did not load: where it would be, the file, the line and the message.

@@ -19,17 +19,27 @@ namespace kv {
 constexpr u32 kHifiMaxStages = 4;  // stages in a chain
 constexpr u32 kHifiMaxParams = 48; // parameters a stage has
 
-// One of a stage's parameters.
+// One of a stage's parameters: enough of a description that a control can be drawn for
+// it by something that has never heard of the stage.
 struct StageParam {
     const char* name = "";
     f64         initial = 0.0; // what a new chain starts with
     f64         lo = 0.0, hi = 0.0; // what set() keeps it within
+    f64         step = 0.0;    // the smallest change worth offering; 0: any. 1 with lo 0 and hi 1 is a switch
+    const char* unit = "";     // "dB", "Hz"; "" when it has none
+};
+
+// A preset: a name and a value for every parameter, in order. Data the stage carries.
+struct StagePreset {
+    const char*     name = "";
+    Span<const f64> values;
 };
 
 struct StageDesc {
     const char*       name = "";        // "gain"
     u32               memory_bytes = 0; // the block open() wants
     Span<const StageParam> params;
+    Span<const StagePreset> presets = {}; // none for most
 
     // Sets up for a stream of this rate and channel count, inside `memory`, at its
     // parameters' initial values. Never fails: a stage takes any format hifi plays.

@@ -214,9 +214,11 @@ Header `korvid/hifi/hifi.h`:
 | `hifi_replace_after(h, id, sources, n)` | function | what follows a source replaced: free before its end is rendered, a recut after |
 | `hifi_set_param(h, stage, param, value)` | function | a parameter of the chain, heard by a recut; returns its generation |
 
-Header `korvid/hifi/stage.h`: `StageDesc` (`name`, `memory_bytes`, `params`, `open`,
-`set`, `process`, `flat`, `run_in`, `reset`), `StageParam` (`name`, `initial`, `lo`,
-`hi`), `kHifiMaxStages` (4), `kHifiMaxParams` (48).
+Header `korvid/hifi/stage.h`: `StageDesc` (`name`, `memory_bytes`, `params`, `presets`,
+`open`, `set`, `process`, `flat`, `run_in`, `reset`), `StageParam` (`name`, `initial`,
+`lo`, `hi`, and what describes it to whoever draws a control: `step`, `unit`),
+`StagePreset` (`name`, a value for every parameter), `kHifiMaxStages` (4),
+`kHifiMaxParams` (48).
 | `hifi_starve(h, id, reason)` | function | a source's bytes will not come |
 | `hifi_read_fence(h)`, `hifi_read_passed(h, fence)` | functions | when a piece given back is no longer read |
 | `hifi_poll(h, out, cap)`, `hifi_status(h, out)` | functions | events since last time; where things stand |
