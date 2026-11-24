@@ -50,6 +50,49 @@ void send_takein(Shared& sh, const char* path) {
     os_mutex_unlock(&sh.lock);
 }
 
+// Whether a path within a root goes through a link to a directory, which the walk does not
+// follow and the watcher does (it reports paths through a link back to the root, round and
+// round). Each directory is asked of its parent's listing once, and remembered.
+struct Links {
+    Strings names;
+    Array<u32> at;    // into names
+    Array<u8>  link;  // 1: a link
+    bool known(const char* p, bool* is_link) {
+        for (u32 i = 0; i < at.len; ++i) if (strcmp(names.at(at[i]), p) == 0) { *is_link = link[i] != 0; return true; }
+        return false;
+    }
+    void put(const char* p, bool is_link) {
+        if (at.len >= 4096) { names.clear(); at.clear(); link.clear(); }
+        at.push(names.add(p));
+        link.push(is_link ? 1 : 0);
+    }
+    void free() { names.free(); at.free(); link.free(); }
+};
+
+bool crosses_link(Links& c, const char* root, const char* rel) {
+    char prefix[kPathMax];
+    for (const char* slash = strchr(rel, '/'); slash; slash = strchr(slash + 1, '/')) {
+        format(prefix, sizeof prefix, "%.*s", (int)(slash - rel), rel);
+        bool is_link = false;
+        if (!c.known(prefix, &is_link)) {
+            char parent[kPathMax];
+            const char* last = strrchr(prefix, '/');
+            format(parent, sizeof parent, last ? "%s/%.*s" : "%s", root, last ? (int)(last - prefix) : 0, prefix);
+            struct Find { const char* name; bool link; bool found; } f{last ? last + 1 : prefix, false, false};
+            io_list_dir(parent, IoListHidden, [](void* u, const IoDirEntry& e) {
+                Find& x = *(Find*)u;
+                if (strcmp(e.name, x.name) != 0) return true;
+                x.link = e.is_link; x.found = true;
+                return false;
+            }, &f);
+            is_link = f.link;
+            c.put(prefix, is_link);
+        }
+        if (is_link) return true;
+    }
+    return false;
+}
+
 bool has_entries(const char* dir) {
     bool any = false;
     bool ok = io_list_dir(dir, 0, [](void* u, const IoDirEntry&) { *(bool*)u = true; return false; }, &any);
@@ -66,6 +109,7 @@ void watch_thread(void* arg) {
     Array<Watched> watched;
     Strings ps;
     Array<Pending> pending;
+    Links links;
     u8* tag_mem = (u8*)mem_alloc(1u << 16);
     char overrides[kPathMax];
     format(overrides, sizeof overrides, "%s/overrides", sh.data_dir);
@@ -103,6 +147,21 @@ void watch_thread(void* arg) {
             watched.push(x);
         }
 
+        // A root's first walk, now that it is watched (or cannot be): what changes from here
+        // on is heard, and what is there now is walked.
+        os_mutex_lock(&sh.lock);
+        bool asked = false;
+        for (Shared::RootLine& r : sh.root_lines) {
+            if (!r.to_walk) continue;
+            r.to_walk = false;
+            Walk wk{r.id, ""};
+            format(wk.path, sizeof wk.path, "%s", r.path);
+            sh.walks.push(wk);
+            asked = true;
+        }
+        if (asked) os_cond_signal(&sh.scan_wake);
+        os_mutex_unlock(&sh.lock);
+
         // What the watcher heard: each path waits out its quiet moment.
         f64 now = time_now();
         if (up) {
@@ -129,6 +188,7 @@ void watch_thread(void* arg) {
                 if (e.kind == FsEventKind::DirAdded) continue; // its files come as Added
                 bool dir_gone = e.kind == FsEventKind::DirRemoved;
                 if (!dir_gone && !audio_name(e.path)) continue;
+                if (crosses_link(links, x->path, e.path)) continue; // not under the root as the walk sees it
                 bool found = false;
                 for (Pending& p : pending) {
                     if (p.root == x->root && p.dir_gone == dir_gone && !p.takein && strcmp(ps.at(p.rel), e.path) == 0) { p.last = now; found = true; break; }
@@ -225,6 +285,7 @@ void watch_thread(void* arg) {
     watched.free();
     ps.free();
     pending.free();
+    links.free();
     mem_free(tag_mem);
 }
 

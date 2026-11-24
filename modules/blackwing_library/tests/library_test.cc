@@ -18,8 +18,11 @@
 #include "gen.h"
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "korvid/core/os_thread.h"
+#include "korvid/core/random.h"
 
 using namespace kv;
 
@@ -653,5 +656,220 @@ void test_library_changes(TestCtx& c) {
     KV_INFO("test", "library changes: a polled root's new file found in %.2f s (polled every 0.5 s)", polled);
     KV_CHECK(c, polled >= 0.0 && polled < 3.0);
     w.stop();
+    io_remove_tree(tmp);
+}
+
+namespace {
+bool audio_like(const char* rel) {
+    const char* dot = strrchr(rel, '.');
+    return dot && (strcmp(dot, ".flac") == 0 || strcmp(dot, ".mp3") == 0);
+}
+// Grows a file a piece at a time while the scan runs: "a file that changes while it is read".
+struct Grower { char path[2048]; u32 stop = 0; };
+void grow(void* arg) {
+    Grower& g = *(Grower*)arg;
+    kvtest::Bytes f;
+    kvtest::Tags t{"Growing", "Writer", "Being Written", 1, 1, 1, "2024", "Noise"};
+    kvtest::flac_file(f, t);
+    for (u32 i = 0; i < 60 && !atomic_load(&g.stop, MO_RELAXED); ++i) {
+        int fd = open(g.path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd >= 0) { ssize_t w = write(fd, f.b, f.n); (void)w; close(fd); }
+        time_sleep(0.02);
+    }
+}
+void copy_file(const char* from, const char* to) {
+    IoBytes b;
+    if (io_read_now(from, &b)) { io_write_now(to, b.data, b.size); b.free(); }
+}
+// An ID3v2.4 tag of `frames` text frames (all the same field) in front of `audio`.
+void tagged(const char* path, const char* id, u32 frames, const char* text, const IoBytes& audio) {
+    Array<u8> t;
+    for (u32 i = 0; i < frames; ++i) {
+        u32 n = (u32)strlen(text) + 1;
+        u8 h[10] = {(u8)id[0], (u8)id[1], (u8)id[2], (u8)id[3], (u8)((n >> 21) & 0x7F), (u8)((n >> 14) & 0x7F), (u8)((n >> 7) & 0x7F), (u8)(n & 0x7F), 0, 0};
+        memcpy(t.push_n(10), h, 10);
+        t.push(3);
+        memcpy(t.push_n(n - 1), text, n - 1);
+    }
+    u32 n = t.len;
+    u8 head[10] = {'I', 'D', '3', 4, 0, 0, (u8)((n >> 21) & 0x7F), (u8)((n >> 14) & 0x7F), (u8)((n >> 7) & 0x7F), (u8)(n & 0x7F)};
+    Array<u8> all;
+    memcpy(all.push_n(10), head, 10);
+    memcpy(all.push_n(t.len), t.data, t.len);
+    memcpy(all.push_n((u32)audio.size), audio.data, audio.size);
+    io_write_now(path, all.data, all.len);
+    t.free(); all.free();
+}
+}
+
+// The corpus, whole, scanned in one go: the codec's good, broken and spoiled files; hostile
+// tags, a hundred megabytes of art among them; and the odd tree. Every audio file ends as a
+// row, with its tags or a reason; nothing hangs the scan, crashes it, or makes it read a
+// file whole.
+void test_library_corpus(TestCtx& c) {
+    c.begin("library corpus");
+    char tmp[1024], root[1100], data[1100], p[4200], q[4200];
+    KV_CHECK(c, io_make_temp_dir("bw_corpus", tmp, sizeof tmp));
+    format(root, sizeof root, "%s/corpus", tmp);
+    format(data, sizeof data, "%s/data", tmp);
+    u32 audio = 0;
+    // The codec's files, good and broken, as they are.
+    char codec[2048];
+    {
+        const char* here = __FILE__;
+        const char* m = strstr(here, "/modules/");
+        format(codec, sizeof codec, "%.*s/modules/hifi_codec/tests/data", m ? (int)(m - here) : 0, here);
+    }
+    struct Cp { const char* from; const char* to; u32* n; };
+    Cp cp{codec, root, &audio};
+    io_list_files(codec, [](void* u, const char* rel) {
+        Cp& x = *(Cp*)u;
+        if (!audio_like(rel)) return true;
+        char from[4200], to[4200], dir[4200];
+        format(from, sizeof from, "%s/%s", x.from, rel);
+        format(to, sizeof to, "%s/codec/%s", x.to, rel);
+        format(dir, sizeof dir, "%s", to); *strrchr(dir, '/') = 0;
+        io_make_dirs(dir);
+        copy_file(from, to);
+        ++*x.n;
+        return true;
+    }, &cp);
+    // Spoiled copies by the hundred.
+    format(p, sizeof p, "%s/spoiled", root); io_make_dirs(p);
+    Rng rng = Rng::seeded(20261123, 31);
+    const char* bases[] = {"tone_16_2ch_44100.flac", "mp3/vbr_44100_2ch.mp3"};
+    for (u32 k = 0; k < 2; ++k) {
+        format(p, sizeof p, "%s/%s", codec, bases[k]);
+        IoBytes b;
+        if (!io_read_now(p, &b)) continue;
+        for (u32 i = 0; i < 150; ++i) {
+            usize len = i % 3 == 2 ? rng.next() % (b.size + 1) : b.size;
+            Array<u8> w;
+            memcpy(w.push_n((u32)len), b.data, len);
+            if (i % 3 != 2) for (u32 f = 0, flips = 1 + rng.next() % 10; f < flips && len; ++f) w[rng.next() % (u32)len] ^= (u8)(1u << (rng.next() % 8));
+            format(q, sizeof q, "%s/spoiled/%u_%s", root, i, k ? "x.mp3" : "x.flac");
+            io_write_now(q, w.data, w.len);
+            w.free();
+            ++audio;
+        }
+        b.free();
+    }
+    // Hostile tags.
+    {
+        format(p, sizeof p, "%s/mp3/cbr128_44100_2ch.mp3", codec);
+        IoBytes mp3;
+        io_read_now(p, &mp3);
+        format(p, sizeof p, "%s/tags", root); io_make_dirs(p);
+        format(q, sizeof q, "%s/tags/thousand artists.mp3", root); tagged(q, "TPE1", 1000, "Again and again", mp3); ++audio;
+        format(q, sizeof q, "%s/tags/odd text.mp3", root); tagged(q, "TIT2", 3, "\xff\xfe broken \xc3", mp3); ++audio;
+        // A hundred megabytes of art: a tag that says so, the file sparse where the art is,
+        // and the audio after it.
+        format(q, sizeof q, "%s/tags/huge art.mp3", root);
+        {
+            const u32 art = 100u << 20;
+            u8 head[64] = {'I', 'D', '3', 4, 0, 0};
+            u32 body = 10 + 11 + 10 + art; // TIT2, APIC header, art
+            head[6] = (u8)((body >> 21) & 0x7F); head[7] = (u8)((body >> 14) & 0x7F); head[8] = (u8)((body >> 7) & 0x7F); head[9] = (u8)(body & 0x7F);
+            u8 f1[21] = {'T', 'I', 'T', '2', 0, 0, 0, 11, 0, 0, 3, 'H', 'u', 'g', 'e', ' ', 'A', 'r', 't', '!', '!'};
+            u32 an = art;
+            u8 f2[10] = {'A', 'P', 'I', 'C', (u8)((an >> 21) & 0x7F), (u8)((an >> 14) & 0x7F), (u8)((an >> 7) & 0x7F), (u8)(an & 0x7F), 0, 0};
+            int fd = open(q, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                ssize_t w = write(fd, head, 10); w = write(fd, f1, 21); w = write(fd, f2, 10);
+                u8 apic[16] = {0, 'i', 'm', 'a', 'g', 'e', '/', 'j', 'p', 'e', 'g', 0, 3, 0, 0, 0};
+                w = write(fd, apic, 16);
+                if (ftruncate(fd, (off_t)(10 + body)) != 0) {}
+                if (lseek(fd, 0, SEEK_END) >= 0) w = write(fd, mp3.data, mp3.size);
+                (void)w;
+                close(fd);
+            }
+            ++audio;
+        }
+        mp3.free();
+    }
+    // The odd tree: a path past a thousand bytes, ten thousand files in one directory, a
+    // loop, a directory that may not be read, a name that is not UTF-8, a file being written.
+    {
+        char longp[4200];
+        u32 n = (u32)format(longp, sizeof longp, "%s/tree", root);
+        io_make_dirs(longp);
+        for (u32 d = 0; d < 5; ++d) {
+            longp[n++] = '/';
+            for (u32 k = 0; k < 220; ++k) longp[n++] = (char)('a' + (k + d) % 26);
+            longp[n] = 0;
+            mkdir(longp, 0755); // a level at a time: io_make_dirs stops at 1023 bytes (KR15)
+        }
+        format(q, sizeof q, "%s/deep.flac", longp);
+        kvtest::Bytes f;
+        kvtest::Tags t{"Deep Down", "Long Path", "Nesting", 1, 1, 1, "2000", "Ambient"};
+        kvtest::flac_file(f, t);
+        io_write_now(q, f.b, f.n);
+        ++audio;
+        format(p, sizeof p, "%s/tree/ten thousand", root); io_make_dirs(p);
+        for (u32 i = 0; i < 10000; ++i) {
+            format(q, sizeof q, "%s/tree/ten thousand/%05u.flac", root, i);
+            io_write_now(q, f.b, f.n);
+            ++audio;
+        }
+        format(p, sizeof p, "%s/tree/loop", root); KV_CHECK(c, symlink(root, p) == 0);
+        format(p, sizeof p, "%s/tree/locked", root); io_make_dirs(p);
+        format(q, sizeof q, "%s/tree/locked/hidden away.flac", root); io_write_now(q, f.b, f.n);
+        chmod(p, 0);
+        if (geteuid() == 0) ++audio;
+        format(q, sizeof q, "%s/tree/caf\xe9.flac", root); io_write_now(q, f.b, f.n); ++audio;
+    }
+    Grower g;
+    format(g.path, sizeof g.path, "%s/tree/growing.flac", root);
+    io_write_now(g.path, "", 0);
+    ++audio;
+    OsThread gt;
+    os_thread_start(&gt, grow, &g);
+
+    Rig r;
+    KV_CHECK(c, r.start(data, 0.3, 60.0));
+    f64 t0 = time_now();
+    r.add(root);
+    bool done = r.until([] { return g_finished == 1; }, 180.0);
+    f64 took = time_now() - t0;
+    atomic_store(&g.stop, 1u, MO_RELAXED);
+    os_thread_join(&gt);
+    KV_CHECK(c, done);
+    // The growing file's last changes in, and the index still, before its rows are counted a
+    // window at a time (a row that moves in the order between windows would count twice).
+    {
+        u64 gen = r.scan().generation;
+        f64 still = time_now();
+        while (time_now() - still < 1.0) { r.step(); if (r.scan().generation != gen || r.scan().active) { gen = r.scan().generation; still = time_now(); } }
+    }
+    // Every audio file a row; every row its tags, or a reason.
+    LibraryRoot rt = r.root(1);
+    u32 rows = 0, no_audio = 0, unexplained = 0, too_long = 0;
+    Array<u64> ids;
+    for (u32 first = 0;; first += kLibraryMaxWindow) {
+        if (!r.query(3, LibraryView::Tracks, 0, "", first, kLibraryMaxWindow)) break;
+        Array<LibraryRow> w = r.rows(3);
+        for (const LibraryRow& x : w) {
+            for (u64 id : ids) if (id == x.id) KV_ERROR("test", "twice: %llu at %u: %s (%s)", (unsigned long long)x.id, x.index, x.name, x.title);
+            if (strstr(x.path, "/loop/")) KV_ERROR("test", "a row through the loop: %s", x.path);
+            ids.push(x.id);
+            ++rows;
+            if (x.rate == 0) { ++no_audio; if (!x.reason[0]) ++unexplained; }
+            if (!x.path[0] && strstr(x.reason, "longer than the player takes")) ++too_long;
+        }
+        u32 n = w.len;
+        w.free();
+        if (n < kLibraryMaxWindow) break;
+    }
+    ids.free();
+    u64 read = r.scan().bytes_read;
+    if (rows != audio) KV_ERROR("test", "root says %u tracks", rt.tracks);
+    KV_INFO("test", "library corpus: %u audio files, %u rows, %u without audio (each with its reason), %u unexplained, %u too long to play; "
+            "%.1f MB read, the scan %.1f s", audio, rows, no_audio, unexplained, too_long, read / 1e6, took);
+    KV_CHECK(c, rt.tracks == audio && rows == audio && unexplained == 0 && too_long == 1);
+    KV_CHECK(c, read < (40u << 20)); // a hundred megabytes of art among it, not read
+    KV_CHECK(c, r.query(4, LibraryView::Search, 0, "huge"));
+    { Array<LibraryRow> h = r.rows(4); KV_CHECK(c, h.len == 1 && strstr(h[0].title, "Huge Art") && h[0].rate == 44100); h.free(); }
+    r.stop();
+    format(p, sizeof p, "%s/tree/locked", root); chmod(p, 0755);
     io_remove_tree(tmp);
 }

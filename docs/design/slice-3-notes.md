@@ -298,3 +298,112 @@ changed 0.61 s, moved 0.42 s, removed 0.63 s, a directory removed 0.35 s; a poll
 new file 1.06 s with a poll every 0.5 s. Fifty thousand files with the watcher on: found by
 name at 2.3 s (1.6 s without it: the watches are set up while the walk runs), everything
 else as before.
+
+## Milestone 8, close
+
+Nov 23, 2026. Linux laptop, `linux-dev`. The built-in disk is a WD_BLACK SN850X (NVMe,
+ext4); the USB disks are slice 1's Seagate Backup Plus (USB 3, exFAT) and SanDisk Cruzer
+(USB 2 flash, FAT32). On the USB disks the fifty thousand were made under
+`blackwing-stress/library` on each, and the index was kept on the built-in disk, where
+Blackwing's data is.
+
+**Built:** the corpus, scanned whole by one test (below); a `--real` mode for the heavy
+test, which reads a real library read only, with its files out of the page cache first;
+the heavy test's index optionally elsewhere than its music. The tagger reads 16 KB pieces,
+its first 64 KB and last 16 KB at once, and no tail for a FLAC (`tags_read` gained `tail`):
+the real library's reads went from 357 MB to 192 MB.
+
+### Found at the close
+
+- **MP3s that no probe would take.** In the real library, 26 MP3s from iTunes carry two
+  ID3v2 tags in a row, and 12 more carry a tag followed by some 600 zeros that its size
+  does not count. Every probe was shown the bytes after one tag's declared size, so the
+  files were listed with "not a kind of audio file this build plays". The decoder's probe,
+  `decoder_head_bytes` (asked again while its answer grows), the player's head read and
+  the tagger now step over up to four tags and 64 KB of zeros after them. The tagger's
+  first version of this read past its span under ASan: its bound was a subtraction that
+  wrapped round on a file shorter than a tag header.
+- **A file made during the walk could be missed.** The walk listed a directory, the file
+  was made, and only then was the directory watched. A root is now watched first, then
+  walked; the cost is the watches' setup before the walk (fifty thousand files: found by
+  name at 2.5 s, was 2.3 s with the watches set up alongside, 1.6 s without a watcher).
+- **The engine's watcher follows links to directories.** The corpus's link back to its
+  root was watched through, again and again, and a file written in the root was reported
+  as `tree/loop/tree/loop/.../growing.flac` too: one row too many. The walk never follows
+  such a link, so the watch thread now drops a report whose path passes through one,
+  asking each directory once of its parent's listing. Written up as KR16.
+- **A slot directory named before its root's walk began was dropped.** With the watch
+  first, a `LibraryPrioritize` for a path in a root just added arrived at the scan thread
+  before the root's walk existed, and was forgotten; under TSan the slot's track was read
+  last. The scan thread now holds it until the walk begins.
+- **`io_make_dirs` stops at 1023 bytes** (KR15). The corpus's long path is made a level at
+  a time; an override in a directory that deep cannot be saved, with a message.
+
+### The corpus
+
+One test makes it and scans it: the codec's good and broken FLAC and MP3 files, 300
+spoiled copies of a FLAC and an MP3 (bits flipped, cut short), a field a thousand times,
+text not in its encoding, an MP3 behind a hundred megabytes of art (a sparse file), and
+the odd tree: a path of 1,100 bytes under the root, ten thousand files in one directory, a
+link to the root, a locked directory, a name that is not UTF-8, and a file written while
+the scan runs. 10,351 audio files, 10,351 rows, every one with its tags or a reason (13
+without audio, each said why); 12.2 MB read, the art not at all; the scan 4.1 s. One file
+is "too long to play": its path is past the 511 bytes `PlayerEnqueue` holds.
+
+### The real library
+
+1,574 MP3s (and 1,657 `.m4a`, which this build does not list) in 3,391 directories on the
+USB 3 disk, read only: walked in 0.3 s, every file read in 27.8 s more, from a cold cache
+(57 files a second; 192 MB read, about 120 KB a file). Every MP3 has its audio; 142
+albums, 41 artists, a window of albums in 1.0 ms. 88 MB held.
+
+### The fifty thousand, three disks
+
+From `LibraryAddRoot` on an empty index. The first part of each run follows the files'
+making, so their directories (and on the built-in disk their bytes) are in the page
+cache; the disk run empties it of the fifty thousand files first.
+
+| | NVMe, ext4 | USB 3 disk, exFAT | USB 2 flash, FAT32 |
+|---|---|---|---|
+| a chosen track found by name / heard | 2.51 s / 2.53 s | 5.81 s / 5.84 s | 3.10 s / 3.13 s |
+| the names pass | 50,000 files in 0.23 s (216,000 a second) | 2.82 s (17,700 a second) | 0.77 s (64,800 a second) |
+| a folder of twenty prioritized as the tags pass starts | its tags in 0.77 s | 0.50 s | 0.71 s |
+| the tags pass, after the walk | 6,250 files a second; all read at 10.7 s | 5,890 a second; 15.3 s | 4,490 a second; 14.4 s |
+| the cold scan, a long MP3 playing from the same disk | 15.1 s, 0 underruns | 202 s, 0 underruns | 30.3 s, 0 underruns |
+| the second start: a window answered / the walk again | 0.036 s / 0.22 s, no file read | 0.034 s / 2.85 s, none read | 0.038 s / 0.76 s, none read |
+| memory, at most | 108 MB | 109 MB | 107 MB |
+| the index | 121 MB | 119 MB | 117 MB |
+
+Found by name is later than the walk alone would make it because the root is watched
+before it is walked: by the difference, setting up the watches takes about a second on
+ext4 and about three on exFAT. The cold scan on the USB 3 disk is a spinning disk's
+seeks, fifty thousand small files read one by one; the flash drive has no seeks to pay
+for, and 12 MB of files is two seconds of its reading. Making the fifty thousand on the
+flash drive took 93 minutes.
+
+Windows of 100 on every disk were as at milestone 5 (the index is on the built-in disk
+for all three): every view and order within 11 ms but the first window of a search that
+matches every track, 29 to 32 ms.
+
+### The exit criteria
+
+| criterion | result |
+|---|---|
+| Aimed at fifty thousand tracks, playing a chosen one within seconds | Met: heard 2.53 s after `LibraryAddRoot` on the built-in disk, the walk not over (3.1 s and 5.8 s on the USB disks, which the criterion does not bound) |
+| Every file listed after the names pass, and plays from that alone | Met: every row has a guess from its path; the chosen tracks are heard before their tags are read |
+| What is looked at is scanned next | Met: a folder of twenty in 0.77 s on the built-in disk; 0.50 s and 0.71 s on the USB disks |
+| The scan never costs a glitch | Met, with the heavy test's disk run in place of slice 1's: a cold scan of the disk being played from, on all three disks, 0 underruns. `stress-play.sh`'s ninety-second runs with the scan as the load were not run |
+| Nothing in the corpus stops the scan | Met: 10,351 files, 10,351 rows, every one with tags or a reason; nothing read whole |
+| Tags come out right | Met: `blackwing_tags`' tests, every encoding and rank (milestone 2) |
+| An override wins and survives | Met: every query, a rebuild, a root removed and added; no audio file's bytes or time changed |
+| The second start is instant | Met: a window in 0.036 s, no file read again |
+| A list of fifty thousand rows answers anywhere | Met within 20 ms but for the first window of a search that matches every track (about 30 ms); a replaced query stops in sqlite |
+| Changes are noticed | Met: within 0.35 to 0.66 s on a local disk; a polled root's new file in 0.8 s |
+| A root that goes away is offline, not forgotten | Met: gone, unreadable or emptied; nothing read again when it returns |
+| A deleted or damaged index is rebuilt | Met: deleted, or replaced by text, with a message |
+| MP3 plays | Met: within one of libmpg123 at 16 bits, seeks exact, any piece order, gapless trims |
+| Numbers in the notes | Above |
+
+**Not done, and owed:** BL23 (the background pass: an MP3 with no header keeps its
+estimated length) and BL25 (art recorded), both P1; the ninety-second runs with the scan
+as the load; KR15 and KR16.

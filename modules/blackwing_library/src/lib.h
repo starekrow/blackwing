@@ -161,7 +161,7 @@ struct Shared {
     Array<Result> results;
     // Counters anyone may read without the lock (atomics).
     u64 generation = 0;   // the writer's commits
-    u64 dirs_listed = 0, files_found = 0, tags_read = 0;
+    u64 dirs_listed = 0, files_found = 0, tags_read = 0, bytes_read = 0;
     u32 tags_active = 0;  // tracks the tagger is reading now
     u32 walking = 0;      // the root being walked
     u32 reading_window = 0; // the window the reader is answering (under the lock), and
@@ -170,7 +170,7 @@ struct Shared {
     char walking_dir[256] = ""; // under the lock
     bool rebuilt = false;
     // The roots, as the writer saves them: under the lock.
-    struct RootLine { u32 id; char path[kPathMax]; bool offline = false; u32 tracks = 0; };
+    struct RootLine { u32 id; char path[kPathMax]; bool offline = false; u32 tracks = 0; bool to_walk = true; };
     Array<RootLine> root_lines;
 };
 

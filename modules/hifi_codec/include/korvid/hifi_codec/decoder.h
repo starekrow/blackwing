@@ -129,8 +129,11 @@ Span<const DecoderDesc* const> decoders();
 const DecoderDesc* decoder_for(Span<const u8> head);
 
 // How many of a file's first bytes decoder_for needs to decide, given at least its first
-// 10 (fewer only when that is the whole file): 64, or past an ID3v2 tag in front, the
-// tag's length and 64 more. Never more than `size`, the file's length.
+// 10 (fewer only when that is the whole file): 64, or past the ID3v2 tags in front (one or
+// several in a row) and any zeros after them that they did not count, their length and 64
+// more. When `first` ends before a tag's header, or inside the zeros, the answer covers only
+// some of what is still to come: call again with that many, until the answer stops growing.
+// Never more than `size`, the file's length.
 u64 decoder_head_bytes(Span<const u8> first, u64 size);
 
 // "ok", "end", "damaged", "wait".

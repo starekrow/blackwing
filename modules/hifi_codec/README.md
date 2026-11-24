@@ -192,9 +192,11 @@ The module registers nothing with the engine: it is a library.
 - **`delay` and `padding` are 0 for FLAC**, which is sample-exact by itself.
 - **Ogg FLAC is not read.** Native FLAC only, with or without an ID3v2 tag in front.
 - **The decoders are asked in order**: FLAC, then MP3. MP3's probe wants a Layer III
-  header at the front, past ID3v2 tags and up to 64 bytes of zeros. A file with more junk
-  than that before its first frame is decoded by `k_mp3_decoder.open`, but not found by
-  `decoder_for`.
+  header at the front, past ID3v2 tags (up to four in a row) and up to 64 KB of zeros after
+  them that they did not count (iTunes writes both). A file with other junk before its first
+  frame is decoded by `k_mp3_decoder.open`, but not found by `decoder_for`.
+  `decoder_head_bytes` says how much of the front to show it, and is asked again while its
+  answer grows.
 - **An MP3 decoder's block is 1 MB**: two of dr_mp3's decoders (one is a seek's until it
   lands), a frame of samples, and the marks. Given less, it keeps fewer marks, down to 16.
 - **An MP3 seek near the target is cheap; far ahead is a read.** Within what has been

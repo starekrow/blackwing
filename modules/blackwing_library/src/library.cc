@@ -751,11 +751,10 @@ void add_root(Library& L, KTable* table, u32 id, const char* path, bool save) {
     os_mutex_unlock(&L.sh->lock);
     send_write(L, WriteKind::AddRoot, id, path);
     if (save) send_write(L, WriteKind::SaveRoots, 0);
+    // Its walk starts once the watcher is watching it (the watch thread asks for it), so
+    // nothing that changes after the walk has passed a directory goes unheard.
     os_mutex_lock(&L.sh->lock);
-    Walk w{id, ""};
-    format(w.path, sizeof w.path, "%s", path);
-    L.sh->walks.push(w);
-    os_cond_signal(&L.sh->scan_wake);
+    os_cond_signal(&L.sh->watch_wake);
     os_mutex_unlock(&L.sh->lock);
 }
 
@@ -970,6 +969,7 @@ void io_pump(TickContext& ctx, Library& L) {
         if (c) {
             d.ok = c->status == IoStatus::Done;
             d.data = c->data; d.size = c->size; d.err = c->error;
+            atomic_add_fetch(&L.sh->bytes_read, (u64)c->size, MO_RELAXED);
             io->reap(r.request);
         }
         done.push(d);
@@ -1033,6 +1033,7 @@ void library_pump(TickContext& ctx) {
     s.files_found = atomic_load(&L.sh->files_found, MO_RELAXED);
     s.tags_read = atomic_load(&L.sh->tags_read, MO_RELAXED);
     s.cancelled = atomic_load(&L.sh->cancelled, MO_RELAXED);
+    s.bytes_read = atomic_load(&L.sh->bytes_read, MO_RELAXED);
     bool busy = false;
     u64 unread = 0;
     for (const RootInfo& r : L.roots) {

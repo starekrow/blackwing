@@ -32,6 +32,7 @@ struct RootWalk {
     f64     started = 0.0;
     u32     files = 0;
     bool    root_failed = false;    // its own directory could not be listed
+    bool    again = false;          // asked for again while it was walked: walked again when it is done
     char    reason[96] = "";
     Strings early;              // directories listed ahead of the walk, for the slot: not listed again
     bool    has_more() const { return head < queue.bytes.len; }
@@ -211,6 +212,8 @@ void list_one(Shared& sh, RootWalk& w, const char* rel_in, Batch*& batch, f64* s
 void scan_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     Array<RootWalk*> walks;
+    u32 held_root = 0;          // the slot's directory, to be listed as soon as its root's walk begins
+    char held[kPathMax] = "";
     Array<u32> started;
     Batch* batch = nullptr;
     f64 since = 0.0;
@@ -223,8 +226,8 @@ void scan_thread(void* arg) {
         started.clear();
         for (const Walk& w : sh.walks) {
             bool walking = false;
-            for (const RootWalk* x : walks) walking |= x->root == w.root;
-            if (walking) continue; // asked again while it is walked: the walk under way will do
+            for (RootWalk* x : walks) if (x->root == w.root) { walking = true; x->again = true; }
+            if (walking) continue; // asked again while it is walked: walked again once this walk is done
             RootWalk* r = (RootWalk*)mem_alloc(sizeof(RootWalk));
             new (r) RootWalk{};
             r->root = w.root;
@@ -249,17 +252,21 @@ void scan_thread(void* arg) {
         os_mutex_unlock(&sh.lock);
         for (u32 id : started) send_walk(sh, WriteKind::WalkStart, id); // before any of its batches
         os_mutex_lock(&sh.lock);
-        u32 next_root = sh.walk_next_root;
-        char next[kPathMax];
-        format(next, sizeof next, "%s", sh.walk_next);
-        sh.walk_next_root = 0;
+        if (sh.walk_next_root) { // a newer one takes the place of one held
+            held_root = sh.walk_next_root;
+            format(held, sizeof held, "%s", sh.walk_next);
+            sh.walk_next_root = 0;
+        }
         os_mutex_unlock(&sh.lock);
 
         // The slot's directory, if its root is still being walked and the walk has not
         // listed it: now, ahead of the rest. The walk steps over it when it comes to it.
-        if (next_root) {
+        // Held until its root's walk begins (a root is watched before it is walked).
+        if (held_root) {
             for (RootWalk* r : walks) {
-                if (r->root != next_root) continue;
+                if (r->root != held_root) continue;
+                const char* next = held;
+                held_root = 0;
                 bool done = false;
                 for (u32 at = 0; at < r->head && !done;) { const char* q = r->queue.at(at); done = strcmp(q, next) == 0; at += (u32)strlen(q) + 1; }
                 for (u32 at = 0; at < r->early.bytes.len && !done;) { const char* q = r->early.at(at); done = strcmp(q, next) == 0; at += (u32)strlen(q) + 1; }
@@ -288,11 +295,25 @@ void scan_thread(void* arg) {
             IoStat st;
             u64 volume = io_stat(w.path, &st) ? st.volume : 0;
             send_walk(sh, WriteKind::Walked, w.root, time_now() - w.started, w.files, w.root_failed, volume, w.reason);
+            bool again = w.again;
+            u32 root = w.root;
+            char path[kPathMax];
+            format(path, sizeof path, "%s", w.path);
             w.queue.free();
             w.early.free();
             mem_free(&w);
             for (u32 j = 1; j < walks.len; ++j) walks[j - 1] = walks[j];
             --walks.len;
+            if (again) {
+                // What changed under the walk (before the watcher was watching it) is found now.
+                RootWalk* r = (RootWalk*)mem_alloc(sizeof(RootWalk));
+                new (r) RootWalk{};
+                r->root = root;
+                format(r->path, sizeof r->path, "%s", path);
+                r->queue.add("");
+                walks.push(r);
+                send_walk(sh, WriteKind::WalkStart, root);
+            }
             if (walks.len == 0) atomic_store(&sh.walking, 0u, MO_RELAXED);
         }
     }

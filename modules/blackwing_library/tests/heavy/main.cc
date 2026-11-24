@@ -90,13 +90,112 @@ struct Rig {
     }
 };
 
+// What this process holds, and the most it has: Linux's own account, in MB.
+void memory(const char* when) {
+    // Read as a stream: /proc files say they are 0 bytes long, so a read by size gets nothing.
+    char text[8192];
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f) return;
+    usize n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    const char* rss = strstr(text, "VmRSS:");
+    const char* hwm = strstr(text, "VmHWM:");
+    printf("memory %s: %.0f MB held, %.0f MB at most\n", when, rss ? atof(rss + 6) / 1024.0 : 0.0, hwm ? atof(hwm + 6) / 1024.0 : 0.0);
+}
+
+// Every file under `root` out of the page cache (opened to read, and only asked to be
+// forgotten), so the next read of it comes from the disk. How many.
+u32 evict(const char* root) {
+    struct W { const char* root; u32 n; } w{root, 0};
+    io_list_files(root, [](void* u, const char* rel) {
+        W& x = *(W*)u;
+        char full[4200];
+        format(full, sizeof full, "%s/%s", x.root, rel);
+        int fd = open(full, O_RDONLY);
+        if (fd >= 0) { posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED); close(fd); ++x.n; }
+        return true;
+    }, &w);
+    return w.n;
+}
+
+// A real library, read only: walked and read into an index of its own, and what came of it.
+int real(const char* music, const char* data) {
+    TestCtx c;
+    c.begin("library real");
+    io_remove_tree(data);
+    u32 cold = evict(music); // read only: nothing under it is written
+    printf("real library: %u files out of the cache first\n", cold);
+    Rig r;
+    if (!r.start(data)) return 1;
+    f64 t0 = time_now();
+    LibraryAddRoot a{};
+    format(a.path, sizeof a.path, "%s", music);
+    r.e.events.emit(a);
+    f64 walked = 0.0;
+    while (!g_finished && time_now() - t0 < 1800.0) {
+        r.step();
+        if (!walked && r.root(1).state != (u8)LibraryRootState::Walking) walked = time_now() - t0;
+    }
+    f64 all = time_now() - t0;
+    LibraryRoot rt = r.root(1);
+    const LibraryScan& sc = *library_scan(r.e);
+    printf("real library %s: %u tracks in %u directories (%u unreadable); walked in %.1f s (%.0f files a second), read in %.1f s more (%.0f a second), %.1f MB read\n",
+           music, rt.tracks, rt.dirs, rt.failed, walked, rt.tracks / (walked > 0 ? walked : 1), all - walked, rt.tracks / (all - walked > 0 ? all - walked : 1),
+           sc.bytes_read / 1e6);
+    // What could not be read, by reason.
+    struct Why { char text[96]; u32 n; };
+    Why why[32];
+    u32 nwhy = 0, noaudio = 0, estimated = 0;
+    for (u32 first = 0;; first += kLibraryMaxWindow) {
+        LibraryQuery q; q.id = 9; q.view = LibraryView::Tracks; q.first = first; q.count = kLibraryMaxWindow;
+        u32 before = g_results;
+        r.e.events.emit(q);
+        f64 t = time_now();
+        while (time_now() - t < 10.0) { r.step(); if (g_results > before && g_last.id == 9) break; }
+        u32 got = 0;
+        for (u32 i = first; i < first + kLibraryMaxWindow; ++i) {
+            const LibraryRow* x = r.row(9, i);
+            if (!x) continue;
+            ++got;
+            if (x->rate == 0) ++noaudio;
+            if (!x->reason[0]) continue;
+            u32 k = 0;
+            while (k < nwhy && strcmp(why[k].text, x->reason) != 0) ++k;
+            if (k == nwhy && nwhy < 32) { format(why[nwhy].text, sizeof why[nwhy].text, "%s", x->reason); why[nwhy++].n = 0; }
+            if (k < nwhy) ++why[k].n;
+        }
+        if (got < kLibraryMaxWindow) break;
+    }
+    (void)estimated;
+    printf("  %u without audio; the reasons given:\n", noaudio);
+    for (u32 k = 0; k < nwhy; ++k) printf("  %5u  %s\n", why[k].n, why[k].text);
+    LibraryQuery q; q.id = 8; q.view = LibraryView::Albums; q.count = 100;
+    u32 before = g_results;
+    r.e.events.emit(q);
+    while (g_results == before) r.step();
+    printf("  %u albums, %u-row window in %.1f ms\n", g_last.total, g_last.count, g_last.seconds * 1e3);
+    q.view = LibraryView::Artists;
+    before = g_results;
+    r.e.events.emit(q);
+    while (g_results == before) r.step();
+    printf("  %u artists\n", g_last.total);
+    memory("after the real library");
+    r.stop();
+    names_shutdown();
+    mem_shutdown();
+    return test_report(c, "blackwing_library_real");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
+    log_set_level(LogLevel::Warn);
+    if (argc > 3 && strcmp(argv[1], "--real") == 0) return real(argv[2], argv[3]);
     TestCtx c;
     c.begin("library heavy");
-    log_set_level(LogLevel::Warn);
     char dir[2048];
+    bool built_in = argc <= 1; // the criteria's times are the built-in disk's; elsewhere they are measured, not checked
     if (argc > 1) format(dir, sizeof dir, "%s", argv[1]);
     else {
         const char* here = __FILE__; // .../modules/blackwing_library/tests/heavy/main.cc
@@ -106,6 +205,7 @@ int main(int argc, char** argv) {
     char music[2100], data[2100], marker[2200];
     format(music, sizeof music, "%s/music", dir);
     format(data, sizeof data, "%s/data", dir);
+    if (argc > 2) format(data, sizeof data, "%s", argv[2]); // the index elsewhere: music on a USB disk, Blackwing's data on the system's
     format(marker, sizeof marker, "%s/made-%u-%u", dir, kFiles, kPerAlbum);
     if (!io_is_file(marker)) {
         io_remove_tree(music);
@@ -155,7 +255,7 @@ int main(int argc, char** argv) {
         }
         printf("track %u: found by name %.3f s after the root was added, heard at %.3f s (the walk %s)\n", targets[k], found, heard,
                g_finished ? "was over" : "was not");
-        if (k == 0) KV_CHECK(c, heard > 0.0 && heard < 3.0); // the criterion: playing a chosen one within three seconds
+        if (k == 0 && built_in) KV_CHECK(c, heard > 0.0 && heard < 3.0); // the criterion: playing a chosen one within three seconds, on the built-in disk
         KV_CHECK(c, found > 0.0 && heard > 0.0);
     }
     // The slot: once the walk is in, a late album of twenty, by its directory.
@@ -187,13 +287,14 @@ int main(int argc, char** argv) {
     }
     printf("slot: the walk in at %.2f s with %u tracks to read; a folder of %u prioritized then had its tags in %.3f s\n", walked_at,
            unread_at_slot, kPerAlbum, slot_read);
-    KV_CHECK(c, slot_read > 0.0 && slot_read < 1.0);
+    if (built_in) KV_CHECK(c, slot_read > 0.0 && slot_read < 1.0); // within a second on the built-in disk; another's is a number for the notes
     while (!g_finished && time_now() - t0 < 600.0) r.step();
     f64 finished_at = time_now() - t0;
     KV_CHECK(c, g_finished == 1 && g_walk_tracks == kFiles && r.root(1).unread == 0);
     printf("names pass: %u files in %.2f s, %.0f files a second\n", g_walk_tracks, g_walk_seconds, g_walk_tracks / g_walk_seconds);
     printf("tags pass: done %.2f s after the root was added, %.0f files a second after the walk\n", finished_at,
            kFiles / (finished_at - walked_at));
+    memory("after the scan of 50,000");
     r.stop();
 
     u64 index_bytes = 0;
@@ -220,6 +321,7 @@ int main(int argc, char** argv) {
     KV_CHECK(c, answered > 0.0 && answered < 1.0 && g_last.total == kFiles);
     while (!g_finished && time_now() - t1 < 300.0) s.step();
     printf("second start: the walk again in %.2f s, %llu files read again\n", g_walk_seconds, (unsigned long long)library_scan(s.e)->tags_read);
+    memory("at the second start");
     KV_CHECK(c, library_scan(s.e)->tags_read == 0);
 
     // Windows of 100 anywhere in every view and order: the index's time, and the round trip
@@ -292,18 +394,6 @@ int main(int argc, char** argv) {
     // playing from the same disk through the whole scan. No underrun.
     {
         u32 evicted = 0;
-        auto evict = [&](const char* root) {
-            struct W { const char* root; u32 n; } w{root, 0};
-            io_list_files(root, [](void* u, const char* rel) {
-                W& x = *(W*)u;
-                char full[4200];
-                format(full, sizeof full, "%s/%s", x.root, rel);
-                int fd = open(full, O_RDONLY);
-                if (fd >= 0) { posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED); close(fd); ++x.n; }
-                return true;
-            }, &w);
-            return w.n;
-        };
         evicted = evict(music);
         io_remove_tree(data);
         char song[2100];

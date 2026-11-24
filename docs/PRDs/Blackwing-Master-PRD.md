@@ -83,8 +83,8 @@ Decided in the design discussion, and the tie-break for everything below:
   | `hifi_platform` | the output device per OS: enumerate, open at a format, exclusive where it exists, hot-plug, reported latency, the realtime thread | P0 |
   | `media_platform` | the OS's media surface per OS: media keys in, now-playing out, keep-awake, interruptions | P0 |
   | `blackwing_player` | the player with no face and no library: the queue, the transport, and the events and tables that are its whole API | P0 |
-  | `blackwing_tags` | reading tags from every source, ranking them, sidecar overrides; no library, no database | P0 |
-  | `blackwing_library` | roots, the scanner and its priority queue, the sqlite index, change watching, queries | P0 |
+  | `blackwing_tags` | reading tags from every source and ranking them; no library, no database, no files | P0 |
+  | `blackwing_library` | roots, the scanner and its priority slot, the sqlite index, the user's overrides, change watching, queries | P0 |
   | `ui_dev` | the development face: every table and event visible, the pipeline inspectable | P0 |
   | `ui_wsz` | the classic face: Winamp `.wsz` skins | P0 |
   | `ui_clean` | the clean face, for the not-Winamp crowd | P0 |
@@ -263,11 +263,13 @@ makes rate-change behaviour a setting.
 
 ### Tags
 
-**Read-only from sources, overridden in sidecars.** Nothing is "the right tag". Each
-source (embedded tags of each kind, a cue sheet, the file's name and path, a folder's
-image) has a specificity rank, and the best-ranked value for each field wins. The user's
-own corrections are overrides in a sidecar, which outrank every source and which no scan
-touches. P0 never writes into an audio file.
+**Read-only from sources, overridden in Blackwing's own data.** Nothing is "the right
+tag". Each source (embedded tags of each kind, a cue sheet, the file's name and path, a
+folder's image) has a specificity rank, and the best-ranked value for each field wins.
+The user's own corrections are overrides, which outrank every source and which no scan
+touches: a small text file per directory in Blackwing's own data, in a tree that mirrors
+each root by its path (slice 3). P0 writes nothing under a root, neither into an audio
+file nor beside one.
 
 A file whose tags cannot be read is still a track: it has a name from its path and it
 plays.
@@ -281,15 +283,15 @@ confirm. Scanning is passes, each useful on its own:
    alone, shown by folder with tags guessed from its path.
 2. **Tags.** Read each file's tags and art, fill the index, and let the browsing views
    (artist, album, genre) fill in as it goes.
-3. **Background.** Whatever is slow and nobody is waiting for: thumbnails now, audio
-   hashes and loudness later.
+3. **Background.** Whatever is slow and nobody is waiting for: an MP3's true length and
+   thumbnails first, audio hashes and loudness later.
 
 **Looking at something scans it next.** Opening a folder, an album or a search result
 that has not had its tags read moves it to the next-to-scan slot, ahead of the walk.
 Playing a file reads its tags at once.
 
 The index is sqlite, kept locally, a cache that can be deleted and rebuilt from the
-directories and the sidecars. Changes come from the cheapest watching the OS has, with
+roots and the overrides. Changes come from the cheapest watching the OS has, with
 polling for network shares. Queries are asynchronous and cancellable, and lists are
 virtualized: fifty thousand tracks is the size to design for.
 
@@ -340,7 +342,7 @@ Stated once, because it applies everywhere. A failure is local, named and surviv
 - A root that disappears (an unplugged disk, a share) keeps its index and shows as
   offline; nothing is forgotten, and it resumes when it returns.
 - A device that disappears pauses. No output device at all still lets you browse.
-- A corrupt index is rebuilt. A corrupt sidecar is set aside, not overwritten.
+- A corrupt index is rebuilt. An override file that will not parse is set aside, not overwritten.
 - A skin that will not load falls back to the last good face.
 
 ### Not precluding mobile
@@ -380,8 +382,8 @@ Mobile is out of scope, and these keep it possible:
 | B16 | Adding a directory is the whole of setting up a library | P0 |
 | B17 | Files are playable after the names pass, before any tag is read | P0 |
 | B18 | Looking at something unscanned makes it next to scan | P0 |
-| B19 | Tags come from ranked sources, read-only; overrides live in sidecars; no audio file is written | P0 |
-| B20 | The index is local sqlite, crash-consistent, and can be rebuilt from the roots and the sidecars | P0 |
+| B19 | Tags come from ranked sources, read-only; overrides live in Blackwing's own data; nothing under a root is written | P0 |
+| B20 | The index is local sqlite, crash-consistent, and can be rebuilt from the roots and the overrides | P0 |
 | B21 | Changes on disk are noticed without a rescan; network shares are polled | P0 |
 | B22 | Queries are asynchronous and cancellable; lists of fifty thousand rows scroll without a hitch | P0 |
 | B23 | Every failure in [Failure](#failure) behaves as written there | P0 |
@@ -435,9 +437,10 @@ Slices, as a proposal; each gets its own PRD when it starts.
    late rather than as silence, and no join clicks.
    *Built* Nov 23, 2026, through milestone 7; the slice's PRD has what is still owed.
 3. **The library** ([Blackwing-Slice-3-PRD.md](Blackwing-Slice-3-PRD.md)). `blackwing_tags` and `blackwing_library`: roots, the three passes, the priority
-   slot, sidecars, watching, queries; MP3; the broken-file corpus.
+   slot, overrides, watching, queries; MP3; the broken-file corpus.
    *Done when* a fresh install aimed at fifty thousand tracks is playing a chosen one
    within seconds, and nothing in the corpus stops the scan.
+   *Built* Nov 23, 2026, through milestone 8; the slice's PRD has what is still owed.
 4. **The development face.** `ui_dev` over the API and nothing else.
    *Done when* everything in slices 1 to 3 can be driven and watched from it, and from a
    Lua script with no face at all.
@@ -486,8 +489,8 @@ Nov 22, 2026, in setting up the project.
 - **Three phases**, as above. P0 has no ripping and no runtime module loads.
 - **The player's API is data and events** over Korvid's busses.
 - **The UI is separate modules**, four of them.
-- **Tags are read-only in P0**, with overrides in sidecars. Write-back is P1 and by
-  preference.
+- **Tags are read-only in P0**, with the user's overrides kept apart from the music.
+  Write-back is P1 and by preference.
 - **Playback leads; a change recuts near the playhead; a crossfade covers the join.**
 - **Gapless is provided for in P0 and nailed in P1.**
 - **The library is a directory and nothing else**, and attention drives the scan order.
@@ -519,18 +522,27 @@ Nov 23, 2026, by slice 1.
 - **The lead is in the device's own format**, so with no stage the path is integers end
   to end. Where the change to floats sits is slice 2's question.
 
+Nov 23, 2026, by slice 3.
+
+- **`blackwing_library` is a module**, and the user's overrides are its, not
+  `blackwing_tags'`: the tag readers stay functions of bytes.
+- **Overrides live in Blackwing's own data**, a text file per directory mirroring each
+  root by its path, never beside the music. They are keyed on the file's name within its
+  directory until B43.
+- **The scan reads below the player's priority**, and playing a file fills the priority
+  slot through glue in `blackwing`; the player and the library do not know each other.
+- **A walk does not follow a link to a directory**, so it cannot loop or leave its root.
+- **MP3 reports 24 bits**, from the decoder's floats.
+
 ## Open
 
-- **The library as a module or as part of `blackwing`.** This draft keeps
-  `blackwing_library` a module, because the faces need its declarations and a library
-  module cannot depend on the executable. Folding it in means folding the faces'
-  library views in too.
+- ~~The library as a module or as part of `blackwing`~~: a module, settled by slice 3.
 - **`hifi_eq` as its own module**, added by this draft: once `hifi` is only the flow and
   its interfaces, the EQ is a stage beside it. Volume sits there for now.
 - **The licence**: Apache 2.0, as Korvid is, or MIT.
-- **Where sidecars live**: beside the music (portable, visible to other machines) or in
-  Blackwing's own data (works on read-only media), or beside with a fallback. And their
-  format and what they key on before B43.
+- ~~Where overrides live~~: in Blackwing's own data, settled by slice 3. Still open:
+  whether an override file found beside the music is read, below the user's own, which
+  would make a library's corrections portable without Blackwing writing into it.
 - ~~The recut's numbers and where the join runs~~: settled by slice 2 (see The lead and
   the recut).
 - **AAC on Linux.** libopus and Apple's ALAC are permissively licensed. AAC has no

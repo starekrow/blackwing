@@ -27,8 +27,9 @@ namespace kv::lib {
 namespace {
 
 constexpr u32 kActive    = 24;        // tracks under way at once
-constexpr u32 kShift     = 16;        // a piece is 64 KB
-constexpr u64 kEnds      = 64u << 10; // the head and the tail read first
+constexpr u32 kShift     = 14;        // a piece is 16 KB
+constexpr u64 kHead      = 64u << 10; // the head read first,
+constexpr u64 kTail      = 16u << 10; // and the tail, for a kind whose tags may be there
 constexpr u32 kMaxWaits  = 8;         // ranges a track may ask for after those
 constexpr f64 kSendEvery = 0.1;       // results go to the writer at least this often
 
@@ -46,6 +47,7 @@ struct Active {
     u32    out = 0;                 // reads asked and not answered
     u32    waits = 0;
     bool   failed = false;
+    bool   tail = true;             // the back of the file is looked at for tags
     i32    err = 0;
 };
 
@@ -145,8 +147,11 @@ bool start(Tagger& t, u32 index, const TagJobs& b, const TagJob& j, bool slot) {
     a.span.bytes = a.base;
     a.span.have = a.have;
     if (!a.base) { a.failed = true; return true; }
-    ask(t, a, index, 0, kEnds);
-    if (j.size > kEnds) ask(t, a, index, j.size - kEnds, kEnds);
+    // A FLAC's tags are at its front; anything else may have some at its back.
+    const char* dot = strrchr(a.rel, '.');
+    a.tail = !(dot && (dot[1] == 'f' || dot[1] == 'F') && (dot[2] == 'l' || dot[2] == 'L'));
+    ask(t, a, index, 0, kHead);
+    if (a.tail && j.size > kHead) ask(t, a, index, j.size - kTail, kTail);
     atomic_add_fetch(&t.sh->tags_active, 1u, MO_RELAXED);
     return true;
 }
@@ -171,7 +176,7 @@ bool step(Tagger& t, u32 index) {
     const bool last = a.failed || a.waits >= kMaxWaits;
     TagRead tags;
     if (!a.failed) {
-        tags = tags_read(a.span, Span<u8>(t.tag_mem, kTagReadMemory), last);
+        tags = tags_read(a.span, Span<u8>(t.tag_mem, kTagReadMemory), last, a.tail);
         if (tags.status == TagStatus::Wait) { ask(t, a, index, tags.need.at, tags.need.len); ++a.waits; return false; }
     }
     // The audio, as the decoder that would play it sees it. The probe is shown the bytes
@@ -181,10 +186,29 @@ bool step(Tagger& t, u32 index) {
     if (a.failed) why = read_words(a.err);
     else if (a.span.size < 10) why = "the file is too short to be audio";
     else {
+        // Every ID3v2 tag in a row in front, each stepped over by its size.
         u64 skip = 0;
-        const u8* h = a.span.bytes;
-        if (sparse_has(a.span, 0, 10) && memcmp(h, "ID3", 3) == 0 && !((h[6] | h[7] | h[8] | h[9]) & 0x80))
-            skip = 10 + (((u64)h[6] << 21) | ((u64)h[7] << 14) | ((u64)h[8] << 7) | h[9]) + ((h[5] & 0x10) ? 10u : 0u);
+        bool waiting = false;
+        for (u32 k = 0; k < 4 && skip + 10 <= a.span.size; ++k) {
+            if (!sparse_has(a.span, skip, 10)) {
+                if (!last) { ask(t, a, index, skip, 10); ++a.waits; waiting = true; }
+                break;
+            }
+            const u8* h = a.span.bytes + skip;
+            if (memcmp(h, "ID3", 3) != 0 || ((h[6] | h[7] | h[8] | h[9]) & 0x80)) break;
+            skip += 10 + (((u64)h[6] << 21) | ((u64)h[7] << 14) | ((u64)h[8] << 7) | h[9]) + ((h[5] & 0x10) ? 10u : 0u);
+        }
+        if (waiting) return false;
+        if (skip > a.span.size) skip = a.span.size;
+        // And zeros after them that the tags did not count (decoder_head_bytes' padding).
+        for (u64 pad = 0; skip && skip < a.span.size && pad < (1u << 16); ++pad, ++skip) {
+            if (!sparse_has(a.span, skip, 1)) {
+                u64 want = a.span.size - skip < 4096 ? a.span.size - skip : 4096;
+                if (!last) { ask(t, a, index, skip, want); ++a.waits; return false; }
+                break;
+            }
+            if (a.span.bytes[skip] != 0) break;
+        }
         u64 n = a.span.size > skip ? a.span.size - skip : 0;
         if (n > 64) n = 64;
         if (!n) why = "the file is nothing but a tag";

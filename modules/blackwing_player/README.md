@@ -165,8 +165,9 @@ What the module registers with the engine, as module `player`:
   drive is not left reading what nobody will hear.
 - **The stat goes through the I/O queue** (on io_uring, `statx`), so a sleeping network
   share does not stall a tick.
-- **A file whose ID3v2 tag in front is long** is read up to the end of the tag before a
-  decoder is asked about it.
+- **A file whose ID3v2 tags in front are long** is read up to the end of them (and of any
+  zeros after them) before a decoder is asked about it: the head read grows while
+  `decoder_head_bytes` says so.
 - **`player.output` is the player's, not `hifi`'s**: `hifi` is not an engine module, so
   the player publishes what it reports.
 

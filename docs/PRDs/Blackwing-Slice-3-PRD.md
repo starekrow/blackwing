@@ -434,3 +434,66 @@ Nov 23, 2026, in review of the first draft. The draft's choices stand:
 - **Which reference decoder for MP3**, and how close "within a bit" has to be.
 - **A real library for the close.** Which one, and how big.
 - **Requirement IDs.** `BL`, after slice 1's `BS` and slice 2's `BR`.
+
+## As built
+
+Numbers and findings are in [docs/design/slice-3-notes.md](../design/slice-3-notes.md).
+
+**Milestone 1, MP3** (Nov 23, 2026; BL1, BL2). As planned, on dr_mp3's push decoder over a
+fixed window, so every piece size and order gives the same samples. Within one of
+libmpg123 at 16 bits on every sample. A seek walks frame headers from a mark kept every 8
+frames and lands on the frame asked for; the Xing table only sizes the reads. Delay and
+padding are trimmed in `hifi` (slice 2's BR23). `DecoderInfo` gained `estimated`.
+
+**Milestone 2, tags** (Nov 23, 2026; BL3 to BL6). As planned: one call over every place a
+tag can be, started again after each wait; the ceiling on waits is the caller's. Vorbis
+comments and ID3v2 share rank 2, the tie to Vorbis. A hundred megabytes of art costs two
+or three waits and none of the art.
+
+**Milestone 3, the walk and the index** (Nov 23, 2026; BL8, BL9, BL12, BL14, BL22's first
+commands). Blocked on sqlite being C, unblocked in Korvid (KR14). Threads of the module's
+own for the walk, the writer and the reader; the list of roots a file beside the index;
+links to directories not followed. Fifty thousand files found by name in 0.47 s.
+
+**Milestone 4, the tags pass and the slot** (Nov 23, 2026; BL10, BL11, BL18). A tagger
+thread asks the main thread for ranges, which go into the I/O queue at `Low`, the slot's
+at `Normal`. The slot is resolved by the writer. Found: the writer held the shared lock
+while counting and committed per message (425 files a second; now 5,400).
+
+**Milestone 5, queries** (Nov 23, 2026; BL13, BL26). Albums and artists are groupings named
+by a hash of their sort keys; sort keys fold case and strip marks for Latin, Greek and
+Cyrillic. A window is a walk of an index that is its order, ids first; groupings and
+searches are kept for a generation; a newer query interrupts sqlite. Every window within
+20 ms but the first of a search matching all fifty thousand (about 32 ms).
+
+**Milestone 6, overrides** (Nov 23, 2026; BL7). A small INI-like text of our own, per
+directory, mirroring each root by its path; files beside the music are not read. The
+merge is shared by the tagger and the writer, so a rebuild keeps them.
+
+**Milestone 7, changes** (Nov 23, 2026; BL15 to BL17, BL24). A watch thread; walks numbered
+so a whole walk's end marks the rest missing; a move found by name, size and time among
+the missing (BL24, P1, done); every root looked at at the offline interval, so an
+unmounted disk's empty mount point is offline. Found: the reader pinned to an old WAL
+snapshot by a statement left on its row.
+
+**Milestone 8, close** (Nov 23, 2026; BL19 to BL22, BL27). The corpus whole in one test;
+the fifty thousand on all three disks; a real library of 1,574 MP3s read only. Found at
+the close: MP3s that iTunes wrote with two ID3v2 tags in a row, or with zeros after a tag
+that it did not count, were refused by every probe (now stepped over, in the decoder, the
+player and the tagger); a file made while its directory was being walked could be missed
+(a root is now watched, then walked); the engine's watcher follows links to directories
+and reported a file twice (KR16; the library drops such reports); and a slot directory
+named before its root's walk began was dropped (it is now held). The exit criteria are in
+the notes.
+
+## Owed, as of the close
+
+- **BL23, the background pass** (P1): an MP3 with no header keeps its estimated length.
+- **BL25, art** (P1): neither a picture in the tags nor one beside the files is recorded.
+- **The ninety-second runs.** Slice 1's `stress-play.sh` was not run with the scan as the
+  load; the heavy test's disk run (a cold scan of fifty thousand files while a track plays
+  from the same disk) stands in for it, on all three disks.
+- **A search that matches every track** takes about 32 ms for its first window, past the
+  20 ms; its later windows are under a millisecond.
+- KR15 and KR16, in [Korvid-Changes-For-Blackwing.md](Korvid-Changes-For-Blackwing.md).
+- From slice 2, still: BR22 (the device's widest word) and the hour-long run.

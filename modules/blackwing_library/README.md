@@ -54,13 +54,15 @@ in words, and the walk goes on; a root that cannot be listed is offline.
 or time differ from the last look, or one never read at its size and time (an earlier run
 stopped first). It hands them to the tagger in the order the walk found them, after the
 commit that made them rows. The tagger keeps up to 24 tracks under way. Each is a sparse
-span (the decoders' kind) of 64 KB pieces: its head and tail are asked for at once, then
-whatever range a reader needs. The main thread puts the reads into the I/O queue at
+span (the decoders' kind) of 16 KB pieces: its first 64 KB and last 16 KB are asked for at
+once (a FLAC's first only: its tags are at the front), then whatever range a reader
+needs. The main thread puts the reads into the I/O queue at
 `Low`, below the player's, at most 48 at once, within the queue's own budget, so a
 playing track's pieces go first and a read under way is not stopped. `blackwing_tags`
 reads every tag; the decoder that would play the file reads its rate, channels, depth and
-length from the same pieces (its probe is shown the bytes past any ID3v2 tag, so a tag of
-megabytes of art is not read for it). After eight waits beyond its first reads, a track
+length from the same pieces (its probe is shown the bytes past any ID3v2 tags, several in
+a row, and the zeros after them that they did not count, so a tag of megabytes of art is
+not read for it). After eight waits beyond its first reads, a track
 is what could be read of it. What is found goes to the writer every tenth of a second:
 every source's values (the guess from the path among them) into `tagvals`, the merge into
 the track's own columns and the search table, the audio, and a reason when something
@@ -72,8 +74,8 @@ directory by its OS path, a directory by id, an open window, or tracks by id. Th
 one slot, and a newer call replaces it. The writer resolves it: the tracks that want
 reading go to the tagger as the slot's, ahead of the rest, with their reads at `Normal`; a
 directory the walk has not listed is listed by the scan thread now, ahead of the walk
-(which steps over it when it comes to it), and its tracks join the slot's as they become
-rows. When the slot's work is done, the tagger goes back to where it was. Playing a file
+(which steps over it when it comes to it), or as soon as its root's walk begins, and its
+tracks join the slot's as they become rows. When the slot's work is done, the tagger goes back to where it was. Playing a file
 prioritizes it: `blackwing` hears `PlayerEnqueue` and says so to the library.
 
 **Overrides.** The user's corrections are the one thing here that is not a cache. They
@@ -239,8 +241,12 @@ Header `korvid/blackwing_library/module.h`: `blackwing_library_module`, the reco
 - **A change on a local disk is in the index within a second or so**: a file added or
   changed 0.6 s, moved 0.4 s, removed 0.6 s, a directory removed 0.35 s, with the quiet
   moment at 0.3 s (in the tests); with the default second, add 0.7 s.
-- **Watching a large root costs its first walk some time**: the watcher's watches are set
-  up while the walk runs (fifty thousand files: found by name at 2.3 s instead of 1.6).
+- **A root is watched, then walked**, so a file made between the walk's listing of its
+  directory and that directory's watch is not missed. Watching a large root costs its first
+  walk that time (fifty thousand files: found by name at 2.5 s instead of 1.6).
+- **The watcher's reports through a link to a directory are dropped**: the engine's watcher
+  follows such links (KR16), and the walk does not, so a file seen through one is not the
+  root's.
 - **What is kept goes with the generation**: while a scan commits, an open grouping or
   search is made again with each refill.
 - **A root is walking, then reading, then idle**, and `LibraryScanFinished` comes when it is
@@ -286,17 +292,27 @@ one added while stopped, found by the start-up walk; the root emptied (offline, 
 rows still found and marked offline) and filled again (idle, nothing read again); and a root
 polled every half second finding a new file. Then a wide search replaced at once by a narrow one for the same window, forty times over
 four thousand files: only the narrow one is ever shown (and nearly every wide one is
-stopped in sqlite).
+stopped in sqlite). Last, the corpus, scanned whole: the codec's good and broken files,
+three hundred spoiled copies of a FLAC and an MP3, hostile tags as files (a field a
+thousand times, text not in its encoding, a hundred megabytes of art in a sparse file; the
+rest of the hostile tags are `blackwing_tags`' own tests, on bytes), and the odd tree (a path
+past a thousand bytes, ten thousand files in one directory, a link that loops, a locked
+directory, a name that is not UTF-8, a file written while it is read). Every one of its
+10,351 audio files is one row, with its tags or a reason; 12 MB is read of it, the art not
+at all; the scan takes about four seconds.
 Clean under ASan, UBSan and TSan.
 
-`kormake test blackwing_library --heavy [-- DIR]` makes fifty thousand files (once, under
-`build/library-heavy` unless a directory is given) and measures, from `LibraryAddRoot` on
+`kormake test blackwing_library --heavy [-- DIR [DATA]]` makes fifty thousand files (once,
+under `build/library-heavy` unless a directory is given; the index under `DIR/data`, or
+`DATA`) and measures, from `LibraryAddRoot` on
 an empty index, when two chosen tracks are found by name and heard through the player; a
 folder of twenty prioritized as the tags pass starts, and how soon its tags are in; the
 walk and the tags pass; the index's size; the second start; windows of 100 at the start,
 middle and end of every view and order; and the disk run: the files
 out of the page cache and a long track played from the same disk through a whole scan,
-with no underrun.
+with no underrun. `-- --real MUSIC DATA` instead reads a real library, read only (its
+files out of the page cache first, the index in `DATA`), and says how long the walk and
+the reads took, how much was read, and why any file has no audio.
 
 ## Not in this module
 

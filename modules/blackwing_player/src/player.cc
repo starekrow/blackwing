@@ -903,6 +903,12 @@ void advance(TickContext& ctx, Player& p, KTable* queue) {
         if (it.state == PlayerItemState::Reading && it.base && it.piece[0] == Piece::There) {
             // The head: as much as decoder_for needs to say, which the first piece tells.
             if (!it.head) it.head = decoder_head_bytes(Span<const u8>(it.base, (u32)piece_len(p, it, 0)), it.size);
+            // Tags in a row in front: the head grows as each one's header is seen.
+            while (it.head <= 0xFFFFFFFFull && sparse_has(span_of(p, it), 0, it.head)) {
+                u64 more = decoder_head_bytes(Span<const u8>(it.base, (u32)it.head), it.size);
+                if (more <= it.head) break;
+                it.head = more;
+            }
             if (sparse_has(span_of(p, it), 0, it.head)) {
                 if (it.head <= 0xFFFFFFFFull) it.decoder = decoder_for(Span<const u8>(it.base, (u32)it.head));
                 if (!it.decoder) {

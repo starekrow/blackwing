@@ -138,7 +138,7 @@ bool mp3_probe(Span<const u8> head) {
         if (t > head.len - off) return false;
         off += t;
     }
-    for (u32 zeros = 0; off < head.len && head.data[off] == 0 && zeros < 64; ++zeros) ++off; // padding past a tag's size
+    for (u32 zeros = 0; off < head.len && head.data[off] == 0 && zeros < (1u << 16); ++zeros) ++off; // padding past a tag's size (decoder_head_bytes')
     return head.len - off >= 4 && layer3_header(head.data + off);
 }
 

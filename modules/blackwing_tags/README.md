@@ -104,7 +104,7 @@ Header `korvid/blackwing_tags/tags.h`:
 | `TagStatus` | enum | `Done`, `Wait` |
 | `TagRead` | record | `status`, `need`, `values`, `pictures`, `sources` (a bit each), `problem` |
 | `kTagReadMemory` | constant | the memory a read wants: 1.5 MB |
-| `tags_read(file, memory, last)` | function | every tag in a file, or the next range |
+| `tags_read(file, memory, last, tail)` | function | every tag in a file, or the next range; with `tail` false, the front only (a FLAC's tags are all there) |
 | `tags_from_path(path, memory)` | function | the guess from a path within a root |
 | `TagMerge`, `tags_merge(values, out)` | record, function | which source wins each field |
 | `tags_find(values, field, source)` | function | the first value of a field from a source |

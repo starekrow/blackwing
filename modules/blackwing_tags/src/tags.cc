@@ -251,7 +251,7 @@ TagRead waiting(const File& f) {
 
 using namespace tags;
 
-TagRead tags_read(const SparseSpan& span, Span<u8> memory, bool last) {
+TagRead tags_read(const SparseSpan& span, Span<u8> memory, bool last, bool tail) {
     Out o;
     if (!layout(o, memory)) { TagRead r; r.problem = "the tag reader was given too little memory"; return r; }
     File f(span, last);
@@ -275,6 +275,7 @@ TagRead tags_read(const SparseSpan& span, Span<u8> memory, bool last) {
     }
 
     // The back: ID3v1, then APEv2 before it, then an ID3v2 tag with a footer before those.
+    if (!tail) { if (f.spent) o.fail("the tags are larger than the reader reads (%llu bytes)", (unsigned long long)kMaxAsked); return finish(o); }
     u64 end = size;
     if (end >= pos + 128) {
         const u8* t = f.get(end - 128, 128);

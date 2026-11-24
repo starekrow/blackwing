@@ -162,6 +162,7 @@ struct LibraryScan {
     u64  cancelled   = 0;  // queries stopped in sqlite by a newer one for their window
     u64  files_found = 0;  // audio files found by the walk since start-up
     u64  tags_read   = 0;  // tracks whose tags have been read since start-up
+    u64  bytes_read  = 0;  // what the tags pass has read of the files, since start-up
     u64  unread      = 0;  // tracks whose tags are still to be read, across every root
     f64  names_per_second = 0.0; // files the walk found, a second, over the last second
     f64  tags_per_second  = 0.0; // tracks read, a second, over the last second

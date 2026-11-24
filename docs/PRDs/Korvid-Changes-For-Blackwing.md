@@ -344,6 +344,46 @@ With it, a fix found on the way: a module's heavy tests now take its `test_deps`
 test's `test_deps` bring their externals (the library's tests take the player, which takes
 PipeWire).
 
+## Found in building slice 3
+
+Nov 23, 2026. Found at slice 3's close; neither blocks it. Not yet put to Korvid.
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR15 | `io_make_dirs` takes a path as long as the platform allows | `platform` | P2 |
+| KR16 | `FsWatcher` does not follow links to directories, or says a path came through one | `platform` | P1 |
+
+### KR15: deep directories
+
+**What was run into.** `io_make_dirs` copies its path into a 1024-byte buffer and fails
+on anything longer, though Linux allows 4095 and the rest of the I/O layer takes them
+(KR4). The library's override files mirror each root by its path inside Blackwing's
+data, so a directory whose path is near a thousand bytes under its root cannot have its
+overrides saved; the corpus has one. The corpus test makes its deep tree with `mkdir`.
+
+**What is asked.** The same limit as the rest of `io`.
+
+**Workaround today.** None needed for real libraries; an override in such a directory
+fails to save, with a message.
+
+### KR16: the watcher and links
+
+**What was run into.** The corpus has a link inside a root that points at the root. The
+library's walk never follows a link to a directory (KR11 says which entries are links).
+`FsWatcher` does: it watched the tree through the link, again and again down to the
+length limit, and reported a file written in the root as
+`tree/loop/tree/loop/.../growing.flac` as well, which the library took for a second file.
+Each pass round the loop is another set of inotify watches, from a limit of 8192 on older
+kernels.
+
+**What is asked.** That a recursive watch does not descend through a link to a
+directory, as the walk does not; or, if following is wanted somewhere, an option, and a
+way to tell which reported paths came through one.
+
+**Workaround today.** The library drops any event whose path within the root passes
+through a link, asking each directory once of its parent's listing. The watches spent on
+the loop are still spent.
+
 ## Not asked for, and worth knowing
 
 - **`engine_frame` and `platform_pump` were all a custom loop needed.** The comment in

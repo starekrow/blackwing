@@ -21,12 +21,27 @@ const DecoderDesc* decoder_for(Span<const u8> head) {
 }
 
 u64 decoder_head_bytes(Span<const u8> first, u64 size) {
-    u64 want = 64;
-    if (first.len >= 10 && memcmp(first.data, "ID3", 3) == 0 && !((first.data[6] | first.data[7] | first.data[8] | first.data[9]) & 0x80)) {
-        const u8* h = first.data;
-        u64 tag = 10 + (((u64)h[6] << 21) | ((u64)h[7] << 14) | ((u64)h[8] << 7) | h[9]) + ((h[5] & 0x10) ? 10u : 0u);
-        want = tag + 64;
+    // Past every ID3v2 tag in a row (iTunes has been seen to write two), as far as `first`
+    // shows them: a tag whose header is beyond it is asked for, header and all, and the
+    // caller asks again with more.
+    u64 at = 0;
+    for (u32 tags = 0; tags < 4; ++tags) {
+        if (at + 10 > first.len) { if (tags) { u64 w = at + 10; return w < size ? w : size; } break; }
+        const u8* h = first.data + at;
+        if (memcmp(h, "ID3", 3) != 0 || ((h[6] | h[7] | h[8] | h[9]) & 0x80)) break;
+        at += 10 + (((u64)h[6] << 21) | ((u64)h[7] << 14) | ((u64)h[8] << 7) | h[9]) + ((h[5] & 0x10) ? 10u : 0u);
     }
+    // And past zeros after them: padding a tag did not count in its size (iTunes again, some
+    // hundreds of bytes), up to kPadding of it.
+    constexpr u64 kPadding = 1u << 16;
+    u64 zeros = 0;
+    while (at + zeros < first.len && zeros < kPadding && first.data[at + zeros] == 0) ++zeros;
+    if (!at) zeros = 0; // only after a tag
+    if (zeros && at + zeros == first.len && zeros < kPadding && first.len < size) {
+        u64 w = first.len + 4096; // the zeros go on past what was given: ask for more
+        return w < size ? w : size;
+    }
+    u64 want = at + zeros + 64;
     return want < size ? want : size;
 }
 

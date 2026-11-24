@@ -144,6 +144,26 @@ void test_mp3_tags(TestCtx& c) {
     }
     kvtest::drop(big);
 
+    // Two tags in a row, and a tag followed by zeros it did not count (both iTunes'): the
+    // head, asked for again until it stops growing, is enough to tell; the same samples.
+    auto head_of = [](const File& f) {
+        u64 n = 10;
+        for (u64 more; (more = decoder_head_bytes(Span<const u8>(f.data, (u32)n), f.len)) > n;) n = more;
+        return Span<const u8>(f.data, (u32)n);
+    };
+    File inner = behind_tag(plain, 300);
+    File twice = behind_tag(inner, 9000);
+    File padded = behind_tag(plain, 900);
+    memset(padded.data + 10, 0, 890);
+    padded.data[9] = 100; padded.data[8] = 0; padded.data[7] = 0; padded.data[6] = 0; // 100 bytes said; 790 zeros after
+    for (const File* f : {&twice, &padded}) {
+        KV_CHECK(c, decoder_for(head_of(*f)) == &kMp3);
+        Pcm p = decode_mp3(f->bytes());
+        KV_CHECK(c, same_pcm(p, want) && p.status == DecodeStatus::End);
+        drop(p);
+    }
+    kvtest::drop(inner); kvtest::drop(twice); kvtest::drop(padded);
+
     // A VBRI header where the Info frame was: its length, and no gapless trim.
     File vbr = mp3("vbr_44100_2ch.mp3"), vbri = mp3("vbri_44100_2ch.mp3");
     Pcm a = decode_mp3(vbr.bytes()), b = decode_mp3(vbri.bytes());

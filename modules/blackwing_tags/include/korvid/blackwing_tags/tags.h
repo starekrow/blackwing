@@ -94,7 +94,9 @@ constexpr u32 kTagReadMemory = 3u << 19; // 1.5 MB
 // be read is, and the problem says what could not. A file with no tags is Done with no
 // values. Ceilings, so no file can make it read for ever: 2048 frames or items in a tag,
 // 256 KB in one, 4 MB asked for in all, 1024 values, 64 of one field from one source.
-TagRead tags_read(const SparseSpan& file, Span<u8> memory, bool last = false);
+// With `tail` false the back of the file is not looked at (a FLAC's tags are at its front),
+// which spares a reader the seek to it.
+TagRead tags_read(const SparseSpan& file, Span<u8> memory, bool last = false, bool tail = true);
 
 // Guesses from `path`, a file's path within its root with '/' between names (any bytes:
 // what is not UTF-8 becomes U+FFFD): its name and its parent directories. The common
