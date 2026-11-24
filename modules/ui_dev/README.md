@@ -4,10 +4,15 @@ The development face: a plain, dense, complete window over the player and the li
 It is built first, and it is how the rest is developed. It reads their tables and emits
 their commands, and calls no function of either.
 
-**Status:** slice 4, milestone 6. Every panel is in: Transport, Library, Queue and
-Output, and in tabs under Output, Chain, Scan, Events and Tables; and its part of the
-session. What is left of the [slice](../../docs/PRDs/Blackwing-Slice-4-PRD.md) for this
-module is the keyboard and the close's runs.
+**Status:** built in slice 4. Every panel is in: Transport, Library, Queue and Output,
+and in tabs under Output, Chain, Scan, Events and Tables; its part of the session; the
+keyboard. Owed: the queue reordered by dragging, and the
+[slice's](../../docs/PRDs/Blackwing-Slice-4-PRD.md) runs on real disks and a real
+device.
+
+**The keyboard.** Space plays or pauses, from anywhere but an edit; Ctrl with Left and
+Right seeks ten seconds, with Up and Down goes a row back and on, with S stops. Every
+control is reached by Tab and worked with Space or Enter.
 
 ## How it works
 
@@ -146,9 +151,9 @@ tests, with a stand-in.
 | `ui_dev_screen(e)`, `ui_dev_ready(e)` | the screen's name in Krome; whether it is built and written |
 | `ui_dev_stats(e)` | model writes, commands, ticks looked at and passed over, panels standing in, whether the screen failed |
 
-On the engine's command line: `face press ID` presses a control by its id, `face show
-KEY` prints a model value as the screen shows it, `face stats` prints what the face and
-Krome have done. A real window can be driven and read by a script through them.
+On the engine's command line: `face press ID` presses a control by its id, `face wheel
+ID NOTCHES` turns the wheel over one, `face show KEY` prints a model value as the screen
+shows it, `face stats` prints what the face and Krome have done. A real window can be driven and read by a script through them.
 
 What it registers: `ui_dev.sync` (PostSim; reads the player's two resources and four
 tables and the library's resource and two tables; emits `LibraryQuery`,

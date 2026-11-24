@@ -31,6 +31,7 @@ void transport_sync(TickContext& ctx, Face& f) {
     if (!t) return;
     char text[96];
     face_set(f, "t_state", transport_state_text(t->state));
+    f.playing = t->state == (u8)PlayerState::Playing || t->state == (u8)PlayerState::Starting;
     face_clock(text, sizeof text, t->position, t->rate);
     face_set(f, "t_pos", text);
     face_clock(text, sizeof text, t->frames, t->rate);
@@ -83,6 +84,8 @@ bool transport_event(TickContext& ctx, Face& f, const KromeEvent& ev) {
                       previous = name_intern("previous"), back = name_intern("back"), on = name_intern("on"), slide = name_intern("slide"),
                       slide_end = name_intern("slide_end"), seek = name_intern("seek");
     Name event{ev.event};
+    static const Name toggle = name_intern("toggle");
+    if (event == toggle)   { if (f.playing) ctx.emit(PlayerPause{}); else ctx.emit(PlayerPlay{}); return true; } // Space: the other of the two
     if (event == play)     { ctx.emit(PlayerPlay{}); return true; }
     if (event == pause)    { ctx.emit(PlayerPause{}); return true; }
     if (event == stop)     { ctx.emit(PlayerStop{}); return true; }

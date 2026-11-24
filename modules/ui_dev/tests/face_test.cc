@@ -223,6 +223,39 @@ void test_face(kv::TestCtx& c) {
         frames(e, 3);
         KV_CHECK(c, player_commands(e) == 2 && p.commands[0].value == -10.0 && p.commands[1].value == 10.0 && standin_count(e, "PlayerSeekBy") == 2);
 
+        // The keyboard. The transport's shortcuts, from anywhere on the screen: Space is play
+        // or pause, whichever it is not; Ctrl with the arrows seeks and skips.
+        auto key = [&](Key k, bool ctrl = false) {
+            if (ctrl) { input_key_override(e, Key::LCtrl, true); frames(e, 1); }
+            input_key_override(e, k, true);
+            frames(e, 1);
+            input_key_override(e, k, false);
+            frames(e, 1);
+            if (ctrl) { input_key_override(e, Key::LCtrl, false); frames(e, 1); }
+            frames(e, 3);
+        };
+        standin_clear(e);
+        key(Key::Space);
+        KV_CHECK(c, player_commands(e) == 1 && standin_count(e, "PlayerPause") == 1); // it is playing: Space pauses
+        p.transport.state = (u8)PlayerState::Paused;
+        frames(e, 2);
+        key(Key::Space);
+        KV_CHECK(c, player_commands(e) == 2 && standin_count(e, "PlayerPlay") == 1);
+        p.transport.state = (u8)PlayerState::Playing;
+        frames(e, 2);
+        standin_clear(e);
+        key(Key::Right, true); key(Key::Left, true); key(Key::Down, true); key(Key::Up, true); key(Key::S, true);
+        KV_CHECK(c, standin_count(e, "PlayerSeekBy") == 2 && standin_count(e, "PlayerNext") == 1 && standin_count(e, "PlayerPrevious") == 1 && standin_count(e, "PlayerStop") == 1 && player_commands(e) == 5);
+        KV_CHECK(c, krome_errors(e)->total == 0); // no shortcut, style or binding of the face's was refused
+        // Every control is reached by Tab, in order, and worked with Space: the first is the first button.
+        standin_clear(e);
+        input_key_override(e, Key::Tab, true); frames(e, 1); input_key_override(e, Key::Tab, false); frames(e, 2);
+        key(Key::Space);
+        KV_INFO("test", "face: Tab then Space sent %u commands: %u previous, %u pause, %u play", player_commands(e), standin_count(e, "PlayerPrevious"), standin_count(e, "PlayerPause"), standin_count(e, "PlayerPlay"));
+        KV_CHECK(c, standin_count(e, "PlayerPrevious") == 1 && player_commands(e) == 1); // the button with the focus, and not the shortcut as well
+        input_key_override(e, Key::Escape, true); frames(e, 1); input_key_override(e, Key::Escape, false); frames(e, 2);
+        input_pointer_override(e, 5, 795, 1); frames(e, 1); input_pointer_override(e, 5, 795, 0); frames(e, 2); // a press on nothing: the focus is let go
+
         // The bar: a press seeks to where it was pressed, a drag seeks as it goes, and while
         // it is held the bar is the pointer's, whatever the position does.
         standin_clear(e);

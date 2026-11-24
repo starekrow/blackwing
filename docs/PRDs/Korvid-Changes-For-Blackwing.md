@@ -59,6 +59,7 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR27 | not asked of Korvid before: found in slice 4, milestone 2 | worked round: a definition named `placeholder` in `ui_dev/widgets.kim` |
 | KR43 | not asked of Korvid before: found in slice 4, milestone 4 | a path typed into the face is refused past 510 bytes, with a line beside the edit |
 | KR44 | not asked of Korvid before: found in slice 4, milestone 6 | the window comes back at its size and not its place; a list comes back at its top |
+| KR45 | not asked of Korvid before: found at slice 4's close | nothing: a present that blocks holds the player's ticks |
 | KR28 to KR42 | not asked of Korvid before: from the skin import note | nothing built: skin import is in no phase |
 
 Where Korvid's answer differs from what was asked:
@@ -704,6 +705,7 @@ Nov 23, 2026. From [slice 4's notes](../design/slice-4-notes.md), as it is built
 | KR27 | The markup check accepts a sparse list's `placeholder` block | `kimb` | P1 |
 | KR43 | A screen's text can be read back whole, whatever its length | `krome` | P2 |
 | KR44 | A window's place can be read and set, and a scroll box's; a user directory can be asked for before the engine starts | `platform_hid`, `krome`, `platform` | P1 |
+| KR45 | A present that blocks does not hold the ticks | `frameloop`, the renderers | P0 for slice 5 |
 
 ### KR26: a still window that sleeps
 
@@ -766,6 +768,28 @@ the caller is told it was not.
 
 **Workaround today.** `ui_dev` refuses a typed path of 511 bytes or more and says so on
 screen. Rows are queued by their tables' paths, which never pass through the model.
+
+### KR45: a present that blocks
+
+**What was run into.** `Pacing::Decoupled` keeps ticks and frames apart in what it
+decides, and they are still one thread. Under XWayland, with the window not really on
+screen, each present waited about a second (the engine's slice 11 notes saw the same
+after a restore). The face asked for a frame a second, the position's digit, so the loop
+spent its time in the renderer: 40 ticks ran in ten seconds where the player had asked
+for 600, and a track sat "starting" for seconds after play was pressed. Minimized, where
+no frame is drawn, it ticked at once. Nothing was heard, because the lead is five
+seconds and the file was in memory. A file still being read, on a slow disk, is fed in
+ticks.
+
+**What is asked.** That a frame cannot cost ticks for longer than a tick or two: a
+present with a deadline that gives up and counts the frame as not drawn; or no frame
+begun while the last has not been taken; or the render on a thread of its own. The
+engine's to choose.
+
+**Done when** a program that asks for ticks and a frame a second, in a window whose
+presents block for a second each, runs its ticks at the clock's rate.
+
+**Workaround today.** None. Blackwing's lead hides a stall of a few seconds.
 
 ### KR44: putting a window back
 

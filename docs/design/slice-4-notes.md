@@ -493,7 +493,7 @@ and the way to where its list is. It has no splitters or column widths to keep.
 | what | |
 |---|---|
 | a thousand rows restored | 18 ticks, 64 rows a tick; the longest tick 0.8 to 1.3 ms |
-| the file for a thousand rows | about 60 KB |
+| the file for a thousand rows | 63 KB |
 | a save while playing (a queue of two) | 3.7 KB, in place 4.3 ms after it was asked for |
 | saves while playing | one every ten seconds (the position), and one 3 s after a change |
 | saves while paused or stopped with nothing changing | none |
@@ -511,4 +511,109 @@ track, the volume at -4 dB, both rows queued. 3.7 s were lost, of a bound of ten
 
 **Tests** (`blackwing_session`, 47 checks; `blackwing_player`'s cue, 16; `ui_dev`'s
 part, 17; clean under `address,undefined`).
+
+## Milestone 7, the close
+
+Nov 23 and 24, 2026. The same machine; `linux-dev` throughout. The close is not whole:
+what needs hardware, an hour, or a hand on the window is listed under "Not done" and is
+still owed.
+
+**The keyboard** (BD23). Space plays or pauses, whichever it is not, from anywhere but an
+edit; Ctrl with Left and Right seeks ten seconds, with Up and Down goes a row back and
+on, with S stops. Every control is reached by Tab in the order it is written, and worked
+with Space or Enter: with a button focused, Space works that button and not the
+shortcut as well (tested). The buttons say their shortcuts in tooltips.
+
+**The titles** (BD26). Thirteen files named in as many ways, added as a root and listed.
+No row broke: each is one line of the right height, clipped to its cell.
+
+| script | what it looks like |
+|---|---|
+| Latin with marks (`Smörgåsbord café`), Greek, Cyrillic | right |
+| combining marks (`Zoe` + U+0308, `e` + U+0301, `n` + U+0303) | right: the marks sit on their letters |
+| Chinese, Japanese, Korean | a replacement box for each character: no font loaded has them |
+| Devanagari, Thai | a box for each character |
+| emoji | a box for each |
+| Arabic | its letters, each in its isolated form, unjoined, and left to right: unreadable |
+| Hebrew | its letters, left to right: every word and line reads backwards |
+| mixed (`Sigur Rós – Hoppípolla (夜) [שלום]`) | the Latin right, a box, the Hebrew backwards |
+
+What the conversation with Krome starts from: fonts for the scripts DejaVu lacks (a
+fallback list a program can add to), right-to-left runs, and shaping for Arabic and the
+Indic scripts. The first is the cheapest and would turn most of a real library's boxes
+into titles.
+
+**Numbers** (the capture device, a window of 1280 x 800, Wayland; a session of a
+thousand rows unless said):
+
+| what | |
+|---|---|
+| start to a face that answers | 1.4 to 1.5 s |
+| start to a thousand rows restored | 1.1 to 1.2 s: before the face answers, and not holding it |
+| memory held, face up, still | 94 to 134 MB resident |
+| memory held, playing | 128 to 167 MB (the files' own bytes among it) |
+| still: wakeups | about 230 a second, 1.7 to 2.7% of a core (KR26) |
+| playing with no face at all | 1.7% of a core |
+| playing, the window hidden | 5.1 to 5.4%: 601 ticks and no frame in ten seconds |
+| playing, the window shown | 7.8%: 602 ticks and 176 frames in ten seconds, the bar moving eight pixels a second, each drawn twice |
+| the scroll's worst frame | 1.6 ms over fifty thousand rows (Krome's build and layout; no renderer) |
+| the scroll, time to filled | one frame after it stops, with a library that answers two frames late |
+| a session's write | 3.7 KB for two rows, 63 KB for a thousand; in place 4.3 ms after it is asked for |
+| how often it writes | 3 s after a change; every 10 s while playing; never otherwise |
+
+**Ninety seconds under a scan, with the face up** (BD27, in part). A six-minute FLAC from
+the built-in disk into the capture device, the fifty-thousand-file test library added as
+a root in the same moment (walked and its tags read while it played), and the wheel
+turned over the Tracks list 2,712 times in the ninety seconds: **no underrun**, the lead
+at 5.00 s at the end, the scan finished, the list at row 34,215 of 50,000. But the
+desktop took the window off screen a few seconds in (it was started from a shell with
+nobody at it, and Wayland suspended its surface): 4,447 of the 5,402 ticks ran hidden,
+with 1,909 frames drawn in the part that was seen. So this is a run of the scan, the
+wheel's events and a hidden window, and only partly of a window being drawn.
+
+**Found: a present that blocks holds the ticks.** Under X11 (XWayland here) the same
+measurement left the player "starting" for seconds after play was pressed, with 40 ticks
+in ten seconds where 600 were owed. The window was not really on screen, each present
+waited about a second for it (Korvid's own notes have this), and the loop is one thread:
+while it waits in the renderer no tick runs. Nothing was heard go wrong, because the
+lead is five seconds and the file was all in memory; with a file still being read it
+would have been. Hidden, it ticked at once. This is the one way found for a window to
+cost the audio path something, and it is the engine's: KR45.
+
+**Not done, and owed:**
+
+- **The three disks with the window as the load** (BD22): the built-in disk was run as
+  above; the USB disks were not touched. `stress-play.sh` writes a load file of two
+  gigabytes beside the music and plays through the default device, and neither is
+  something to do on someone's disks and speakers unasked.
+- **Anything through a real device.** Every run in this slice is on the capture device.
+  PipeWire was not played into once.
+- **The window resized through a run**, and a window minimized by hand: the engine cannot
+  resize one, and the runs were driven from a shell.
+- **The hour** (BD27).
+- **The queue reordered by dragging** (BD24). A row moves by its `up` and `down`
+  buttons.
+- **A ship build's numbers.** All of the above are a dev build's.
+- **Windows and macOS.** Slice 5.
+
+### The exit criteria
+
+| criterion | |
+|---|---|
+| Everything can be driven from the face | met: `ui_dev`'s test over the player, the library and the glue, which emits no command. Reordering is by buttons, not a drag |
+| Everything can be watched from it | met: the eight panels |
+| Anything published is visible without a panel written for it | met: Tables, from the field tables; a new table needs its name in two places |
+| The face is a customer and nothing more | met: the tests against stand-ins, with neither module in the engine |
+| A script does the same with no face | met: `pass.lua`, `walk.lua`, and `blackwing run` with no display |
+| Fifty thousand rows scroll | met in the test (1.6 ms, placeholders, filled a frame after rest); in a real window only as the run above |
+| A control answers in the frame it is touched | met: the knob is the pointer's, the readout what is heard |
+| Still is free | met for frames and layouts; not for wakeups (KR26) |
+| Hidden is asleep | met |
+| The window never costs a glitch | no underrun in any run; not shown on three disks, a real device or under a resize; and KR45 |
+| A broken face is not a broken player | met |
+| Every failure has a place on screen | met, but for an override file set aside, which the library does not publish |
+| It comes back as it was left | met, but for the window's place and the list's (KR44) |
+| Killed, it loses seconds | met: 3.7 s of a bound of ten, by `kill -9` |
+| A session that cannot be read is set aside | met |
+| It still runs with no display | met |
 

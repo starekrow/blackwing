@@ -17,6 +17,8 @@
 #include "korvid/kim/kim.h"
 #include "korvid/krome/krome.h"
 #include "korvid/platform_hid/events.h"
+#include "korvid/platform_hid/module.h"
+#include <stdlib.h>
 #include <string.h>
 
 namespace kv {
@@ -300,6 +302,15 @@ void cmd_press(CliContext& ctx, Span<const char* const> args) {
     engine_want_ticks(*ctx.engine);
     engine_want_frame(*ctx.engine);
 }
+// The wheel turned over a control: a list scrolled, as a hand would scroll it.
+void cmd_wheel(CliContext& ctx, Span<const char* const> args) {
+    Face* f = face(*ctx.engine);
+    rect2 r{};
+    if (args.len != 2 || !f || f->screen.is_null() || !krome_find_rect(*ctx.engine, f->screen, args[0], &r)) { ctx.fail("face wheel <a control's id> <notches, negative down>"); return; }
+    input_pointer_override(*ctx.engine, r.x + r.w * 0.5f, r.y + r.h * 0.5f, 0, (f32)atof(args[1]));
+    engine_want_ticks(*ctx.engine);
+    engine_want_frame(*ctx.engine);
+}
 void cmd_show(CliContext& ctx, Span<const char* const> args) {
     Face* f = face(*ctx.engine);
     if (args.len != 1 || !f || f->screen.is_null()) { ctx.fail("face show <a model key>"); return; }
@@ -315,6 +326,7 @@ void cmd_stats(CliContext& ctx, Span<const char* const>) {
 }
 constinit const CliCommandDesc k_commands[] = {
     {.name = "face press", .help = "<id> presses a control of the face by its id, as a click would", .fn = cmd_press},
+    {.name = "face wheel", .help = "<id> <notches> turns the wheel over a control: a list scrolled", .fn = cmd_wheel},
     {.name = "face show", .help = "<key> a value of the face's model, as the screen shows it", .fn = cmd_show},
     {.name = "face stats", .help = "what the face has done: model writes, commands, layouts, paints", .fn = cmd_stats},
 };

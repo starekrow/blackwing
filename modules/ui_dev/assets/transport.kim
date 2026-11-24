@@ -18,14 +18,16 @@ def transport-panel {
             text "{t_pos} / {t_len}" id=t_time [dev-value] w=110 right
         }
         row gap=6 middle w=fill {
-            dev-btn "Prev" id=previous -> previous
-            dev-btn "Play" id=play -> play
-            dev-btn "Pause" id=pause -> pause
-            dev-btn "Stop" id=stop -> stop
-            dev-btn "Next" id=next -> next
-            dev-btn "-10 s" id=back -> back
-            dev-btn "+10 s" id=on -> on
+            dev-btn "Prev" id=previous -> previous key="mod+up" tooltip="the row before (Ctrl+Up)"
+            dev-btn "Play" id=play -> play tooltip="play, or on from a pause"
+            dev-btn "Pause" id=pause -> pause tooltip="hold the playhead"
+            dev-btn "Stop" id=stop -> stop key="mod+s" tooltip="stop (Ctrl+S)"
+            dev-btn "Next" id=next -> next key="mod+down" tooltip="the row after (Ctrl+Down)"
+            dev-btn "-10 s" id=back -> back key="mod+left" tooltip="ten seconds back (Ctrl+Left)"
+            dev-btn "+10 s" id=on -> on key="mod+right" tooltip="ten seconds on (Ctrl+Right)"
             dev-slider id=seek @t_bar w=fill
+            // Space plays and pauses, from anywhere but an edit: a control of its own, of no size.
+            hit id=toggle -> toggle key="space" nofocus w=0 h=0
         }
     }
 }

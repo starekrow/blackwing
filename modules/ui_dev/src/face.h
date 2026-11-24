@@ -62,6 +62,7 @@ struct Face {
     // drawn against, which is what a place on it means.
     bool    seek_drag = false;
     u64     bar_frames = 0;
+    bool    playing = false;   // as the transport last said: what Space is the other of
     // Queue: the rows its list has built, as it last said.
     u32     q_first = 0, q_count = 0;
     // The queue's titles: what the library was asked of the rows in view (their paths, by

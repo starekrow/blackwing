@@ -443,7 +443,10 @@ Slices, as a proposal; each gets its own PRD when it starts.
    within seconds, and nothing in the corpus stops the scan.
    *Built* Nov 23, 2026, through milestone 8; the slice's PRD has what is still owed.
 4. **The development face** ([Blackwing-Slice-4-PRD.md](Blackwing-Slice-4-PRD.md)). `ui_dev` over the API and nothing else; the
-   window; the session (B28).
+   window; the session (B28). Built Nov 24, 2026, its close in part: the PRD's "As built"
+   and "Owed" say what, and what it changed in the API (paths of any length, a row of
+   any kind queued in one command, the queue's titles from the library, parameters that
+   describe themselves, `PlayerCue`).
    *Done when* everything in slices 1 to 3 can be driven and watched from it, and from a
    Lua script with no face at all, and it starts as it was left.
 5. **The system.** `media_platform`; the Windows and macOS backends of both platform

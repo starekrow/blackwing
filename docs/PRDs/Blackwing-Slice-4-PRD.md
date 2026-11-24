@@ -1,6 +1,6 @@
 # Blackwing Slice 4 — The development face
 
-Nov 23, 2026 · draft, first review folded in
+Nov 23, 2026 · draft, first review folded in · built Nov 23 and 24, the close in part: see [As built](#as-built)
 
 ## Goal and exit criteria
 
@@ -512,3 +512,56 @@ The draft's other choices, not yet argued with:
 - **Whether the Events panel shows commands too**, or only what the two modules emit.
   Commands are what a face author most wants to see.
 - **Requirement IDs.** `BD`, after `BS`, `BR` and `BL`.
+
+## As built
+
+Nov 24, 2026. Milestones 1 to 6 are built and tested; the close is in part. The findings
+and every number are in [the notes](../design/slice-4-notes.md), with the exit criteria
+one by one at their end.
+
+**The open questions, as they were closed:**
+
+- **The loop**: Korvid's frame loop paced `Decoupled`, with a face; the loop `blackwing`
+  had, with none, over an engine that holds no window module. Both tick while a module
+  asks (`engine_want_ticks`).
+- **Where queueing a whole row lives**: a command of the library's (`LibraryCollect`)
+  that answers with paths, forwarded to the player by `blackwing_glue`, which is a
+  module now.
+- **How the long path is carried**: a longer field, 4096 bytes, in every event and row
+  that holds a path.
+- **The session's format**: a file of its own, JSON, in the settings directory; not the
+  engine's settings store.
+- **Whether the session is saved headless**: yes, for `library` kept open.
+- **How a face hands over its part**: events, `SessionKeep` and `SessionKept`.
+- **Scripts that read top to bottom**: `kv.steps`, shipped as part of `run`.
+- **How often the position is written**: by the digit and the pixel. The pixel is dear:
+  eight a second on a two-minute track, each drawn twice.
+- **Whether a face's Lua should read tables itself**: not asked. `ui_dev` is about 1,900
+  lines of C++ for eight panels, most of it formatting; the cost was not the carrying.
+- **Whether the Events panel shows commands**: it does.
+- **The numbers**: as measured, in the notes.
+
+**New modules**: `ui_dev` (the face), `blackwing_window`, `blackwing_glue`,
+`blackwing_session`, `blackwing_script`.
+
+**What the API gained**, each because a customer needed it: field tables for the three
+resources; `player.params` and `player.presets`, `PlayerApplyPreset`, a parameter's
+step and unit; `player.output`'s `bits`; `PlayerCue`; a parameter heard at once when
+nothing sounds; `LibraryPath` and the `Paths` view; `LibraryCollect` and
+`LibraryCollected`; paths of any length; `library.scan`'s `slot` made true.
+
+**What the engine is asked** beyond KR17 to KR25: KR26 (a still window polls), KR27 (the
+check and `placeholder`), KR43 (a text read back whole), KR44 (a window's place, a
+list's, a directory before the engine), KR45 (a present that blocks holds the ticks).
+
+## Owed, as of the close
+
+- BD22: the three disks with the window as the load; a real device; a resize through a
+  run.
+- BD24: the queue reordered by dragging.
+- BD27: the hour; and ninety seconds under a scan with the window seen throughout.
+- A ship build's numbers.
+- The window's place and a list's (KR44); an override file set aside shown in a face
+  (the library does not publish it); an artist's tracks with no album in a view.
+- Still owed from before: BR22, BL23, BL25, KR15, KR16.
+

@@ -53,7 +53,7 @@ clear`, `player stop`, `player status`, `library add DIR`, `library remove ROOT`
 status`, `library find WORDS`, `library play N` (the N-th the last find listed), `library
 override N FIELD [VALUE...|--clear]` (no value hides the field), `quit`; and with a
 face, `window status [reset]`, `window minimize`, `window restore`, `window stall
-SECONDS`, `face press ID`, `face show KEY`, `face stats`. Ctrl-C stops cleanly, and so does closing the window. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
+SECONDS`, `face press ID`, `face wheel ID NOTCHES`, `face show KEY`, `face stats`. Ctrl-C stops cleanly, and so does closing the window. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
 a bad command line, 3 if a dev build leaked; with `run`, the script's own.
 
 ## How it works

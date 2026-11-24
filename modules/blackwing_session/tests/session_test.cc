@@ -170,6 +170,7 @@ void test_session(kv::TestCtx& c) {
         a.stop(); // quit: saved at exit
     }
     KV_CHECK(c, file_rows(file) == 1000);
+    { IoStat st; if (io_stat(file, &st)) KV_INFO("test", "session: the file for a thousand rows is %llu bytes", (unsigned long long)st.size); }
     {
         Run b;
         KV_CHECK(c, b.start(dir));
