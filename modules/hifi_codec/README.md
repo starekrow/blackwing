@@ -266,3 +266,4 @@ the delay and padding (`hifi`). The other codecs (P1).
   in a decoder": why it waits and seeks.
 - [Slice 3](../../docs/PRDs/Blackwing-Slice-3-PRD.md), "MP3": what was asked of it.
 - [src/vendor](src/vendor/README.md): where dr_flac and dr_mp3 came from and how to upgrade them.
+- [The script surface](SCRIPT.md): the decoder contract and the sparse file as a script sees them. A draft.

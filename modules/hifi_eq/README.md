@@ -93,3 +93,4 @@ their values (`blackwing_player`, `player.chain`).
 
 - [hifi](../hifi/README.md), "Stages" and "The aligned recut".
 - [Slice 2](../../docs/PRDs/Blackwing-Slice-2-PRD.md), "Volume and the equalizer".
+- [The script surface](SCRIPT.md): the built-in stages' parameters and the presets, from Lua. A draft.

@@ -35,6 +35,10 @@ blackwing_player            blackwing_library
 hifi_codec  hifi_platform
 ```
 
+A module that a script module can reach has a `SCRIPT.md` beside its README: what it
+shows a script, by name. They hang from
+[the script-module spec](../docs/specs/script-modules.md), a draft.
+
 Three layers. `hifi*` is the audio path and knows nothing of music collections or
 players. `blackwing_player` is a player with no face and no library, which another
 project could link. `blackwing`, the library and the faces are the application around

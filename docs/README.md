@@ -14,4 +14,6 @@ plans in `PRDs/`, dated design records in `design/`, a page per module beside it
 | [design/slice-1-notes.md](design/slice-1-notes.md) | what building slice 1 found, with the numbers |
 | [design/slice-2-notes.md](design/slice-2-notes.md) | what building slice 2 found, with the numbers |
 | [design/slice-3-notes.md](design/slice-3-notes.md) | what building slice 3 found, with the numbers |
+| [design/script-module-requirements-2026-11-23.md](design/script-module-requirements-2026-11-23.md) | what the script-module spec has to settle, and the decisions it starts from |
+| [specs/script-modules.md](specs/script-modules.md) | draft: the script-module spec's spine, linking to a `SCRIPT.md` beside each module with a surface |
 | [../modules/README.md](../modules/README.md) | the modules and how they depend on each other |

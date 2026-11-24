@@ -306,3 +306,4 @@ Reading files, the queue and what plays next (`blackwing_player`). Devices
   capture device the tests use.
 - [hifi_codec](../hifi_codec/README.md): the decoder contract sources are read through.
 - [Slice 1](../../docs/PRDs/Blackwing-Slice-1-PRD.md): what this is being built for.
+- [The script surface](SCRIPT.md): the stage contract as a script writes it. A draft.

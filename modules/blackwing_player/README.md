@@ -202,3 +202,4 @@ library. Playlists and a saved session (later in P0).
 - [hifi](../hifi/README.md): what the player drives, and where its sense of time comes from.
 - [blackwing](../blackwing/README.md): the executable around it.
 - [The master PRD](../../docs/PRDs/Blackwing-Master-PRD.md), "The player as an API".
+- [The script surface](SCRIPT.md): what a script module sees of the player: its commands, notifications, tables and resources from Lua. A draft.

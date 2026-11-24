@@ -161,3 +161,4 @@ finds `cover.jpg`). Writing tags (P1).
 - [The master PRD](../../docs/PRDs/Blackwing-Master-PRD.md), "Tags".
 - [hifi_codec](../hifi_codec/README.md): the sparse span, and the decoder contract this is
   the cousin of.
+- [The script surface](SCRIPT.md): the names, the ranking and the readers, from Lua. A draft.

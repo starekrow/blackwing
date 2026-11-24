@@ -355,7 +355,8 @@ Mobile is out of scope, and these keep it possible:
 - Files reach decoders and tag readers as handles the player was given, not as paths
   they open, so a sandboxed container or a picked document works.
 - Nothing in P0's design needs a second process. P1's native modules are an addition on
-  the desktop; script modules are the phone's form of them.
+  the desktop. Script modules run on every platform, and are the only kind the phone can
+  load.
 - The faces are separate modules, so a touch face is a fifth one.
 - The pipeline's memory (the lead, the preload) is capped by a number, not by "a track".
 - An interruption (a call, another app taking the audio) is already an event.
@@ -398,7 +399,7 @@ Mobile is out of scope, and these keep it possible:
 | B31 | Native modules (decoders, DSPs) loaded at runtime, each in a sandboxed process, audio over shared rings, output treated as hostile | P1 |
 | B31a | Someone else's native codec runs as such a module, on the decoder contract, with no change to the player | P1 |
 | B32 | A module that hangs or crashes is bypassed or respawned mid-song, and named | P1 |
-| B33 | Script modules loaded at runtime | P1 |
+| B33 | Script modules loaded at runtime, the same module on every platform, treated as hostile: in a sandboxed process on the desktop, in their own Lua state on the phone | P1 |
 | B34 | Exact mode: pinned floating-point behaviour and seeded dither, so a pipeline's output is reproducible bit for bit | P1 |
 | B35 | The indicator's third state, measured rather than declared | P1 |
 | B36 | A/B of two stacks on aligned input: instant switch, level-matched ABX, live null | P1 |
@@ -533,6 +534,20 @@ Nov 23, 2026, by slice 3.
   slot through glue in `blackwing`; the player and the library do not know each other.
 - **A walk does not follow a link to a directory**, so it cannot loop or leave its root.
 - **MP3 reports 24 bits**, from the decoder's floats.
+
+Nov 23, 2026, on script modules. The requirements for their spec are in
+[the design record](../design/script-module-requirements-2026-11-23.md).
+
+- **Script modules are a form of module on every platform**, not only the phone's: one
+  module runs unchanged wherever Blackwing does.
+- **Their environment reflects the inside**: the same events, tables and contracts native
+  code uses, with nothing script-only.
+- **They are hostile by default**: wide reads, narrow writes, no exits, and no network in
+  P1.
+- **Out of process on the desktop**, in the native guests' sandbox; an in-process Lua
+  state on the phone.
+- **Each surface has a semantic version**, and a module declares the ranges it needs.
+- **Script DSP is best effort** until there are numbers that say different.
 
 ## Open
 

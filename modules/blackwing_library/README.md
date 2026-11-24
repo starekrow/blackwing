@@ -324,3 +324,4 @@ glues them: `library play`). Any face.
 - [Slice 3](../../docs/PRDs/Blackwing-Slice-3-PRD.md): the plan this module follows.
 - [blackwing_tags](../blackwing_tags/README.md): the readers and the guess from a path.
 - [src/vendor](src/vendor/README.md): where sqlite came from.
+- [The script surface](SCRIPT.md): what a script module sees of the library, and how its windows are kept apart from a face's. A draft.
