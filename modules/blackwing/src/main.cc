@@ -3,6 +3,8 @@
 //   blackwing [options]                  the window, with the development face
 //   blackwing [options] play FILE...     plays the files in order and exits after the last
 //   blackwing [options] library [DIR...] keeps the library (adding DIRs to it) until quit
+//   blackwing [options] run FILE.lua [ARG...]  runs a script over the player and the library,
+//                                        to the code it ends with (kv.quit, or 1 if it raises)
 //   blackwing help                       the commands the engine knows
 //
 //   --face NAME          which face is up: dev, or none (no window). Without a command it is
@@ -32,6 +34,7 @@
 #include "korvid/blackwing/module.h"
 #include "korvid/blackwing_library/library.h"
 #include "korvid/blackwing_player/player.h"
+#include "korvid/blackwing_script/host.h"
 #include "korvid/cli/module.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/cli.h"
@@ -254,6 +257,7 @@ void usage() {
     fputs("usage: blackwing [options]                  the window, with the development face\n"
           "       blackwing [options] play FILE...\n"
           "       blackwing [options] library [DIR...]\n"
+          "       blackwing [options] run FILE.lua [ARG...]\n"
           "       blackwing help\n"
           "options: --face dev|none, --device NAME, --capture-to FILE, --lead SECONDS, --data DIR, --verbose, --trace-events,\n"
           "         --run-seconds N, --cli-port N; with a face: --size WxH, --renderer auto|gpu|cpu, --screenshot FILE,\n"
@@ -273,7 +277,7 @@ bool have_display() {
 
 // The engine with no face: the modules a machine with no display can start. The frame
 // loop, the window, Krome and the faces are linked in and left out.
-constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "blackwing"};
+constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "script", "blackwing"};
 constinit const ModuleDesc* g_headless[KV_COUNTOF(k_headless)] = {};
 Span<const ModuleDesc* const> headless_modules() {
     u32 n = 0;
@@ -352,8 +356,9 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     bool help = strcmp(command, "help") == 0;
     bool play = strcmp(command, "play") == 0;
     bool library = strcmp(command, "library") == 0;
+    bool script = strcmp(command, "run") == 0;
     bool bare = !command[0];
-    if ((!bare && !help && !play && !library) || (play && first + 1 >= argc) || lead <= 0.0) { usage(); return 2; }
+    if ((!bare && !help && !play && !library && !script) || ((play || script) && first + 1 >= argc) || lead <= 0.0) { usage(); return 2; }
     if (!face) face = bare ? "dev" : "none";
     bool window = strcmp(face, "dev") == 0;
     if (!window && strcmp(face, "none") != 0) { fprintf(stderr, "blackwing: there is no face called %s (dev, none)\n", face); return 2; }
@@ -365,9 +370,17 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         fputs("blackwing: there is no display; running with no face\n", stderr);
         window = false;
     }
-    g_keep = library || window; // a face, or a kept library: the end of the queue is not the end of the run
+    g_keep = library || window || script; // a face, a kept library or a script: the end of the queue is not the end of the run
     g_start_args = argv + first + 1;
-    g_start_count = bare || help ? 0 : argc - first - 1;
+    g_start_count = bare || help || script ? 0 : argc - first - 1;
+    // A script: the file, and what follows it as its arguments. It ends the run itself.
+    ScriptHostConfig sc;
+    if (script) {
+        sc.file = argv[first + 1];
+        sc.args = (const char* const*)(argv + first + 2);
+        sc.nargs = (u32)(argc - first - 2);
+    }
+    script_host_configure(sc);
     g_start_library = library;
     g_start_play = play;
     if (capture_to) device = "capture";
@@ -409,7 +422,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         loop_argv[loop_argc] = nullptr;
         *engine_owns_exit = true;
         int code = frameloop_main(loop_argc, loop_argv, k_window);
-        return code ? code : g_code;
+        return code ? code : g_code ? g_code : script_host_exit_code();
     }
 
     UiDevConfig no_face;
@@ -448,7 +461,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
                 // while it plays, the library while it scans), and four times a second otherwise.
                 time_sleep(e.ticks_wanted ? e.clock.tick_dt : 0.25);
             }
-            code = g_code;
+            code = g_code ? g_code : script_host_exit_code();
             const PlayerOutput* o = player_output(e);
             if (o && o->underruns) printf("%u underruns\n", o->underruns);
         }

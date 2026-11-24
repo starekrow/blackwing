@@ -1,6 +1,11 @@
 # blackwing_library — the script surface
 
-Surface `library`, version 0.1.0 · draft, with [the spec](../../docs/specs/script-modules.md)
+Surface `library`, version 0.1.0 · with [the spec](../../docs/specs/script-modules.md)
+
+**Proven by slice 4** ([blackwing_script](../blackwing_script/README.md)'s walk): every name,
+field and enum value on this page is reached from Lua as written. **Still a draft:** the
+capability column and the rules about paths and window ids, which are the host's to
+enforce for modules and are not built; a script the user runs is held to none of them.
 
 What a script module sees of the library: its commands, notifications, two tables and a
 resource, by the names native code uses. What a field means is in

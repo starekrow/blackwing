@@ -112,7 +112,7 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `bits`, `float_word`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts`, `recut_render_seconds`, `jump_seconds` |
 | `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
-| `player_item_state_name(s)`, `player_state_name(s)` | functions | "waiting", "playing"...; "stopped", "paused"... |
+| `player_item_state_name(s)`, `player_state_name(s)` | functions | "idle", "playing"...; "stopped", "paused"... |
 
 Header `korvid/blackwing_player/module.h`: `blackwing_player_module`, the record.
 

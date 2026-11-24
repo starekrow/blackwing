@@ -11,6 +11,7 @@ to quit, and says what is happening on stdout.
 blackwing [options]                  the window, with the development face
 blackwing [options] play FILE...     play the files in order, then exit
 blackwing [options] library [DIR...] keep the library, adding the directories to it, until quit
+blackwing [options] run FILE.lua [ARG...]  run a script over the player and the library
 blackwing help                       the commands the engine knows
 ```
 
@@ -28,7 +29,12 @@ blackwing help                       the commands the engine knows
 | `--size WxH`, `--renderer auto\|gpu\|cpu`, `--screenshot FILE`, `--screenshot-frame N`, `--borderless`, `--no-vsync`, `--hitch-ms N`, `--goldberg PORT`, `--no-goldberg` | the frame loop's own, passed to it when there is a face |
 
 With no display, `blackwing` alone says so and exits 1; a command given `--face dev`
-says so and runs with no face. `play`, `library` and `help` need no display.
+says so and runs with no face. `play`, `library`, `run` and `help` need no display.
+
+`run` loads one Lua script ([blackwing_script](../blackwing_script/README.md)): every
+command, notification, table and resource of the player and the library by the name
+native code uses. The script ends the run: with the code it gives `kv.quit`, or 1 if it
+raises, which is said with its file and line.
 
 With a terminal on stdin, the engine's command line is live while it plays: `player
 pause`, `player play`, `player next`, `player previous`, `player jump ROW`, `player seek
@@ -40,7 +46,7 @@ status`, `library find WORDS`, `library play N` (the N-th the last find listed),
 override N FIELD [VALUE...|--clear]` (no value hides the field), `quit`; and with a
 face, `window status [reset]`, `window minimize`, `window restore`, `window stall
 SECONDS`, `face press ID`, `face show KEY`, `face stats`. Ctrl-C stops cleanly, and so does closing the window. The exit status is 0 when the queue ran out, 130 when interrupted, 2 for
-a bad command line, 3 if a dev build leaked.
+a bad command line, 3 if a dev build leaked; with `run`, the script's own.
 
 ## How it works
 
@@ -68,8 +74,8 @@ asks, and four times a second when no one does.
   ([blackwing_window](../blackwing_window/README.md)). The frame loop shuts everything
   down, memory included, so nothing of this file's runs after it.
 - **With none** the loop is this file's own, forty lines over `engine_frame` and
-  `platform_pump`, and the engine is started from six modules by name (`platform`,
-  `cli`, `player`, `library`, `glue`, `blackwing`): the frame loop, the window, Krome and the
+  `platform_pump`, and the engine is started from seven modules by name (`platform`,
+  `cli`, `player`, `library`, `glue`, `script`, `blackwing`): the frame loop, the window, Krome and the
   face are linked and left out, so nothing asks for a display.
 
 With `hifi` holding the device, a player left paused with no face wakes four times a

@@ -1,6 +1,11 @@
 # blackwing_player — the script surface
 
-Surface `player`, version 0.1.0 · draft, with [the spec](../../docs/specs/script-modules.md)
+Surface `player`, version 0.1.0 · with [the spec](../../docs/specs/script-modules.md)
+
+**Proven by slice 4** ([blackwing_script](../blackwing_script/README.md)'s walk): every name,
+field and enum value on this page is reached from Lua as written. **Still a draft:** the
+capability column and the rules about paths and window ids, which are the host's to
+enforce for modules and are not built; a script the user runs is held to none of them.
 
 What a script module sees of the player: every command, notification, table and resource
 the player has, by the names native code uses. The player's API is already data, so this
@@ -192,7 +197,8 @@ In `kv.enum`, both ways:
 | `HifiSampleFormat` | `S16` 0, `S24` 1, `S32` 2, `F32` 3 |
 
 `kv.enum.PlayerState.name(v)` is the lower-case name the player's own
-`player_state_name` gives (`"paused"`); the same for `PlayerItemState`.
+`player_state_name` gives (`"paused"`); the same for `PlayerItemState`. Every enum has
+one: it is the value's name in lower case.
 
 ## Not here
 

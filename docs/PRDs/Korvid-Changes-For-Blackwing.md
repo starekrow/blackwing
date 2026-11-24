@@ -46,8 +46,8 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR15 | `io_make_dirs` and `io_remove_tree` take any length | nothing to change but the corpus test's `mkdir`, which may go |
 | KR16 | a recursive watch neither follows nor reports a link to a directory | the library's filter of paths through a link (`watch.cc`, `Links`) may go |
 | KR17 | `ResourceDesc::cosmetic` | used: `player.transport`, `player.output` and `library.scan` have field tables (`schema.h`, slice 4 milestone 1) |
-| KR18 | `script_push_events`, `EventTypeDesc::defaults`, `script_push_resource` | not yet: slice 4's script API |
-| KR19 | `engine_add_event_type`, `engine_add_ktable`, their removal, `engine_listen` | not yet: B33. A runtime event type is read by listening, not by a unit in the schedule |
+| KR18 | `script_push_events`, `EventTypeDesc::defaults`, `script_push_resource` | used: `blackwing_script` is built on all three (slice 4, milestone 5) |
+| KR19 | `engine_add_event_type`, `engine_add_ktable`, their removal, `engine_listen` | `engine_listen` used by the script host's walk, to count every event type with no handler written; the rest not yet: B33 |
 | KR20 | `Pacing::Decoupled`, `engine_want_ticks` | used: `blackwing` with a face is `frameloop_main` paced `Decoupled`; the player and the library ask for their ticks, and the headless loop reads the same request |
 | KR21 | `WindowVisibility`, `HostWindow::visible()`; no frame drawn for a hidden window | used: `ui_dev` sleeps on it; minimized under X11, 599 ticks and no frame in ten seconds. A window minimized by hand on Wayland is not checked |
 | KR22 | `each row in rows height=24 count=@total from=@first -> view`, a `placeholder` block, `KromeView` | used: `ui_dev`'s Queue panel (slice 4, milestone 2). The check does not know `placeholder` (KR27) |

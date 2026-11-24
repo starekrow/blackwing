@@ -1,6 +1,13 @@
 # Script modules — the spec
 
-Nov 23, 2026 · draft 0.1 · nothing here is built
+Nov 23, 2026 · draft 0.1 · the bus surface is built, in process, for a script the user runs
+
+**What is built** (Blackwing's slice 4, [blackwing_script](../../modules/blackwing_script/README.md)):
+the record's `handlers`, `systems`, `startup` and `shutdown`; `ctx`; the binding of
+`player` and `library` from their field tables; `kv.version`, `kv.has`, `kv.surface`,
+`kv.enum`, `kv.log`, `kv.json`, `kv.sha256`, `kv.random`. Everything else on this page is
+still a draft with nothing behind it. Where building that part proved the draft wrong,
+the page is corrected and says so: look for **Built**.
 
 What a script module is, the environment its Lua runs in, and every name it can reach.
 This page is the spine: the runtime, the rules and the map. What each of Blackwing's
@@ -115,6 +122,11 @@ are the contract: a unit reaches nothing it did not name. `reads` names tables, 
 and event types from any surface the manifest uses. `writes` names the module's own
 tables and resources only. `emits` names its own event types and the commands its
 capabilities grant.
+
+**Built:** a system's batch (`ctx:received`) is what came since the system last ran, not
+since the last slice: a system with a period does not run every slice, and the draft's
+"the events emitted since its last slice" lost what came between. A handler's batch is
+the slice's.
 
 A script unit has no `phase`: it runs in the module's slice ([Threads and
 time](#threads-and-time)), not in the schedule. It has no `after` or `before`: within a
@@ -397,7 +409,7 @@ In Blackwing's modules:
 | `blackwing_player` | the chain is `gain`, `eq` and two guest slots, each a `StageDesc` the host supplies that is flat while empty | script stages, with no change to `hifi`: `kHifiMaxStages` is already 4, and a flat stage costs nothing |
 | `blackwing_player` | where it calls `decoder_for`, ask the host's decoders after the linked ones | script decoders, with no change to `hifi_codec` |
 | `blackwing_player` | a queue row that names a script decoder and has no file | a module that makes its own sound ([hifi_codec](../../modules/hifi_codec/SCRIPT.md#sound-from-nothing)) |
-| each module with a surface | a `script.lua` beside its `module.lua`: the surface's version, its enums by name, and which commands need which capability | data the host reads; the conformance tests check it against the headers |
+| each module with a surface | **Built** as C++ beside the field tables, not a `script.lua`: in its `schema.h`, the surface's version, which event types are commands, its enums' values by name (held to the header's `Count` by a `static_assert`), its tables and constants. Which command needs which capability is not there yet | a headless engine mounts no assets, so a Lua file beside `module.lua` would not be found at run time; and the compiler checks the header |
 
 Nothing changes in `hifi`, `hifi_codec`, `hifi_eq`, `hifi_platform` or `blackwing_tags`.
 The path rule, window ids and quotas are enforced in the host, not in the player or the
@@ -418,7 +430,10 @@ A state on a fixed block that loads text only needs nothing from the engine:
 ## Conformance
 
 Every row of every table on these pages is a test: the name exists, its fields have these
-types, the command needs this capability and does what its header says. The suite runs
+types, the command needs this capability and does what its header says. **Built:** the
+walk against the binding in process (`modules/blackwing_script/tests/walk.lua`), for
+names, fields and enums, with every command emitted and every notification a run can
+bring about heard; capabilities and the process boundary are not built, so not walked. The suite runs
 three ways: against the native surface, against the binding in process, and against the
 binding across the process boundary. A module author's harness runs a module headless
 against recorded snapshots and, for a stage, nulls its output against the same stage in

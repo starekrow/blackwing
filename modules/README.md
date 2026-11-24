@@ -3,7 +3,7 @@
 Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 `hifi_platform`, `blackwing_player` and `blackwing` have code (slice 1), `hifi_eq`
 (slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev`,
-`blackwing_window` and `blackwing_glue` (slice 4, under way); the rest are skeletons. The
+`blackwing_window`, `blackwing_glue` and `blackwing_script` (slice 4, under way); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
@@ -21,6 +21,7 @@ Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 | [ui_clean](ui_clean/README.md) | the clean face |
 | [ui_compact](ui_compact/README.md) | the clean face, compact |
 | [blackwing_glue](blackwing_glue/README.md) | where the player and the library hear each other: a file queued is scanned next, what the library collects is queued |
+| [blackwing_script](blackwing_script/README.md) | the script host: Lua over the player's and the library's API; `blackwing run` |
 | [blackwing_window](blackwing_window/README.md) | what every face shares of the window: closing it ends the run |
 | [blackwing](blackwing/README.md) | the application: the executable around the player, the library and a face |
 

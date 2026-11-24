@@ -354,3 +354,80 @@ value following its source; a damaged row; the typed path refused. The library's
 test now reads the flag: set while it has work, empty after, and empty when asked for
 with nothing to read.
 
+## Milestone 5, scripts
+
+Nov 23, 2026. The same machine and build.
+
+**As planned:** `blackwing_script`, the host's first piece; `blackwing run FILE.lua`; the
+conformance walk; the scripted pass. KR19 was not needed, as the PRD expected.
+
+**The binding is the engine's, whole** (KR18, KR17). The host describes no event, row or
+resource: `script_push_events`, `script_push_ktable` and `script_push_resource` make all
+three from the field tables. What the host adds is the Lua state, the surface as `kv`
+shows it, the spec's `ctx` and record, and one unit.
+
+**The unit's declaration is made by the compiler.** `script.slice` reads every event
+type, table and resource of the two APIs, and a unit's `reads` is a string in a
+`constinit` table. It is put together from the schemas' own tables in a constant
+expression (`k_reads`), so a type added to a schema is read by scripts with no edit
+here. The schema tables became `constexpr` for that.
+
+**Emits go out of the schedule.** The unit keeps two of the engine's events objects: one
+pointed at its own context, to read a batch; one with no context, to emit. The second
+goes through the engine's writer for code outside the schedule, delivered at the next
+tick's start, which is the spec's rule for a slice's commands; and the unit need not
+declare that it emits every command.
+
+**What a field table does not say is beside it.** Which events are commands, the enums'
+values by name, which tables there are: the spec had these in a `script.lua` beside each
+`module.lua`. They are C++ in each `schema.h` instead. A headless engine mounts no
+assets, so the Lua file would not be found; and a `static_assert` holds each enum's
+names to its `Count`, which a Lua file could not. The spec is corrected.
+
+**`ctx` and the record's checks are Lua**, three hundred lines run before the script
+(`prelude.h`): a unit reaches what it named, a table and a resource that are not the
+script's are read-only, a record is checked when it loads.
+
+**Found by building: a system's batch.** The spec said a unit sees "the events emitted
+since its last slice". A system with a period does not run every slice, and the first
+version handed it the tick's events when it ran: `record.lua`'s system, on 0.05 s,
+never saw the `PlayerSeeked` it waited for. A system is now handed what came since it
+last ran. The spec is corrected.
+
+**Open questions closed:**
+
+- **Scripts that read top to bottom** ship, as `kv.steps`: a record with one system that
+  runs a function as a coroutine, with `s:wait(type)` and `s:wait(seconds)`. It is Lua
+  over the record and adds nothing to the surface. The walk and the pass are written
+  with it, and are a third the length they would be as handlers.
+- **Ending the run** is `kv.quit(code)`, with `kv.args` for what followed the script.
+  Both are `run`'s and not the spec's: a module does not end a run.
+- **The user's script is the command line's equal**: `kv.has` says yes to every
+  capability and a path is whatever the script says. The libraries are the spec's all
+  the same (no `io` or `os`), so that what runs here runs as a module later.
+
+**The walk** (BD20): 31 event types, 20 of them commands and each emitted by name; 10 of
+the 11 notifications heard with every field their surface lists (an underrun cannot be
+brought about on purpose, and is read by name all the same); 9 tables and resources,
+each read and found to have every field; 79 fields and 39 enum values asked for by
+name. The C++ side listens to every event type of both schemas with `engine_listen`,
+writing no handler, and counts each command arriving natively; and checks the surfaces
+list as many names as the schemas hold.
+
+**The pass** (BD25, and the exit criterion): `pass.lua` adds a root, waits for its scan,
+finds a track by a word, plays it from its row through the glue, hears it start and end
+whole, hears the next start in another format with its `seq` after, seeks and hears the
+seek, sets a band and hears it, finds the chain not flat and the output not exact,
+pauses and finds the position held, and ends at the queue's end with no underrun.
+
+**`blackwing run`** with no display: `raises.lua` exits 1 with
+`raises.lua:11: attempt to index a nil value (local 'nothing')` and a traceback; a
+script that returns 5 exits 5; the same with `--face dev`, the face up beside it.
+
+**Tests** (`blackwing_script`, 40 checks; clean under `address,undefined`).
+
+**Not built**, as the PRD has it: the manifest, versions checked, capabilities, quotas
+and rate limits, the sandbox and the process boundary, a module's own tables and
+events, stage and decoder states, discovery, `require`, snapshots. `on_change` notices
+events and not tables.
+
