@@ -1,6 +1,6 @@
 # Korvid changes for Blackwing — quick requirements
 
-Nov 22, 2026 · draft, for review on the Korvid side
+Nov 22, 2026 · updated Nov 23 with what Korvid took
 
 ## What this is
 
@@ -9,28 +9,69 @@ requirements Korvid can take, change or refuse. Each says what was run into, wha
 asked, and how to tell it is done. The findings themselves are in
 [docs/design/slice-1-notes.md](../design/slice-1-notes.md).
 
-Nothing here was changed in Korvid's tree. Where Blackwing has a workaround today, it is
-named, so the cost of waiting is clear.
+Each was written before Korvid took it, with Blackwing's workaround named so the cost of
+waiting was clear. Korvid's slices 10 and 11 took all twenty-five: Status has where each
+landed and what Blackwing does with it now.
 
 One of these blocked the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
 backend, and a project cannot link PipeWire today without editing the engine.
 
 ## Status
 
-Nov 23, 2026. Korvid's slice 10 (`docs/PRDs/Engine-Slice-10-PRD.md` in the engine's
-checkout) took all nine, with these IDs. What Blackwing does with each:
+Nov 23, 2026. Korvid took all twenty-five, with these IDs: KR1 to KR17 and KR23 in its
+slice 10 (`docs/PRDs/Engine-Slice-10-PRD.md` in the engine's checkout, branch
+`slice-10`), the rest in its slice 11 (`Engine-Slice-11-PRD.md`, branch `slice-11`,
+which starts from `slice-10`). Both are pushed; neither is merged to the engine's `main`.
+Each PRD's status has what was built and checked; Windows, the Apple family and the
+phones are written there and only partly checked (macOS and the iOS Simulator for some).
 
-| ID | in Blackwing |
-|---|---|
-| KR1 | used: `hifi_platform` defines the `pipewire` external with `pkg_config` (slice 1, milestone 4) |
-| KR2 | used: every sanitizer run since milestone 3 is `kormake test <module> --sanitize ...` |
-| KR3 | used: `blackwing` passes no sink |
-| KR4 | used: the player's path limit is gone |
-| KR5 | not yet: the player still calls the blocking `io_stat` before a read |
-| KR6 | not yet: wanted by slice 2's seeking |
-| KR7 | not needed so far: PipeWire's data thread arrives in the realtime class on its own. A backend that owns its thread (ALSA `hw:`) will use it |
-| KR8 | used: `hifi_codec` builds `flac.cc` with the `wrapv` profile |
-| KR9 | documented on the engine's side; the player's `seq` stays |
+| ID | in Korvid | in Blackwing |
+|---|---|---|
+| KR1 | externals in a `module.lua` or `korvid.config`, `pkg_config` | used: `hifi_platform` defines the `pipewire` external (slice 1, milestone 4) |
+| KR2 | `--sanitize address,undefined` and `thread` | used: every sanitizer run since milestone 3 |
+| KR3 | a null sink discards | used: `blackwing` passes no sink |
+| KR4 | any path the OS takes | used: the player's path limit is gone |
+| KR5 | `IoQueue::stat_file` | used: the player stats a track through the queue |
+| KR6 | `IoRequest::offset` and `length` | used: the player's pieces, the library's tag reads |
+| KR7 | `os_thread_enter_audio_class` | not needed so far: PipeWire's data thread arrives in the realtime class on its own |
+| KR8 | `codegen_sources` and the `wrapv` profile | used: `hifi_codec`'s `flac.cc` |
+| KR9 | documented: order is per type | the player's `seq` stays |
+| KR10 | `os_cond_timed_wait` | used by the library; `hifi`'s render thread still naps (`hifi.cc`) |
+| KR11 | `io_list_dir` | used: the library's walk and its watcher |
+| KR12 | `io_path_is_remote`; a watcher made with `Auto` polls a share's root, and `add_root(dir, Poll)` | used: the library's watcher polls by root |
+| KR13 | `IoStat::volume` | used: the library's walk |
+| KR14 | `.c` sources, with a toolchain's `cc` | used: `blackwing_library/src/sqlite.c` |
+| KR15 | `io_make_dirs` and `io_remove_tree` take any length | nothing to change but the corpus test's `mkdir`, which may go |
+| KR16 | a recursive watch neither follows nor reports a link to a directory | the library's filter of paths through a link (`watch.cc`, `Links`) may go |
+| KR17 | `ResourceDesc::cosmetic` | not yet: `player.transport`, `player.output` and `library.scan` can now have field tables |
+| KR18 | `script_push_events`, `EventTypeDesc::defaults`, `script_push_resource` | not yet: slice 4's script API |
+| KR19 | `engine_add_event_type`, `engine_add_ktable`, their removal, `engine_listen` | not yet: B33. A runtime event type is read by listening, not by a unit in the schedule |
+| KR20 | `Pacing::Decoupled`, `engine_want_ticks` | not yet: slice 4, milestone 1 |
+| KR21 | `WindowVisibility`, `HostWindow::visible()`; no frame drawn for a hidden window | not yet: slice 4, milestone 1. A window minimized by hand on Wayland is not checked |
+| KR22 | `each row in rows height=24 count=@total from=@first -> view`, a `placeholder` block, `KromeView` | not yet: slice 4, milestone 3 |
+| KR23 | `engine_set_event_hook`, dev builds | not yet: `ui_dev`'s Events panel |
+| KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | not yet: slice 4, milestone 6; the session file and the index can move |
+| KR25 | `image/jpeg.h`: baseline, progressive, scaled, EXIF, fuzzed | not yet: BL25 and slice 6 |
+
+Where Korvid's answer differs from what was asked:
+
+- **KR16**: a link to a directory is not reported at all, rather than reported with a mark
+  saying it came through one; nothing asked for following, so there is no option for it.
+- **KR19**: no unit is scheduled against a runtime type. It is emitted from outside the
+  schedule (or a main-thread unit) and read with `engine_listen`, which works for any
+  type. A run adds at most 32 runtime ktables.
+- **KR24**: on macOS and iOS settings sit beside data in `Library/Application Support`
+  (Apple asks that nothing but the defaults system's plists go in `Library/Preferences`),
+  and the store is a file there, not the defaults system. On Windows settings and data
+  share `%APPDATA%`. The store is JSON, so a person can read it.
+- **KR25**: written for the engine, not vendored. Its pixels are libjpeg-turbo's (Pillow's)
+  exactly on every test case; a 1500 x 1500 cover to an eighth in about 3 ms, a whole decode
+  two to four times libjpeg-turbo's time (no SIMD). The fuzzer is a mutation loop in the
+  test, not coverage-guided.
+
+Found on the way, in Korvid: the state hash counted a pending timer by its event type's id,
+which moves when a module adds a type, so the same sim could hash differently. It now uses
+the type's name. Recorded hashes taken before slice 11 do not match after it.
 
 ## Requirements
 
@@ -240,7 +281,7 @@ signalled: `pthread_cond_timedwait` on `CLOCK_MONOTONIC`, `SleepConditionVariabl
 ## Found in planning slice 3
 
 Nov 23, 2026. From [Blackwing-Slice-3-PRD.md](Blackwing-Slice-3-PRD.md), the library,
-before any of it is built. Not yet put to Korvid.
+before any of it is built. Taken by Korvid's slice 10.
 
 | ID | Requirement | Where | Priority |
 |---|---|---|---|
@@ -346,7 +387,7 @@ PipeWire).
 
 ## Found in building slice 3
 
-Nov 23, 2026. Found at slice 3's close; neither blocks it. Not yet put to Korvid.
+Nov 23, 2026. Found at slice 3's close; neither blocks it. Taken by Korvid's slice 10.
 
 | ID | Requirement | Where | Priority |
 |---|---|---|---|
@@ -454,7 +495,7 @@ from the engine.
 
 Nov 23, 2026. From [Blackwing-Slice-4-PRD.md](Blackwing-Slice-4-PRD.md), the development
 face, before any of it is built: the first window, the first face, the session, and the
-API from a script. Not yet put to Korvid. KR17 and KR18, above, were P1 and now block
+API from a script. Taken by Korvid: KR23 in its slice 10, the rest in slice 11. KR17 and KR18, above, were P1 and now block
 this slice: the face's Tables panel, the session and a script's `ctx:resource` all read a
 resource by its fields, and a script that cannot emit an event cannot drive anything.
 
