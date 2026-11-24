@@ -9,11 +9,18 @@ use "ui_dev/library"
 use "ui_dev/queue"
 use "ui_dev/output"
 use "ui_dev/chain"
+use "ui_dev/scan"
+use "ui_dev/events"
+use "ui_dev/tables"
+script "ui_dev/shell.lua"
 script "ui_dev/transport.lua"
 script "ui_dev/library.lua"
 script "ui_dev/queue.lua"
 script "ui_dev/output.lua"
 script "ui_dev/chain.lua"
+script "ui_dev/scan.lua"
+script "ui_dev/events.lua"
+script "ui_dev/tables.lua"
 
 screen shell {
     col [page] w=fill h=fill pad=8 gap=8 {
@@ -27,7 +34,24 @@ screen shell {
             }
             col gap=8 w=400 h=fill {
                 output-panel
-                chain-panel
+                tabs {
+                    tab "Chain" id=tab_chain @r_tab=chain
+                    tab "Scan" id=tab_scan @r_tab=scan
+                    tab "Events" id=tab_events @r_tab=events
+                    tab "Tables" id=tab_tables @r_tab=tables
+                }
+                if r_tab=chain {
+                    chain-panel
+                }
+                if r_tab=scan {
+                    scan-panel
+                }
+                if r_tab=events {
+                    events-panel
+                }
+                if r_tab=tables {
+                    tables-panel
+                }
             }
         }
     }

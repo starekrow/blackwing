@@ -1,0 +1,35 @@
+// The Tables panel: any table or resource of the player or the library, by name, its rows
+// and fields from its own description. Nothing here knows a field: one added to a table
+// appears. The list is lines, a row's fields one to a line under the row's number.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def tables-panel {
+    col [dev-panel] id=tables w=fill h=fill {
+        row gap=8 middle w=fill {
+            text "Tables" [dev-title]
+            text "{x_summary}" id=x_summary [dev-value] w=fill nowrap
+        }
+        row gap=2 w=fill scroll=x {
+            each name in x_names {
+                hit [dev-btn] id="xn_{name.i}" -> x_name {
+                    text "{name.name}" size=11
+                }
+            }
+        }
+        col id=x_list scroll w=fill h=fill [list] {
+            each line in x_lines height=18 count=@x_total from=@x_first -> x_view {
+                row w=fill h=18 gap=6 middle {
+                    dev-text "{line.name}" w=110 color=@line.ink
+                    dev-text "{line.value}" w=fill
+                }
+                placeholder {
+                    row w=fill h=18 {
+                        text "..." [dev-cell] color=muted
+                    }
+                }
+            }
+        }
+    }
+}

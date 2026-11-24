@@ -1,0 +1,30 @@
+// The Events panel: every command and notification of the player and the library as it
+// passes, newest last, each with the number it was seen at and its own fields (a
+// notification's `seq` among them). Held, it stops and can be read back; filtered, it
+// shows the lines that have the words typed.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def events-panel {
+    col [dev-panel] id=events w=fill h=fill {
+        row gap=6 middle w=fill {
+            text "Events" [dev-title]
+            text "{e_summary}" id=e_summary [dev-value]
+            spacer
+            input id=e_filter @e_filter placeholder="has" w=96 change=e_filter
+            hit [dev-btn] id=e_hold @e_held -> e_hold {
+                text "hold" size=11
+            }
+            dev-btn "Clear" id=e_clear -> e_clear
+        }
+        col id=e_list scroll w=fill h=fill [list] {
+            each ev in e_rows height=18 {
+                row w=fill h=18 gap=6 middle {
+                    dev-text "{ev.n}" w=40 color=muted
+                    dev-text "{ev.text}" w=fill
+                }
+            }
+        }
+    }
+}

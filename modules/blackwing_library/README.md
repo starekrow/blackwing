@@ -255,6 +255,9 @@ its place.
 
 - **What comes back arrives in a later tick.** A window is answered on the reader's thread;
   `LibraryResult` comes in the tick after the answer.
+- **`library.scan`'s `slot` is the slot's work**: set when something is put in it, and
+  empty again when the tagger has read the last of what was handed over (until slice 4
+  nothing cleared it).
 - **It asks for its ticks** (`engine_want_ticks`) while a scan runs, a tag read is out, or
   a window has been asked for and not answered, so an answer does not wait for a resting
   loop's next heartbeat.

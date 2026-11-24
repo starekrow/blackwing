@@ -343,9 +343,13 @@ void test_library_slot(TestCtx& c) {
     kvtest::album(music, 290, 1, &al);
     const char* dir = al.dir;
     KV_CHECK(c, io_is_dir(dir));
+    KV_CHECK(c, r.scan().slot == 0);
     LibraryPrioritize p;
     format(p.path, sizeof p.path, "%s", dir);
     r.say(p);
+    r.step();
+    r.step();
+    KV_CHECK(c, r.scan().slot == 1); // something is in it
     // Its ten tracks read while most of the library is not.
     u64 dir_id = 0;
     u32 unread_then = 0;
@@ -368,6 +372,12 @@ void test_library_slot(TestCtx& c) {
     KV_CHECK(c, unread_then > 2000); // without the slot it would be among the last few hundred
     KV_CHECK(c, r.until([] { return g_finished == 1; }, 60.0));
     KV_CHECK(c, r.root(1).unread == 0 && r.root(1).tracks == 8000);
+    // Read, the slot is empty again (it said "something" for the rest of the run until slice 4's face showed it).
+    KV_CHECK(c, r.until([&] { return r.scan().slot == 0; }, 5.0));
+    // Asked for with nothing to read in it: taken, found empty, and said empty.
+    r.say(p);
+    r.step();
+    KV_CHECK(c, r.until([&] { return r.scan().slot == 0; }, 5.0));
     r.stop();
     io_remove_tree(tmp);
 }

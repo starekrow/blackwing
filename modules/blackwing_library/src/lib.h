@@ -171,6 +171,9 @@ struct Shared {
     u64 generation = 0;   // the writer's commits
     u64 dirs_listed = 0, files_found = 0, tags_read = 0, bytes_read = 0;
     u32 tags_active = 0;  // tracks the tagger is reading now
+    // atomic: the priority slot. 0 empty; 1 asked for (the writer has yet to say what is
+    // in it); 2 handed to the tagger, who empties it when the last of it is read.
+    u32 slot_state = 0;
     u32 walking = 0;      // the root being walked
     u32 reading_window = 0; // the window the reader is answering (under the lock), and
     u32 stop_epoch = 0;     // atomic: moved on when a newer ask for it comes

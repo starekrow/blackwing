@@ -1,0 +1,21 @@
+// The Scan panel: what the library is doing, as library.scan has it: what is being walked
+// and read, the rates, the slot, what is still unread.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def scan-panel {
+    col [dev-panel] id=scan w=fill h=fill {
+        row gap=8 middle w=fill {
+            text "Scan" [dev-title]
+            text "{s_state}" id=s_state [dev-value]
+        }
+        dev-field "walking" "{s_walking}"
+        dev-field "found" "{s_found}"
+        dev-field "tags read" "{s_read}"
+        dev-field "unread" "{s_unread}"
+        dev-field "the slot" "{s_slot}"
+        dev-field "index" "{s_index}"
+        dev-field "queries" "{s_queries}"
+    }
+}

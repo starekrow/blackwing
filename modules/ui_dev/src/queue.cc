@@ -128,7 +128,11 @@ bool queue_event(TickContext& ctx, Face& f, const KromeEvent& ev) {
         const char* path = krome_model_text(*f.e, f.screen, "q_path");
         if (!path || !path[0]) return true;
         PlayerEnqueue e{};
-        if (strlen(path) >= sizeof e.path) { KV_WARN("ui_dev", "the path is longer than PlayerEnqueue carries"); return true; }
+        // A path too long to take: said where it was typed. Krome hands a text over in 512
+        // bytes and cuts a longer one without a word (KR43), so one that fills them may be
+        // the front of something longer, and a path cut short is another file's.
+        if (strlen(path) >= kFaceTypedMax) { face_set(f, "q_note", "a path typed here can be 510 bytes; a longer one is queued from its row in the library"); return true; }
+        face_set(f, "q_note", "");
         format(e.path, sizeof e.path, "%s", path);
         ctx.emit(e);
         face_forget(f, "q_path");

@@ -4,10 +4,10 @@ The development face: a plain, dense, complete window over the player and the li
 It is built first, and it is how the rest is developed. It reads their tables and emits
 their commands, and calls no function of either.
 
-**Status:** slice 4, milestone 3. The frame is built (the screen, a panel that fails
-alone, asleep while hidden, still when nothing changes) and five panels are in it:
-Transport, Library, Queue, Output and Chain. The inspectors (Scan, Events, Tables) are
-the [slice's](../../docs/PRDs/Blackwing-Slice-4-PRD.md) next milestone.
+**Status:** slice 4, milestone 4. Every panel is in: Transport, Library, Queue and
+Output, and in tabs under Output, Chain, Scan, Events and Tables. What is left of the
+[slice](../../docs/PRDs/Blackwing-Slice-4-PRD.md) for this module is its part of the
+session, the keyboard, and the close's runs.
 
 ## How it works
 
@@ -42,6 +42,9 @@ is where the user is: what a list has in view, which slider is held.
 | Queue | `queue.cc` | every row in the list's order: place, the library's title for it (else its file's name), state, format, bytes held, reason | play a row now, remove it, move it up or down, clear, add a path typed in |
 | Output | `output.cc` | the device, its format, the lead, underruns, the last recut and jump; exact, and why not | |
 | Chain | `chain.cc` | each stage and whether it is flat; every parameter with the value heard | a slider a parameter, a switch for one that is 0 or 1, a button a preset |
+| Scan | `scan.cc` | what is being walked and read, the rates, the slot, what is unread, the index and whether it was made again | |
+| Events | `events.cc` | every command and notification of the two modules as it is delivered, with its fields and who emitted it, newest last | hold, clear, a filter |
+| Tables | `tables.cc` | any table or resource of the two modules, by name: its rows and fields from its own description | pick one |
 
 **The position** is written every tick, as what would be shown: the readout's text
 changes once a second and the bar's value once a pixel of its width, and the writer
@@ -89,6 +92,20 @@ the face has never heard of gets its controls from its own description. It is no
 list because a list is built again when a row's value changes, which while a slider is
 dragged is every tick, under the pointer.
 
+**Events are the engine's trace, as data.** The face sets the engine's event hook
+(`engine_set_event_hook`, dev builds) and keeps the last 512 events whose type's name
+begins `Player`, `Library` or `Hifi`, each as the engine describes it. No type has a
+handler, and one added later shows. They are kept only while the tab is up, the window
+seen and the panel not held. In a ship build there is no hook, and the panel says so.
+
+**Tables are shown from their descriptions.** `tables.cc` names no field: it reads the
+field table the engine holds for a table's component or a resource, and formats each
+value by its type. A field added to a table appears. A table added needs its name in
+`k_tables` and in `ui_dev.sync`'s `reads`.
+
+**Only the tab that is up works.** The tabs write the model's `r_tab` themselves; `.sync`
+reads it, and Events and Tables return at once when they are not up.
+
 **Exact, and why not** is worked out in `output.cc` from what is published: the device
 is shared, a stage is not flat (which), a join is under way, the device's word is
 narrower than the file's.
@@ -122,6 +139,10 @@ tests, with a stand-in.
 | `ui_dev_screen(e)`, `ui_dev_ready(e)` | the screen's name in Krome; whether it is built and written |
 | `ui_dev_stats(e)` | model writes, commands, ticks looked at and passed over, panels standing in, whether the screen failed |
 
+On the engine's command line: `face press ID` presses a control by its id, `face show
+KEY` prints a model value as the screen shows it, `face stats` prints what the face and
+Krome have done. A real window can be driven and read by a script through them.
+
 What it registers: `ui_dev.sync` (PostSim; reads the player's two resources and four
 tables and the library's resource and two tables; emits `LibraryQuery`,
 `LibraryPrioritize`, `LibraryPath`, `PlayerPlay`), `ui_dev.events` (on `KromeEvent`;
@@ -141,7 +162,9 @@ controls pressed by id (`krome_press`) or by a pointer and a keyboard the test m
   publish values the test sets by hand and write down the commands they are sent.
   Neither the player nor the library is in the engine. The library's panel: every view
   opened from a row, queue and play, an edit, sort, search, roots, titles, and fifty
-  thousand rows that answer two frames late while the scrollbar is dragged end to end. Every transport command from its own control;
+  thousand rows that answer two frames late while the scrollbar is dragged end to end.
+  The inspectors: Scan from the resource; Events found by their described text, filtered,
+  held and cleared; Tables with every field of the schema found by its name. Every transport command from its own control;
   the bar pressed, dragged and let go; a thousand queued rows scrolled, edited and added
   to; exact and each reason why not; the chain's controls made from descriptions, a
   slider held while the value heard changes under it, a parameter added while it runs;
@@ -167,6 +190,9 @@ controls pressed by id (`krome_press`) or by a pointer and a keyboard the test m
   is as wide as its words, whatever room its row gives it.
 - **A sparse list's `placeholder` block needs `widgets.kim`'s definition of that name**:
   Krome's check does not know the word (KR27).
+- **A path typed in can be 510 bytes.** Krome hands a text back in 512 and cuts a longer
+  one silently (KR43); the face refuses one that may have been cut, and says so beside
+  the edit. A longer path is queued from its row.
 - **A string of 56 bytes or more** is written as a document (`krome_set_doc`); a
   `KromeSet` holds no more.
 

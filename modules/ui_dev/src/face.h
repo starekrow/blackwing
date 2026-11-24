@@ -25,6 +25,9 @@ constexpr u32 kFaceCollect     = 0xD0E00011; // a row's tracks, to be queued
 constexpr u32 kFaceCollectPlay = 0xD0E00012; // the same, and played once they are all in
 constexpr u32 kFaceView        = 512;        // rows of a list handed over at once, at most
 constexpr u32 kFaceCrumbs      = 12;
+// A text read back from the screen (krome_model_text) is 511 bytes at most, cut without a
+// word when it is longer. One this long may have been cut, and is not taken for a path.
+constexpr u32 kFaceTypedMax    = 511;
 
 // Where the Library panel's list is: a view, what it is of, and what to call it.
 struct FaceCrumb { LibraryView view = LibraryView::Folders; u64 parent = 0; char name[96] = ""; };
@@ -34,6 +37,11 @@ struct FaceAsk {
 };
 // A path the title window was given, at a queue row's index.
 struct FaceTitle { u32 index = 0; u64 hash = 0; };
+// Which of the inspectors' tabs is up, as the model has it: the others do no work.
+enum class FaceTab : u8 { Chain, Scan, Events, Tables };
+// An event as the Events panel keeps it: the number it was seen at, and its line.
+struct FaceEvent { u64 n = 0; char text[244] = ""; };
+constexpr u32 kFaceEvents = 512; // events kept
 
 struct Face {
     Engine* e = nullptr;
@@ -82,6 +90,16 @@ struct Face {
     bool    lib_prioritized = false;
     u64     edit_track = 0;        // the track whose field is being edited
     u32     play_in = 0;           // ticks until PlayerPlay: what was collected to play is in
+    // The inspectors: which is up. Events: the last kFaceEvents that passed, a ring from
+    // the general allocator; whether they are being kept (the tab is up, the window seen,
+    // not held). Tables: which name is picked, and the lines its list has built.
+    FaceTab tab = FaceTab::Chain;
+    FaceEvent* events = nullptr;
+    u32     ev_head = 0, ev_count = 0;
+    u64     ev_seen = 0;
+    bool    ev_on = false, ev_held = false, ev_dirty = true, ev_hooked = false;
+    char    ev_filter[64] = "";
+    u32     x_name = 0, x_first = 0, x_count = 0;
     // Chain: what its stages' definition was written from; the parameter being dragged.
     u64     chain_sig = 0;
     bool    chain_drag = false;
@@ -121,6 +139,13 @@ bool queue_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 void output_sync(TickContext& ctx, Face& f);
 void chain_sync(TickContext& ctx, Face& f);
 bool chain_event(TickContext& ctx, Face& f, const KromeEvent& ev);
+void scan_sync(TickContext& ctx, Face& f);
+void events_sync(TickContext& ctx, Face& f);
+bool events_event(TickContext& ctx, Face& f, const KromeEvent& ev);
+// The engine's event hook (dev builds), set while the face is up: it keeps what passes.
+void events_hook(void* user, const DeliveredEvent& ev);
+void tables_sync(TickContext& ctx, Face& f);
+bool tables_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 void library_sync(TickContext& ctx, Face& f);
 bool library_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 // The queue's rows in view (and the transport's), asked of the library by their paths; and

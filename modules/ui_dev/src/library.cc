@@ -416,7 +416,7 @@ bool library_event(TickContext& ctx, Face& f, const KromeEvent& ev) {
         const char* path = krome_model_text(*f.e, f.screen, "l_root_path");
         if (!path || !path[0]) return true;
         LibraryAddRoot a{};
-        if (strlen(path) >= sizeof a.path) return true;
+        if (strlen(path) >= kFaceTypedMax) return true; // it may have been cut (KR43): a root is not added from the front of a path
         format(a.path, sizeof a.path, "%s", path);
         ctx.emit(a);
         face_forget(f, "l_root_path");

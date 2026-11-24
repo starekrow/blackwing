@@ -144,6 +144,7 @@ void resolve_slot(Shared& sh, Index& ix, const SlotMsg& m, Slot& slot) {
     os_mutex_lock(&sh.lock);
     if (sh.slot_jobs) { sh.slot_jobs->free(); mem_free(sh.slot_jobs); }
     sh.slot_jobs = jobs.b;
+    atomic_store(&sh.slot_state, 2u, MO_RELEASE);
     os_cond_signal(&sh.tag_wake);
     os_mutex_unlock(&sh.lock);
 }
@@ -527,6 +528,7 @@ void write_thread(void* arg) {
                 } else {
                     sh.slot_jobs = slot_more.b;
                 }
+                atomic_store(&sh.slot_state, 2u, MO_RELEASE);
             }
             os_cond_signal(&sh.tag_wake);
             os_mutex_unlock(&sh.lock);
@@ -1021,7 +1023,7 @@ void commands(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
         L.sh->writes.push(w);
         os_cond_signal(&L.sh->write_wake);
         os_mutex_unlock(&L.sh->lock);
-        L.scan_res.slot = m->kind != SlotKind::None ? 1 : 0;
+        atomic_store(&L.sh->slot_state, m->kind != SlotKind::None ? 1u : 0u, MO_RELEASE);
     }
     for (const LibraryOverride& o : ctx.received<LibraryOverride>()) {
         TagField f;
@@ -1255,6 +1257,7 @@ void library_pump(TickContext& ctx) {
     }
     s.unread = unread;
     s.active = busy || atomic_load(&L.sh->tags_active, MO_RELAXED) ? 1 : 0;
+    s.slot = atomic_load(&L.sh->slot_state, MO_ACQUIRE) != 0; // until the tagger has read the last of what was put in it
     // The next tick at the clock's rate (engine_want_ticks) while a scan runs, a read is
     // out, or a window has been asked for and not answered: an answer waits for a tick.
     bool owed = s.active || L.reading.len || L.waiting.len || L.collects_out || L.sending.len;

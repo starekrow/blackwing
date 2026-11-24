@@ -9,6 +9,8 @@
 #include "korvid/blackwing_glue/module.h"
 #include "korvid/blackwing_library/module.h"
 #include "korvid/blackwing_player/module.h"
+#include "korvid/blackwing_library/schema.h"
+#include "korvid/blackwing_player/schema.h"
 #include "korvid/cli/module.h"
 #include "korvid/core/engine.h"
 #include "korvid/core/format.h"
@@ -725,6 +727,139 @@ void test_face(kv::TestCtx& c) {
         e.events.emit(WindowVisibility{true, WindowHidden::None});
         frames(e, 10);
         KV_CHECK(c, standin_count(e, "LibraryQuery") == 1 && standin_count(e, "LibraryPath") == 2);
+        engine_shutdown(e);
+    }
+
+    c.begin("face inspectors");
+    {
+        Engine e;
+        KV_CHECK(c, engine_init(e, k_list));
+        krome_viewport(e, 1280, 800, 1.0f);
+        make_chain(e);
+        StandinPlayer& p = *standin_player(e);
+        StandinLibrary& lib = *standin_library(e);
+        KV_CHECK(c, until_ready(e));
+        Name scn = ui_dev_screen(e);
+
+        // Scan: what the library is doing, from its resource.
+        lib.scan.active = 1; lib.scan.walking = 2; lib.scan.files_found = 31250; lib.scan.names_per_second = 4100.0; lib.scan.dirs_listed = 812;
+        lib.scan.tags_read = 9000; lib.scan.tags_per_second = 650.0; lib.scan.bytes_read = 40u << 20; lib.scan.unread = 22250; lib.scan.slot = 1;
+        lib.scan.tracks = 31250; lib.scan.generation = 44; lib.scan.cancelled = 3;
+        format(lib.scan.dir, sizeof lib.scan.dir, "Artist/An Album");
+        KV_CHECK(c, krome_press(e, scn, "tab_scan"));
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "s_state", "scanning") && shows(e, "s_walking", "root 2: Artist/An Album") && shows(e, "s_found", "31250 files, 4100 a second; 812 directories listed"));
+        KV_CHECK(c, shows(e, "s_read", "9000 tracks, 650 a second; 40.0 MB read") && shows(e, "s_unread", "22250 tracks") && shows(e, "s_queries", "3 stopped by a newer one"));
+        KV_CHECK(c, shows(e, "s_slot", "something looked at is being scanned first") && shows(e, "s_index", "31250 tracks, generation 44") && on_screen(e, "31250 files") == 1);
+        // A rebuilt index: said here, and where the library's list says what it has.
+        lib.scan.rebuilt = 1; lib.scan.active = 0; lib.scan.walking = 0;
+        frames(e, 3);
+        KV_CHECK(c, shows(e, "s_state", "idle") && strstr(krome_model_text(e, scn, "s_index"), "made again at start-up") && strstr(krome_model_text(e, scn, "l_status"), "the index was made again"));
+
+#if KV_DEV
+        // Events: each command and notification as it passes, with its fields, newest last,
+        // and no handler written for any of them. Nothing is kept while the tab is not up.
+        e.events.emit(PlayerStop{});
+        frames(e, 3);
+        KV_CHECK(c, krome_press(e, scn, "tab_events"));
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "e_summary", "0 seen, 0 kept") || strstr(krome_model_text(e, scn, "e_summary"), "seen")); // the face's own asks may already have passed
+        u32 before_seen = (u32)atof(krome_model_text(e, scn, "e_summary"));
+        e.events.emit(PlayerPlay{});
+        e.events.emit(LibraryChanged{77});
+        PlayerTrackFailed failed{};
+        failed.item = 3; failed.seq = 9;
+        format(failed.reason, sizeof failed.reason, "not a FLAC file");
+        e.events.emit(failed);
+        frames(e, 4);
+        KV_CHECK(c, on_screen(e, "PlayerPlay{") == 1 && on_screen(e, "LibraryChanged{generation=77}") == 1 && on_screen(e, "PlayerTrackFailed{item=3, seq=9, reason=\"not a FLAC file\"}") == 1);
+        KV_CHECK(c, (u32)atof(krome_model_text(e, scn, "e_summary")) == before_seen + 3 && on_screen(e, "PlayerStop") == 0 && on_screen(e, "KromeSet") == 0);
+        // Filtered: the lines that have the words.
+        KV_CHECK(c, type_into(e, "e_filter", "Failed"));
+        frames(e, 3);
+        KV_CHECK(c, on_screen(e, "PlayerTrackFailed{") == 1 && on_screen(e, "PlayerPlay{") == 0 && on_screen(e, "LibraryChanged") == 0);
+        input_pointer_override(e, 5, 795, 0);
+        frames(e, 2);
+        // Held: what passes is not kept, and what is there stays to be read.
+        KV_CHECK(c, krome_press(e, scn, "e_hold"));
+        frames(e, 3);
+        e.events.emit(PlayerNext{});
+        e.events.emit(failed);
+        frames(e, 4);
+        KV_CHECK(c, on_screen(e, "PlayerTrackFailed{") == 1 && strstr(krome_model_text(e, scn, "e_summary"), "held") && (u32)atof(krome_model_text(e, scn, "e_summary")) == before_seen + 3);
+        KV_CHECK(c, krome_press(e, scn, "e_hold"));
+        frames(e, 3);
+        e.events.emit(failed);
+        frames(e, 4);
+        KV_CHECK(c, on_screen(e, "PlayerTrackFailed{") == 2);
+        KV_CHECK(c, krome_press(e, scn, "e_clear"));
+        frames(e, 3);
+        KV_CHECK(c, on_screen(e, "PlayerTrackFailed{") == 0 && strstr(krome_model_text(e, scn, "e_summary"), " 0 kept"));
+        // Still, with the Events tab up and nothing passing: no frame.
+        paced(e, 30);
+        Cost quiet = paced(e, 300);
+        KV_CHECK(c, quiet.drawn == 0 && quiet.tick_asks == 0);
+#endif
+
+        // Tables: a resource, then a table, each by its own description. Every field the
+        // schema has is a line, by its name: one added to the schema would be one more.
+        p.transport.position = 123456; p.transport.rate = 48000; p.transport.state = (u8)PlayerState::Paused;
+        PlayerItem* it = standin_item(e, 1, "/music/a/01 one.flac", PlayerItemState::Failed);
+        format(it->reason, sizeof it->reason, "its header says 9 channels");
+        standin_item(e, 2, "/music/a/02 two.flac");
+        p.transport.queued = 2;
+        KV_CHECK(c, krome_press(e, scn, "tab_tables"));
+        frames(e, 5);
+        KV_CHECK(c, on_screen(e, "player.transport") >= 1 && on_screen(e, "library.rows") == 1 && strstr(krome_model_text(e, scn, "x_summary"), "player.transport: 11 fields"));
+        u32 named = 0;
+        for (const FieldDesc& fd : k_player_transport_fields) named += on_screen(e, fd.name) >= 1;
+        KV_CHECK(c, named == KV_COUNTOF(k_player_transport_fields) && on_screen(e, "123456") == 1 && on_screen(e, "48000") == 1);
+        p.transport.position = 123999;
+        frames(e, 3);
+        KV_CHECK(c, on_screen(e, "123999") == 1 && on_screen(e, "123456") == 0);
+        KV_CHECK(c, krome_press(e, scn, "xn_2")); // player.queue
+        frames(e, 5);
+        KV_CHECK(c, strstr(krome_model_text(e, scn, "x_summary"), "player.queue: 2 rows of PlayerItem, 12 fields each") && shows(e, "x_total", "26"));
+        named = 0;
+        for (const FieldDesc& fd : k_player_item_fields) named += on_screen(e, fd.name) >= 1;
+        KV_CHECK(c, named == KV_COUNTOF(k_player_item_fields) && on_screen(e, "row 1 of 2") == 1 && on_screen(e, "row 2 of 2") == 1);
+        KV_CHECK(c, on_screen(e, "\"/music/a/01 one.flac\"") == 1 && on_screen(e, "\"its header says 9 channels\"") == 1);
+        KV_CHECK(c, krome_press(e, scn, "xn_6")); // library.scan
+        frames(e, 5);
+        named = 0;
+        for (const FieldDesc& fd : k_library_scan_fields) named += on_screen(e, fd.name) >= 1;
+        KV_CHECK(c, named == KV_COUNTOF(k_library_scan_fields) && on_screen(e, "\"Artist/An Album\"") == 1);
+        KV_CHECK(c, krome_press(e, scn, "xn_4")); // player.params: five rows, the stand-in's
+        frames(e, 5);
+        KV_CHECK(c, strstr(krome_model_text(e, scn, "x_summary"), "player.params: 5 rows of PlayerParam") && on_screen(e, "\"gain_db\"") == 1 && on_screen(e, "\"dB\"") >= 1);
+
+        // Every failure has its place. A track that ends damaged, in its row, with how; a
+        // path too long to take, where it was typed.
+        KV_CHECK(c, on_screen(e, "its header says 9 channels") >= 1); // the queue's row too
+        PlayerItem* two = standin_find(e, 2);
+        two->damaged = 1; two->pos = 1; it->pos = 2;
+        format(two->reason, sizeof two->reason, "cut short at 0:41");
+        p.transport.place_pos = 2;
+        frames(e, 3);
+        KV_CHECK(c, on_screen(e, "damaged") == 1 && on_screen(e, "cut short at 0:41") >= 1);
+        char longer[4200];
+        memset(longer, 'a', sizeof longer);
+        longer[0] = '/';
+        longer[4150] = 0;
+        standin_clear(e);
+        KV_CHECK(c, type_into(e, "q_path", longer));
+        input_key_override(e, Key::Enter, true);
+        frames(e, 1);
+        input_key_override(e, Key::Enter, false);
+        frames(e, 3);
+        KV_CHECK(c, standin_count(e, "PlayerEnqueue") == 0 && strstr(krome_model_text(e, scn, "q_note"), "a path typed here can be 510 bytes"));
+        // One that fits is added, and the note goes.
+        input_pointer_override(e, 5, 795, 0);
+        krome_set(e, scn, "q_path", "/music/short.flac");
+        frames(e, 2);
+        KV_CHECK(c, krome_press(e, scn, "q_add"));
+        frames(e, 3);
+        KV_CHECK(c, standin_count(e, "PlayerEnqueue") == 1 && shows(e, "q_note", ""));
         engine_shutdown(e);
     }
 

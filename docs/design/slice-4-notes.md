@@ -281,3 +281,76 @@ found played and its title shown from the library, the title corrected by hand a
 in both lists, an album queued from its row, the queue cleared, the root removed. 224
 checks in `ui_dev`, 210 in the library; clean under `address,undefined` and `thread`.
 
+## Milestone 4, the inspectors
+
+Nov 23, 2026. The same machine and build.
+
+**As planned:** Scan, Events and Tables, in tabs beside the Chain under Output, and every
+failure given its place.
+
+**Events are the engine's trace, as data** (KR23). The face sets the engine's one event
+hook and keeps the last 512 events of the player's and the library's (by their names'
+first word: `Player`, `Library`, `Hifi`) in a ring, each as `engine_describe_event`
+writes it, with who emitted it. No handler is written for any type, and one added next
+slice shows. Live, the list is as many of the newest as fit, newest last; held, nothing
+more is kept and the whole ring can be read back; a filter keeps the lines that have the
+words typed. Nothing is kept while the tab is not up or the window is hidden. The open
+question is closed: it shows commands too, since a hook sees whatever is delivered. In a
+ship build the hook does not exist and the panel says so.
+
+**Tables are lines.** A table or a resource is shown from the field table the engine holds
+for it: a resource a line a field, a table a line that says which row and then a line a
+field, in Krome's sparse list. A field's value is formatted by its type alone. The test
+walks the schema's own tables (`k_player_item_fields` and the others) and finds a line
+for every field by its name, which is the proof that one added would appear. A new
+*table* needs its name in two places (the panel's list and the unit's `reads`): a unit
+reads what it declared, and that is the engine's rule, not a gap.
+
+**Found by watching: the slot never emptied.** `library.scan`'s `slot` was set by every
+`LibraryPrioritize` and cleared by nothing, so the Scan panel said "something looked at
+is being scanned first" for the rest of the run. It has been wrong since slice 3 and no
+test read it. It is now a state the threads share: asked for, handed to the tagger,
+and empty again when the tagger has read the last of what was handed over. This is the
+first bug the face found in what it watches.
+
+**Found in Krome: a text read back is 511 bytes.** `krome_model_text` copies into a
+512-byte buffer and cuts a longer value without a word. A path typed into the face
+therefore cannot be longer than 510 bytes: one that fills the buffer may be the front of
+something longer, and a path cut short is another file's. The face refuses it and says
+so beside the edit ("a path typed here can be 510 bytes; a longer one is queued from its
+row in the library"). A row's path never goes through the model, so BD16 holds as
+written: a track at any path the OS allows is queued from its row. Asked of Korvid as
+KR43.
+
+**Every failure has a place** (BD17), each tested against the stand-ins:
+
+| failure | where it shows |
+|---|---|
+| a file that will not decode | its queue row: `failed`, in red, with the reason |
+| a file that fails part-way | its queue row: `damaged`, with how |
+| a file whose tags cannot be read | its library row, with the reason |
+| a file or a root gone | its library row: `missing`, or `its root is offline` |
+| a directory that cannot be listed | its root's counts: `N not listed` |
+| an offline root | the root's line: `offline`, and why |
+| a rebuilt index | the Library panel's status line, and Scan's index line |
+| an underrun | Output's count (and the event, in Events) |
+| no device | Output: `no device open` |
+| a path too long to take | beside the edit it was typed in |
+| a panel that will not load | where the panel would be: the file, the line, the message |
+
+Not shown anywhere, because the library does not publish it: an override file that would
+not parse and was set aside. It is a warning in the log. A line in `library.roots` or
+`library.scan` would give it a place; left for the library.
+
+**The face from the command line.** `face press ID`, `face show KEY` and `face stats`
+(model writes, commands, layouts, paints) on the engine's command line, so a real window
+can be driven and asked what it shows by a script. The screenshots and counts in these
+notes were taken that way.
+
+**Tests** (`ui_dev`, 262 checks): Scan from the resource; Events with three events
+emitted and found by their described text, the filter, hold, clear, and no frame while
+nothing passes; Tables for a resource and a table, every schema field found by name, a
+value following its source; a damaged row; the typed path refused. The library's slot
+test now reads the flag: set while it has work, empty after, and empty when asked for
+with nothing to read.
+

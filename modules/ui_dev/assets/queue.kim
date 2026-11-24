@@ -10,6 +10,7 @@ def queue-panel {
         row gap=8 middle w=fill {
             text "Queue" [dev-title]
             text "{q_summary}" id=q_summary [dev-value]
+            text "{q_note}" id=q_note size=12 color=#ff9a9a
             spacer
             input id=q_path @q_path placeholder="a file's path" w=300 -> q_add
             dev-btn "Add" id=q_add -> q_add

@@ -381,6 +381,19 @@ void tag_thread(void* arg) {
             if (!t.act[i].used) { if (next_job(t, i)) step(t, i); }
         }
         if (t.out && (t.out->recs.len >= 256 || time_now() - t.out_since >= kSendEvery)) send(t);
+        // The slot is empty when the last of what was handed over has been read and nothing
+        // more of it is waiting. If it was asked for again meanwhile, that ask stands.
+        {
+            bool work = t.slot && t.slot->next < t.slot->jobs.len;
+            for (const Active& a : t.act) work = work || (a.used && a.slot);
+            if (!work) {
+                os_mutex_lock(&sh.lock);
+                bool more = sh.slot_jobs != nullptr;
+                os_mutex_unlock(&sh.lock);
+                u32 handed = 2;
+                if (!more) atomic_compare_exchange(&sh.slot_state, &handed, 0u, false, MO_ACQ_REL, MO_RELAXED);
+            }
+        }
         if (t.asks.len) {
             os_mutex_lock(&sh.lock);
             for (const ReadAsk& a : t.asks) sh.read_asks.push(a);

@@ -10,8 +10,10 @@
 #include "face.h"
 #include "korvid/blackwing_player/player.h"
 #include "korvid/core/array.h"
+#include "korvid/core/cli.h"
 #include "korvid/core/format.h"
 #include "korvid/core/log.h"
+#include "korvid/core/memory.h"
 #include "korvid/kim/kim.h"
 #include "korvid/krome/krome.h"
 #include "korvid/platform_hid/events.h"
@@ -27,8 +29,8 @@ constexpr const char* kShellFile = "ui_dev/shell.kimb";
 constexpr const char* kShellScreen = "shell";
 constexpr const char* kFallback = "ui_dev/failed";
 // The panels, by the name of their files (ui_dev/<name>.kim, .lua) and of their
-// definition (<name>-panel). The shell names the same four.
-constinit const char* const k_panels[] = {"transport", "queue", "output", "chain"};
+// definition (<name>-panel). The shell names the same eight.
+constinit const char* const k_panels[] = {"transport", "library", "queue", "output", "chain", "scan", "events", "tables"};
 constexpr u32 kPanels = KV_COUNTOF(k_panels);
 // A command's answer is a tick or two away: the face asks for this many ticks after it
 // emits one, so the answer is not left waiting for the loop's next heartbeat.
@@ -144,7 +146,8 @@ void on_event(TickContext& ctx, Span<const KromeEvent> events) {
     if (f.screen.is_null()) return;
     for (const KromeEvent& ev : events) {
         if (ev.screen != f.screen.hash) continue;
-        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || chain_event(ctx, f, ev) || library_event(ctx, f, ev)) {
+        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || chain_event(ctx, f, ev) || library_event(ctx, f, ev) || events_event(ctx, f, ev) ||
+            tables_event(ctx, f, ev)) {
             ++f.stats.commands;
             f.awake = kAwakeTicks;
             engine_want_ticks(*ctx.engine);
@@ -154,12 +157,13 @@ void on_event(TickContext& ctx, Span<const KromeEvent> events) {
 
 // Which rows a list of the screen's has built: kept for the panel that fills it.
 void on_view(TickContext& ctx, Span<const KromeView> views) {
-    static const Name q_view = name_intern("q_view"), l_rows = name_intern("l_rows");
+    static const Name q_view = name_intern("q_view"), l_rows = name_intern("l_rows"), x_view = name_intern("x_view");
     Face& f = ctx.state_as<Face>();
     for (const KromeView& v : views) {
         if (f.screen.is_null() || v.screen != f.screen.hash) continue;
         if (v.event == q_view.hash) { f.q_first = v.first; f.q_count = v.count; }
         if (v.event == l_rows.hash) { f.lib_first = v.first; f.lib_count = v.count; }
+        if (v.event == x_view.hash) { f.x_first = v.first; f.x_count = v.count; }
         f.awake = kAwakeTicks;
     }
 }
@@ -203,7 +207,7 @@ void on_visibility(TickContext& ctx, Span<const WindowVisibility> events) {
     Face& f = ctx.state_as<Face>();
     for (const WindowVisibility& v : events) {
         if (f.hidden && v.visible) f.fresh = true;
-        if (!f.hidden && !v.visible) library_close(ctx, f); // no window onto the library while nobody looks
+        if (!f.hidden && !v.visible) { library_close(ctx, f); f.ev_on = false; } // no window onto the library while nobody looks, and no event kept
         f.hidden = !v.visible;
     }
 }
@@ -228,12 +232,18 @@ void ui_dev_sync(TickContext& ctx) {
     }
     if (f.fresh) { face_forget(f); f.fresh = false; }
     ++f.stats.syncs;
+    // Which inspector is up: the model's own, since the tabs write it themselves.
+    const char* tab = krome_model_text(e, f.screen, "r_tab");
+    f.tab = !strcmp(tab, "scan") ? FaceTab::Scan : !strcmp(tab, "events") ? FaceTab::Events : !strcmp(tab, "tables") ? FaceTab::Tables : FaceTab::Chain;
     titles_sync(ctx, f);
     transport_sync(ctx, f);
     library_sync(ctx, f);
     queue_sync(ctx, f);
     output_sync(ctx, f);
     chain_sync(ctx, f);
+    scan_sync(ctx, f);
+    events_sync(ctx, f);
+    tables_sync(ctx, f);
 }
 
 bool ui_dev_startup(Engine& e, ModuleInstance& self) {
@@ -246,8 +256,53 @@ bool ui_dev_startup(Engine& e, ModuleInstance& self) {
     // every module it reads is up by then.
     f->wanted = g_ui_dev_config.enabled && g_ui_dev_config.open;
     if (f->wanted) engine_want_ticks(e);
+    // The Events panel's ring, and the engine's hook (dev builds; there is one, and a face
+    // that is up takes it).
+    if (g_ui_dev_config.enabled) {
+        f->events = (FaceEvent*)mem_alloc(sizeof(FaceEvent) * kFaceEvents);
+        for (u32 i = 0; i < kFaceEvents; ++i) f->events[i] = FaceEvent{};
+        f->ev_hooked = engine_set_event_hook(e, events_hook, f);
+    }
     return true;
 }
+
+void ui_dev_shutdown(Engine& e, ModuleInstance& self) {
+    Face* f = self.state_as<Face>();
+    if (!f) return;
+    if (f->ev_hooked) engine_set_event_hook(e, nullptr, nullptr);
+    f->ev_hooked = f->ev_on = false;
+    if (f->events) mem_free(f->events);
+    f->events = nullptr;
+}
+
+// The face from the engine's command line: a control pressed by its id, a model value
+// read. For driving a real window from a script (the slice's measurements were), and for
+// asking a running face what it shows.
+void cmd_press(CliContext& ctx, Span<const char* const> args) {
+    Face* f = face(*ctx.engine);
+    if (args.len != 1 || !f || f->screen.is_null()) { ctx.fail("face press <a control's id>"); return; }
+    if (!krome_press(*ctx.engine, f->screen, args[0])) { ctx.fail("there is no control '%s' on the face, or it does nothing", args[0]); return; }
+    engine_want_ticks(*ctx.engine);
+    engine_want_frame(*ctx.engine);
+}
+void cmd_show(CliContext& ctx, Span<const char* const> args) {
+    Face* f = face(*ctx.engine);
+    if (args.len != 1 || !f || f->screen.is_null()) { ctx.fail("face show <a model key>"); return; }
+    ctx.print("%s", krome_model_text(*ctx.engine, f->screen, args[0]));
+}
+void cmd_stats(CliContext& ctx, Span<const char* const>) {
+    Face* f = face(*ctx.engine);
+    if (!f) { ctx.fail("the face is not up"); return; }
+    KromeStats k = krome_stats(*ctx.engine);
+    ctx.print("%llu model writes, %llu commands, %llu ticks looked at, %llu asleep; %u panels standing in%s", (unsigned long long)f->stats.writes,
+              (unsigned long long)f->stats.commands, (unsigned long long)f->stats.syncs, (unsigned long long)f->stats.asleep, f->stats.broken, f->stats.failed ? "; the screen did not load" : "");
+    ctx.print("krome: %llu layouts, %llu paints, %llu lists handed over", (unsigned long long)k.layouts, (unsigned long long)k.paints, (unsigned long long)k.submits);
+}
+constinit const CliCommandDesc k_commands[] = {
+    {.name = "face press", .help = "<id> presses a control of the face by its id, as a click would", .fn = cmd_press},
+    {.name = "face show", .help = "<key> a value of the face's model, as the screen shows it", .fn = cmd_show},
+    {.name = "face stats", .help = "what the face has done: model writes, commands, layouts, paints", .fn = cmd_stats},
+};
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".events", KV_ON(KromeEvent, on_event), .phase = Phase::PreSim,
@@ -326,7 +381,9 @@ KV_MODULE_DEFINE(ui_dev_module) = {
     .name     = "ui_dev",
     .systems  = k_systems,
     .handlers = k_handlers,
+    .commands = k_commands,
     .startup  = ui_dev_startup,
+    .shutdown = ui_dev_shutdown,
     .memory   = {.reserve = 1024 * 1024},
 };
 

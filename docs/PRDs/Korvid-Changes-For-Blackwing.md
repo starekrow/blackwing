@@ -1,6 +1,7 @@
 # Korvid changes for Blackwing — quick requirements
 
-Nov 22, 2026 · updated Nov 23 with what Korvid took, and with what skin import needs
+Nov 22, 2026 · updated Nov 23 with what Korvid took, with what slice 4 found, and with
+what skin import needs
 
 ## What this is
 
@@ -10,10 +11,9 @@ asked, and how to tell it is done. The findings themselves are in
 [docs/design/slice-1-notes.md](../design/slice-1-notes.md).
 
 Each was written before Korvid took it, with Blackwing's workaround named so the cost of
-waiting was clear. Korvid's slices 10 and 11 took all twenty-five: Status has where each
-landed and what Blackwing does with it now. KR28 to KR42 are new, from the skin import
-note, and are for work in no phase yet. KR26 and KR27 are slice 4's and are written up
-with it.
+waiting was clear. Korvid's slices 10 and 11 took the first twenty-five: Status has where
+each landed and what Blackwing does with it now. KR26 and KR27 are new, from building
+slice 4. KR28 to KR42 are new, from the skin import note, and are for work in no phase yet.
 
 One of these blocked the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
 backend, and a project cannot link PipeWire today without editing the engine.
@@ -45,15 +45,19 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR14 | `.c` sources, with a toolchain's `cc` | used: `blackwing_library/src/sqlite.c` |
 | KR15 | `io_make_dirs` and `io_remove_tree` take any length | nothing to change but the corpus test's `mkdir`, which may go |
 | KR16 | a recursive watch neither follows nor reports a link to a directory | the library's filter of paths through a link (`watch.cc`, `Links`) may go |
-| KR17 | `ResourceDesc::cosmetic` | not yet: `player.transport`, `player.output` and `library.scan` can now have field tables |
+| KR17 | `ResourceDesc::cosmetic` | used: `player.transport`, `player.output` and `library.scan` have field tables (`schema.h`, slice 4 milestone 1) |
 | KR18 | `script_push_events`, `EventTypeDesc::defaults`, `script_push_resource` | not yet: slice 4's script API |
 | KR19 | `engine_add_event_type`, `engine_add_ktable`, their removal, `engine_listen` | not yet: B33. A runtime event type is read by listening, not by a unit in the schedule |
-| KR20 | `Pacing::Decoupled`, `engine_want_ticks` | not yet: slice 4, milestone 1 |
-| KR21 | `WindowVisibility`, `HostWindow::visible()`; no frame drawn for a hidden window | not yet: slice 4, milestone 1. A window minimized by hand on Wayland is not checked |
-| KR22 | `each row in rows height=24 count=@total from=@first -> view`, a `placeholder` block, `KromeView` | not yet: slice 4, milestone 3 |
-| KR23 | `engine_set_event_hook`, dev builds | not yet: `ui_dev`'s Events panel |
+| KR20 | `Pacing::Decoupled`, `engine_want_ticks` | used: `blackwing` with a face is `frameloop_main` paced `Decoupled`; the player and the library ask for their ticks, and the headless loop reads the same request |
+| KR21 | `WindowVisibility`, `HostWindow::visible()`; no frame drawn for a hidden window | used: `ui_dev` sleeps on it; minimized under X11, 599 ticks and no frame in ten seconds. A window minimized by hand on Wayland is not checked |
+| KR22 | `each row in rows height=24 count=@total from=@first -> view`, a `placeholder` block, `KromeView` | used: `ui_dev`'s Queue panel (slice 4, milestone 2). The check does not know `placeholder` (KR27) |
+| KR23 | `engine_set_event_hook`, dev builds | used: `ui_dev`'s Events panel keeps what the hook is handed (slice 4, milestone 4) |
 | KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | not yet: slice 4, milestone 6; the session file and the index can move |
 | KR25 | `image/jpeg.h`: baseline, progressive, scaled, EXIF, fuzzed | not yet: BL25 and slice 6 |
+
+| KR26 | not asked of Korvid before: found in slice 4, milestone 1 | the still window polls: about 230 wakeups a second |
+| KR27 | not asked of Korvid before: found in slice 4, milestone 2 | worked round: a definition named `placeholder` in `ui_dev/widgets.kim` |
+| KR43 | not asked of Korvid before: found in slice 4, milestone 4 | a path typed into the face is refused past 510 bytes, with a line beside the edit |
 | KR28 to KR42 | not asked of Korvid before: from the skin import note | nothing built: skin import is in no phase |
 
 Where Korvid's answer differs from what was asked:
@@ -688,6 +692,86 @@ has run over it with the sanitizers on.
 **Workaround today.** None in use: art is not read. Blackwing could vendor a decoder in
 a module of its own, which every other Korvid program that meets a JPEG would then do
 again.
+
+## Found in building slice 4
+
+Nov 23, 2026. From [slice 4's notes](../design/slice-4-notes.md), as it is built.
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR26 | A still window's loop waits for something to happen instead of polling for it | `frameloop`, `platform_hid` | P1 |
+| KR27 | The markup check accepts a sparse list's `placeholder` block | `kimb` | P1 |
+| KR43 | A screen's text can be read back whole, whatever its length | `krome` | P2 |
+
+### KR26: a still window that sleeps
+
+**What was run into.** `Pacing::Decoupled` does what KR20 asked: with the player paused
+the window draws no frame and ticks four times a second. But between those ticks the
+loop sleeps 4 ms at a time and pumps the platform, to see input and I/O: about 230
+wakeups a second and 2.5% of a core in a dev build on the Linux laptop, for a window
+nobody is touching. `blackwing` with no face, paused, wakes four times a second and
+costs 0.03%. A music player sits paused and open for days, on a battery.
+
+**What is asked.** With nothing wanted (no ticks, no frame, no Work, no I/O out), the
+loop blocks until the window has an event, a waker has something, a frame falls due
+(`engine_want_frame_at`) or the heartbeat is reached, whichever is first: SDL's
+`SDL_WaitEventTimeout`, `MsgWaitForMultipleObjects` on Win32, the run loop on Apple's.
+The I/O queue's completions and the CLI's sockets need a way to end the wait, or their
+own deadline.
+
+**Done when** a windowed program that asks for nothing wakes about as often as its
+heartbeat, and a key press is still seen within a frame.
+
+**Workaround today.** None; the cost is paid.
+
+### KR27: the check and `placeholder`
+
+**What was run into.** KR22's sparse list takes a block for the rows it does not hold:
+`placeholder { ... }`, a child of the `each`. `kim` parses it and Krome's builder finds
+it by its word. `kimb_check` (`modules/kimb/src/kimb.cc`, where it walks an `each`'s
+children) takes it for a node and refuses it: "'placeholder' is neither a kernel node
+(box, text, image, hit, edit) nor a definition". The cook runs the check, so no `.kim`
+with a placeholder can be cooked. Krome's sparse tests give the builder a document made
+by hand and never run the check; `kim`'s test only parses.
+
+**What is asked.** The check knows `placeholder` as a child of an `each` with `count=`
+or `from=`: its children checked as the each's are, an error for one anywhere else, and
+for a second.
+
+**Done when** `each row in rows height=24 count=@n from=@f { text "{row.name}"
+placeholder { text "..." } }` cooks, and a `placeholder` outside a sparse `each` is a
+mistake with its line.
+
+**Workaround today.** `def placeholder { box { slot } }` in the face's prelude. The
+check then sees a definition; the builder takes the block before it looks any
+definition up, so the definition is never expanded.
+
+### KR43: a model's text, whole
+
+**What was run into.** A face's C++ reads what was typed into an edit with
+`krome_model_text`, which copies into a buffer of 512 bytes inside Krome and cuts a
+longer value without saying so. A path typed into `ui_dev` (a file to queue, a root to
+add) may be up to 4095 bytes on Linux; a path cut at 511 is the path of something else.
+Nothing in an event can carry it either: `KromeEvent` has a number.
+
+**What is asked.** A read into the caller's buffer that says how long the value is
+(`krome_model_text(e, screen, key, out, cap)`, returning the whole length as `format`
+does), or the length beside the pointer. The same question for `krome_set`, whose 56
+bytes are cut the same way.
+
+**Done when** a value of four thousand bytes written to an edit is read back whole, or
+the caller is told it was not.
+
+**Workaround today.** `ui_dev` refuses a typed path of 511 bytes or more and says so on
+screen. Rows are queued by their tables' paths, which never pass through the model.
+
+Also seen, not asked for: `krome_set` cuts a string at 56 bytes without a word (a
+`KromeSet` holds no more); a caller with a longer one must know to use `krome_set_doc`.
+An error, or a note where `krome_set` is declared, would have saved a wrong turn.
+
+Also seen, not asked for: each change to a Krome screen is presented twice under
+decoupled pacing. Krome asks for a frame when it hands the renderer a new list, inside
+the frame that draws it, and the request is still there when that frame is done.
 
 ## Found in the skin import note
 
