@@ -14,7 +14,9 @@
 //   --lead SECONDS       how far ahead of the playhead audio is kept (5)
 //   --verbose            the engine's INFO lines
 //   --trace-events       every event as it is delivered (dev builds), with who emitted it
-//   --data DIR           where the library keeps its index and its roots (the per-user data directory)
+//   --data DIR           where the library keeps its index and its roots (the per-user data directory),
+//                        and with it the session (the user's settings directory)
+//   --no-session         neither restores how it was left nor saves it
 //   --run-seconds N      ends the run after N seconds (tests, measurements)
 //   --cli-port N         the engine's command line on a loopback port
 //   --size WxH, --renderer auto|gpu|cpu, --screenshot FILE, --borderless, --hitch-ms N,
@@ -35,6 +37,7 @@
 #include "korvid/blackwing_library/library.h"
 #include "korvid/blackwing_player/player.h"
 #include "korvid/blackwing_script/host.h"
+#include "korvid/blackwing_session/session.h"
 #include "korvid/cli/module.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/cli.h"
@@ -275,9 +278,25 @@ bool have_display() {
 #endif
 }
 
+// Where the session is, before there is an engine to ask: the directory named, or the
+// user's settings directory as the engine would name it. Only the window's size is read
+// from there this early; where the rule is not known (it is the engine's, per OS), no
+// size is read and the window opens at its own.
+bool session_dir(const char* data_dir, char* out, usize cap) {
+    if (data_dir && data_dir[0]) { format(out, cap, "%s", data_dir); return true; }
+#if defined(__linux__)
+    const char* config = getenv("XDG_CONFIG_HOME");
+    const char* home = getenv("HOME");
+    if (config && config[0] == '/') { format(out, cap, "%s/blackwing/blackwing", config); return true; }
+    if (home && home[0]) { format(out, cap, "%s/.config/blackwing/blackwing", home); return true; }
+#endif
+    (void)out; (void)cap;
+    return false;
+}
+
 // The engine with no face: the modules a machine with no display can start. The frame
 // loop, the window, Krome and the faces are linked in and left out.
-constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "script", "blackwing"};
+constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "session", "script", "blackwing"};
 constinit const ModuleDesc* g_headless[KV_COUNTOF(k_headless)] = {};
 Span<const ModuleDesc* const> headless_modules() {
     u32 n = 0;
@@ -329,7 +348,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     const char* run_seconds = nullptr;
     const char* cli_port = nullptr;
     f64 lead = 5.0;
-    bool verbose = false, trace = false;
+    bool verbose = false, trace = false, no_session = false, sized = false;
     // What the frame loop is given, should there be a face: its own options, as they came.
     static char* loop_argv[48];
     int loop_argc = 0;
@@ -338,6 +357,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     for (; first < argc && strncmp(argv[first], "--", 2) == 0; ++first) {
         const PassOption* pass = nullptr;
         for (const PassOption& o : k_pass) if (strcmp(argv[first], o.name) == 0) pass = &o;
+        if (pass && strcmp(pass->name, "--size") == 0) sized = true;
         if (pass && (!pass->value || first + 1 < argc)) {
             if (loop_argc + 2 < (int)KV_COUNTOF(loop_argv)) { loop_argv[loop_argc++] = argv[first]; if (pass->value) loop_argv[loop_argc++] = argv[++first]; }
         }
@@ -348,6 +368,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         else if (strcmp(argv[first], "--face") == 0 && first + 1 < argc) face = argv[++first];
         else if (strcmp(argv[first], "--run-seconds") == 0 && first + 1 < argc) run_seconds = argv[++first];
         else if (strcmp(argv[first], "--cli-port") == 0 && first + 1 < argc) cli_port = argv[++first];
+        else if (strcmp(argv[first], "--no-session") == 0) no_session = true;
         else if (strcmp(argv[first], "--verbose") == 0) verbose = true;
         else if (strcmp(argv[first], "--trace-events") == 0) trace = true;
         else { fprintf(stderr, "blackwing: unknown option %s\n", argv[first]); usage(); return 2; }
@@ -381,6 +402,12 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         sc.nargs = (u32)(argc - first - 2);
     }
     script_host_configure(sc);
+    // The session: a sitting has one, a command does not. With a face, or a library kept
+    // open, how it was left comes back and is kept; `play` and `run` neither restore nor save.
+    SessionConfig session;
+    session.enabled = !no_session && !play && !script && !help && (window || library);
+    session.dir = data_dir; // beside the library's, when a directory was named; else the user's settings directory
+    session_configure(session);
     g_start_library = library;
     g_start_play = play;
     if (capture_to) device = "capture";
@@ -414,6 +441,18 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         // The frame loop's run: it makes the engine from the whole module list, opens the
         // window and the renderer, loops, and shuts everything down, memory included.
         static char quiet[] = "--quiet", stdin_flag[] = "--cli-stdin", trace_flag[] = "--trace-events", port_flag[] = "--cli-port", run_flag[] = "--run-seconds";
+        // The window at the size it was left at, unless one was asked for: the face kept it
+        // in the session, which is read here because the window opens before any module can.
+        static char size_flag[] = "--size", size_text[32];
+        char settings[4200];
+        if (session.enabled && !sized && session_dir(data_dir, settings, sizeof settings)) {
+            f64 w = session_peek(settings, "ui_dev", "w", 0.0), h = session_peek(settings, "ui_dev", "h", 0.0);
+            if (w >= 320.0 && h >= 240.0 && w <= 16384.0 && h <= 16384.0) {
+                format(size_text, sizeof size_text, "%ux%u", (u32)w, (u32)h);
+                loop_argv[loop_argc++] = size_flag;
+                loop_argv[loop_argc++] = size_text;
+            }
+        }
         if (!verbose && !trace) loop_argv[loop_argc++] = quiet;
         if (terminal) loop_argv[loop_argc++] = stdin_flag;
         if (trace) loop_argv[loop_argc++] = trace_flag;

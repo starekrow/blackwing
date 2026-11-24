@@ -4,10 +4,10 @@ The development face: a plain, dense, complete window over the player and the li
 It is built first, and it is how the rest is developed. It reads their tables and emits
 their commands, and calls no function of either.
 
-**Status:** slice 4, milestone 4. Every panel is in: Transport, Library, Queue and
-Output, and in tabs under Output, Chain, Scan, Events and Tables. What is left of the
-[slice](../../docs/PRDs/Blackwing-Slice-4-PRD.md) for this module is its part of the
-session, the keyboard, and the close's runs.
+**Status:** slice 4, milestone 6. Every panel is in: Transport, Library, Queue and
+Output, and in tabs under Output, Chain, Scan, Events and Tables; and its part of the
+session. What is left of the [slice](../../docs/PRDs/Blackwing-Slice-4-PRD.md) for this
+module is the keyboard and the close's runs.
 
 ## How it works
 
@@ -83,6 +83,13 @@ the answer's file name is the row's, since the queue moves under the answers.
 **A window onto the library is open only while it is looked at.** Hidden, the face closes
 both; seen again, it asks again.
 
+**Its part of the session** (`keep.cc`). The session keeps values for whoever asks
+([blackwing_session](../blackwing_session/README.md)); this face is `ui_dev` and asks for
+the window's size, the tab that is up, the library's sort and search, and the way to
+where its list is, each when it is not what it last asked. At the next start it takes
+them back from `SessionKept` before its screen is built. Where the window was and how
+far a list was scrolled are not kept: the engine cannot say or set either (KR44).
+
 **The chain's controls are written from the tables.** `chain.cc` writes the definition
 `chain-stages` as markup from `player.params` and `player.presets`, compiles it
 (`kim_compile`) and gives it to Krome in the place of `assets/chain_stages.kim`, which
@@ -147,7 +154,8 @@ What it registers: `ui_dev.sync` (PostSim; reads the player's two resources and 
 tables and the library's resource and two tables; emits `LibraryQuery`,
 `LibraryPrioritize`, `LibraryPath`, `PlayerPlay`), `ui_dev.events` (on `KromeEvent`;
 emits the player's twelve commands and four of the library's), `ui_dev.view` (on
-`KromeView`), `ui_dev.result` and `ui_dev.collected` (on the library's answers),
+`KromeView`), `ui_dev.result` and `ui_dev.collected` (on the library's answers), `ui_dev.kept` (on
+`SessionKept`),
 `ui_dev.visibility` (on `WindowVisibility`; emits `LibraryClose`), `ui_dev.frame`
 (Frame).
 

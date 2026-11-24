@@ -362,6 +362,7 @@ void library_sync(TickContext& ctx, Face& f) {
     if (f.lib_text[0]) n = (usize)format(text, sizeof text, "search: %s", f.lib_text);
     else for (u32 i = 0; i < f.ncrumbs && n + 4 < sizeof text; ++i) n += (usize)format(text + n, sizeof text - n, "%s%s", i ? " / " : "", f.crumbs[i].name);
     face_set(f, "l_crumb", text);
+    if (f.lib_text[0]) face_set(f, "l_search", f.lib_text); // a search that came back with the session shows in the edit; one typed is already there
     face_set(f, "l_view", f.lib_text[0] ? "search" : view_key(f.crumbs[0].view));
     face_set(f, "l_sort", sort_key(f.lib_sort));
     if (f.lib_answered) format(text, sizeof text, "%u rows, answered in %.1f ms; generation %llu%s", f.lib_total, f.lib_seconds * 1e3, (unsigned long long)f.lib_generation,

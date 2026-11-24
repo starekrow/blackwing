@@ -52,12 +52,13 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR21 | `WindowVisibility`, `HostWindow::visible()`; no frame drawn for a hidden window | used: `ui_dev` sleeps on it; minimized under X11, 599 ticks and no frame in ten seconds. A window minimized by hand on Wayland is not checked |
 | KR22 | `each row in rows height=24 count=@total from=@first -> view`, a `placeholder` block, `KromeView` | used: `ui_dev`'s Queue panel (slice 4, milestone 2). The check does not know `placeholder` (KR27) |
 | KR23 | `engine_set_event_hook`, dev builds | used: `ui_dev`'s Events panel keeps what the hook is handed (slice 4, milestone 4) |
-| KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | not yet: slice 4, milestone 6; the session file and the index can move |
+| KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | used in part: the session is a file of its own in the settings directory (slice 4, milestone 6). The store is not used yet: a session is not a setting. The index has not moved to the cache directory |
 | KR25 | `image/jpeg.h`: baseline, progressive, scaled, EXIF, fuzzed | not yet: BL25 and slice 6 |
 
 | KR26 | not asked of Korvid before: found in slice 4, milestone 1 | the still window polls: about 230 wakeups a second |
 | KR27 | not asked of Korvid before: found in slice 4, milestone 2 | worked round: a definition named `placeholder` in `ui_dev/widgets.kim` |
 | KR43 | not asked of Korvid before: found in slice 4, milestone 4 | a path typed into the face is refused past 510 bytes, with a line beside the edit |
+| KR44 | not asked of Korvid before: found in slice 4, milestone 6 | the window comes back at its size and not its place; a list comes back at its top |
 | KR28 to KR42 | not asked of Korvid before: from the skin import note | nothing built: skin import is in no phase |
 
 Where Korvid's answer differs from what was asked:
@@ -702,6 +703,7 @@ Nov 23, 2026. From [slice 4's notes](../design/slice-4-notes.md), as it is built
 | KR26 | A still window's loop waits for something to happen instead of polling for it | `frameloop`, `platform_hid` | P1 |
 | KR27 | The markup check accepts a sparse list's `placeholder` block | `kimb` | P1 |
 | KR43 | A screen's text can be read back whole, whatever its length | `krome` | P2 |
+| KR44 | A window's place can be read and set, and a scroll box's; a user directory can be asked for before the engine starts | `platform_hid`, `krome`, `platform` | P1 |
 
 ### KR26: a still window that sleeps
 
@@ -764,6 +766,42 @@ the caller is told it was not.
 
 **Workaround today.** `ui_dev` refuses a typed path of 511 bytes or more and says so on
 screen. Rows are queued by their tables' paths, which never pass through the model.
+
+### KR44: putting a window back
+
+**What was run into.** Slice 4's session brings the application back as it was left:
+"the window where it was, at its size, on the same panel, its list at the same place".
+Three parts of that cannot be done from outside the engine.
+
+1. **A window has a size and no place.** `HostWindow` says `width()` and `height()`.
+   Where the window is, which display it is on and what displays there are cannot be
+   asked, and a window cannot be told where to open. Where a desktop does not let a
+   program place its window (Wayland), saying so is the answer.
+2. **A window cannot be resized after it opens**, and it opens in a module's start-up,
+   before any module of the program can say at what size. `blackwing` reads the size out
+   of its session file before the engine exists and passes it to the frame loop as
+   `--size`.
+3. **`platform_user_dir` needs an engine**, so that early read cannot ask where the
+   settings directory is. `blackwing` carries a copy of the rule for Linux, and on any
+   other OS opens at its own size.
+4. **A scroll box's offset cannot be read or set.** It survives a rebuild by id, inside
+   Krome. A list cannot be put back where it was left, nor (a lesser thing) scrolled to
+   the row that is playing.
+
+**What is asked.**
+
+- The window's position and its display, readable, and settable at open and after
+  (`WindowDesc` and `HostWindow`); the displays there are, with their bounds, so a place
+  on one that has gone is not used; `false` where the desktop will not have it.
+- `HostWindow::resize(w, h)`.
+- The three user directories from a call that needs no engine (`os_user_dir` is nearly
+  it), so a program can read its own settings before it starts one.
+- `krome_scroll(e, screen, id, x, y)` and its reading, or the offset bound to the model.
+
+**Done when** a program that saved its window's rectangle and a list's offset opens with
+both as they were, on each desktop that allows it.
+
+**Workaround today.** The size, by the early read; nothing for the rest.
 
 Also seen, not asked for: `krome_set` cuts a string at 56 bytes without a word (a
 `KromeSet` holds no more); a caller with a longer one must know to use `krome_set_doc`.

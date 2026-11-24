@@ -34,6 +34,7 @@ void standin_take(TickContext& ctx) {
     for (const PlayerJump& e : ctx.received<PlayerJump>()) put(s, "PlayerJump", e.item);
     for (const PlayerSeek& e : ctx.received<PlayerSeek>()) put(s, "PlayerSeek", e.item, e.frame);
     for (const PlayerSeekBy& e : ctx.received<PlayerSeekBy>()) put(s, "PlayerSeekBy", 0, 0, e.seconds);
+    for (const PlayerCue& e : ctx.received<PlayerCue>()) put(s, "PlayerCue", e.item, e.frame, (f64)e.rate);
     for (const PlayerSetParam& e : ctx.received<PlayerSetParam>()) put(s, "PlayerSetParam", e.stage, e.param, e.value);
     for (const PlayerApplyPreset& e : ctx.received<PlayerApplyPreset>()) put(s, "PlayerApplyPreset", e.stage, e.preset);
 }
@@ -54,7 +55,7 @@ constinit const KTableDesc k_standin_ktables[] = {
 };
 constinit const SystemDesc k_standin_systems[] = {
     {.name = ".take", .phase = Phase::PreSim, .fn = standin_take,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
      .writes = ".queue, .chain, .params, .presets, .transport, .output", .main_thread = true, .runs = RunWhen::Always},
 };
 

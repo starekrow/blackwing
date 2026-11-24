@@ -183,6 +183,13 @@ void on_result(TickContext& ctx, Span<const LibraryResult> results) {
     }
 }
 
+// What the session kept for this face at the last run: taken back.
+void on_kept(TickContext& ctx, Span<const SessionKept> kept) {
+    Face& f = ctx.state_as<Face>();
+    for (const SessionKept& k : kept) keep_restore(f, k);
+    f.awake = kAwakeTicks;
+}
+
 // What was collected to be played is all in: play, a tick or two on, once whoever forwards
 // the paths to the player has forwarded the last.
 void on_collected(TickContext& ctx, Span<const LibraryCollected> paths) {
@@ -232,6 +239,13 @@ void ui_dev_sync(TickContext& ctx) {
     }
     if (f.fresh) { face_forget(f); f.fresh = false; }
     ++f.stats.syncs;
+    // A tab the session kept, put up: the model's own, which the tabs read.
+    if (f.tab_restore[0]) {
+        face_forget(f, "r_tab");
+        face_set(f, "r_tab", f.tab_restore);
+        f.tab_restore[0] = 0;
+        return; // read back next tick, as the screen has it
+    }
     // Which inspector is up: the model's own, since the tabs write it themselves.
     const char* tab = krome_model_text(e, f.screen, "r_tab");
     f.tab = !strcmp(tab, "scan") ? FaceTab::Scan : !strcmp(tab, "events") ? FaceTab::Events : !strcmp(tab, "tables") ? FaceTab::Tables : FaceTab::Chain;
@@ -244,6 +258,7 @@ void ui_dev_sync(TickContext& ctx) {
     scan_sync(ctx, f);
     events_sync(ctx, f);
     tables_sync(ctx, f);
+    keep_sync(ctx, f);
 }
 
 bool ui_dev_startup(Engine& e, ModuleInstance& self) {
@@ -313,11 +328,12 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".visibility", KV_ON(WindowVisibility, on_visibility), .phase = Phase::PreSim, .emits = "LibraryClose"},
     {.name = ".result", KV_ON(LibraryResult, on_result), .phase = Phase::PostSim, .before = ".sync"},
     {.name = ".collected", KV_ON(LibraryCollected, on_collected), .phase = Phase::PostSim, .before = ".sync"},
+    {.name = ".kept", KV_ON(SessionKept, on_kept), .phase = Phase::PreSim},
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync,
      .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets, library.roots, library.rows, library.scan",
-     .emits = "LibraryQuery, LibraryPrioritize, LibraryPath, PlayerPlay", .main_thread = true, .runs = RunWhen::Always},
+     .emits = "LibraryQuery, LibraryPrioritize, LibraryPath, PlayerPlay, SessionKeep", .main_thread = true, .runs = RunWhen::Always},
     {.name = ".frame", .phase = Phase::Frame, .fn = ui_dev_frame, .main_thread = true},
 };
 

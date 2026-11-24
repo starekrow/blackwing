@@ -113,6 +113,11 @@ return kv.steps(function(s)
   emit("PlayerPause")
   s:wait(0.1)
   s:check(s:resource("player.transport").state == E.PlayerState.Paused, "paused")
+  -- A place taken up without playing: held at a row and a frame.
+  emit("PlayerCue", { item = 1, frame = 16000, frames = 32000, rate = 8000 })
+  s:wait(0.1)
+  local cued = s:resource("player.transport")
+  s:check(cued.state == E.PlayerState.Paused and cued.item == 1 and cued.position == 16000, "cued")
   -- What the library collects is queued (the application's glue); a file that is not there fails alone.
   emit("LibraryCollect", { id = 3, kind = E.LibraryRowKind.Track, row = row.id })
   local got = hear("LibraryCollected", function(ev) return ev.id == 3 end)

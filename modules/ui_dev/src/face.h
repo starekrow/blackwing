@@ -3,6 +3,7 @@
 // into the model, an event turned into a command).
 #pragma once
 #include "korvid/blackwing_library/library.h"
+#include "korvid/blackwing_session/session.h"
 #include "korvid/core/engine.h"
 #include "korvid/core/json.h"
 #include "korvid/core/name.h"
@@ -100,6 +101,10 @@ struct Face {
     bool    ev_on = false, ev_held = false, ev_dirty = true, ev_hooked = false;
     char    ev_filter[64] = "";
     u32     x_name = 0, x_first = 0, x_count = 0;
+    // The face's part of the session: what it last asked to have kept, by key (a hash of
+    // each); and a tab to put up, from what was kept, once the screen is built.
+    u64     kept_sent[8] = {};
+    char    tab_restore[16] = "";
     // Chain: what its stages' definition was written from; the parameter being dragged.
     u64     chain_sig = 0;
     bool    chain_drag = false;
@@ -156,5 +161,12 @@ void titles_sync(TickContext& ctx, Face& f);
 const char* face_title(const LibraryRow* row, const char* path, char* out, usize cap);
 // The face's windows onto the library closed (hidden, or going away): asked again when wanted.
 void library_close(TickContext& ctx, Face& f);
+
+// ---- the face's part of the session (keep.cc) ----------------------------------------------
+// What the face asks the session to keep, when it is not what it last asked: the window's
+// size, the tab that is up, and where the library's list is. And what the session kept
+// from the last run, taken back.
+void keep_sync(TickContext& ctx, Face& f);
+void keep_restore(Face& f, const SessionKept& kept);
 
 } // namespace kv

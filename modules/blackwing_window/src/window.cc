@@ -63,6 +63,7 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
     Window* w = window_state(*ctx.engine);
     if (!w) { ctx.fail("there is no window"); return; }
     f64 seconds = time_now() - w->since;
+    if (HostWindow* hw = platform_window(*ctx.engine)) ctx.print("%u x %u pixels, %.2f to a unit", hw->width(), hw->height(), (f64)hw->pixel_scale());
     ctx.print("%s; %llu ticks, %llu frames in %.1f s; hidden %u times: %llu ticks, %llu frames while hidden", w->hidden ? "hidden" : "shown",
               (unsigned long long)w->ticks, (unsigned long long)w->frames, seconds, w->hides, (unsigned long long)w->hidden_ticks,
               (unsigned long long)w->hidden_frames);

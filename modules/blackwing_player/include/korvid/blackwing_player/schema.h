@@ -30,6 +30,7 @@ inline constexpr FieldDesc k_f_PlayerPrevious[] = {KV_FIELDS(PlayerPrevious, unu
 inline constexpr FieldDesc k_f_PlayerJump[] = {KV_FIELDS(PlayerJump, item)};
 inline constexpr FieldDesc k_f_PlayerSeek[] = {KV_FIELDS(PlayerSeek, item, frame)};
 inline constexpr FieldDesc k_f_PlayerSeekBy[] = {KV_FIELDS(PlayerSeekBy, seconds)};
+inline constexpr FieldDesc k_f_PlayerCue[] = {KV_FIELDS(PlayerCue, item, frame, frames, rate)};
 inline constexpr FieldDesc k_f_PlayerSeeked[] = {KV_FIELDS(PlayerSeeked, item, frame, seq)};
 inline constexpr FieldDesc k_f_PlayerSetParam[] = {KV_FIELDS(PlayerSetParam, stage, param, value)};
 inline constexpr FieldDesc k_f_PlayerApplyPreset[] = {KV_FIELDS(PlayerApplyPreset, stage, preset)};
@@ -50,6 +51,7 @@ inline constexpr EventTypeDesc k_player_events[] = {
     KV_EVENT_EX(PlayerJump, k_f_PlayerJump, 0),
     KV_EVENT_EX(PlayerSeek, k_f_PlayerSeek, 0),
     KV_EVENT_EX(PlayerSeekBy, k_f_PlayerSeekBy, 0),
+    KV_EVENT_EX(PlayerCue, k_f_PlayerCue, 0),
     KV_EVENT_EX(PlayerSeeked, k_f_PlayerSeeked, 0),
     KV_EVENT_EX(PlayerSetParam, k_f_PlayerSetParam, 0),
     KV_EVENT_EX(PlayerApplyPreset, k_f_PlayerApplyPreset, 0),
@@ -77,7 +79,7 @@ inline constexpr ResourceDesc k_player_resources[] = {
 inline constexpr const char* k_player_surface_version = "0.1.0";
 inline constexpr const char* const k_player_commands[] = {
     "PlayerEnqueue", "PlayerQueueEdit", "PlayerPlay", "PlayerPause", "PlayerStop", "PlayerNext", "PlayerPrevious", "PlayerJump",
-    "PlayerSeek", "PlayerSeekBy", "PlayerSetParam", "PlayerApplyPreset",
+    "PlayerSeek", "PlayerSeekBy", "PlayerCue", "PlayerSetParam", "PlayerApplyPreset",
 };
 
 struct PlayerSurfaceEnum { const char* name; Span<const char* const> values; };

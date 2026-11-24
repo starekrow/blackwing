@@ -597,6 +597,65 @@ void test_player(TestCtx& c) {
         r.stop();
     }
 
+    // A place taken up without playing (PlayerCue): the transport is at a row and a frame,
+    // paused, with nothing heard and no device opened; play goes on from there. This is what
+    // a session comes back to.
+    c.begin("player cue");
+    {
+        const char* L = "tone_16_2ch_8000_long.flac"; // 32000 frames at 8 kHz
+        Pcm16 pcm = decode16(data(L));
+        const u64 fade = 80;
+        Rig r;
+        KV_CHECK(c, r.start());
+        r.add(data(A)); r.add(data(L)); r.add(data(A));
+        r.step(3);
+        r.say(PlayerCue{2, 12000, 32000, 8000});
+        r.step(3);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Paused && r.t().item == 2 && r.t().place == 2 && r.t().place_pos == 2 && r.t().position == 12000);
+        KV_CHECK(c, r.t().rate == 8000 && r.t().frames == 32000 && r.t().seek_item == 0 && r.t().left == 2); // what the cue said of the row; the row before the place is done
+        KV_CHECK(c, g_nlog == 0 && hifi_capture_opens(r.cap) == 0 && r.o().lead_frames == 0);               // nothing heard, nothing said, no device
+        r.step(4);
+        KV_CHECK(c, !r.e.ticks_wanted);                                                                      // and it rests there
+        // A seek while cued moves the place and stays cued; so does a seek by seconds, counted in what the cue said.
+        r.say(PlayerSeekBy{1.0});
+        r.step(2);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Paused && r.t().position == 20000 && r.t().seek_item == 0);
+        r.say(PlayerSeek{0, 16000});
+        r.step(2);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Paused && r.t().item == 2 && r.t().position == 16000 && hifi_capture_opens(r.cap) == 0);
+        // Play: from that row, at that frame. It starts (it was never heard, so it is no seek), and the first frames heard are the file's from there.
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(4000));
+        u32 still = 0;
+        f64 until = time_now() + 2.0;
+        while (!heard('S', 2) && time_now() < until) r.pace(&still);
+        KV_CHECK(c, log_is("S2") && r.t().state == (u8)PlayerState::Playing && r.t().item == 2 && r.t().rate == 8000 && r.t().frames == 32000);
+        HifiDeviceFormat f; u64 frames = 0;
+        const u8* d = r.seg_data(0, &f, &frames);
+        u64 at = d ? find_run16(d, 0, frames, pcm, 16000 + fade) : ~0ull;
+        KV_CHECK(c, at != ~0ull && at <= 2 * fade && memcmp(d + at * 4, pcm.s + (16000 + fade) * 2, (usize)(frames - at) * 4) == 0);
+        KV_CHECK(c, r.t().position >= 16000 && r.t().position < 16000 + frames + 1);
+        // Cued again while it plays: it stops there, as a stop would, and holds the new place. A stop ends a cue.
+        r.say(PlayerCue{3, 100, 0, 0});
+        r.step(3);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Paused && r.t().item == 3 && r.t().position == 100 && r.t().rate == 0 && r.t().place_pos == 3);
+        r.say(PlayerStop{});
+        r.step(2);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Stopped && r.t().item == 0 && r.t().position == 0 && r.t().place == 3);
+        // A row that is not there: nothing changes.
+        r.say(PlayerCue{99, 0, 0, 0});
+        r.step(2);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Stopped && r.t().place == 3);
+        // Cued, then played to the end from the cue: the last row, from its frame.
+        r.say(PlayerCue{3, 1000, 0, 0});
+        r.step(2);
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.play_until('Q', 0));
+        KV_CHECK(c, heard('S', 3) && heard('E', 3) && r.o().underruns == 0);
+        mem_free(pcm.s);
+        r.stop();
+    }
+
     // Parameters describe themselves (player.params), presets are data (player.presets),
     // and applying one is a command: every parameter of the stage, in one recut.
     c.begin("player params and presets");

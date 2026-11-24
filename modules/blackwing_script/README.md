@@ -160,8 +160,9 @@ capture device, the library on a directory it makes, and the glue.
   surface lists; every command is emitted by its name; every notification the run can
   bring about is heard with its fields. The C++ side listens to every event type of both
   schemas (`engine_listen`, no handler written for any) and checks that each command
-  arrived natively, and that the surfaces list as many names as the schemas have: 31
-  event types, 20 of them commands, 9 tables and resources, 79 fields, 39 enum values.
+  arrived natively, and that the surfaces list as many names as the schemas have: 32
+  event types, 21 of them commands, 9 tables and resources, 83 fields, 39 enum values.
+  A command added to a schema and not to the walk fails it by name, as `PlayerCue` did.
 - **`pass.lua`**: a root added, a track found by a word, played from its row, the next
   track sought in, a band set, the transport read, exact and why not, a pause that
   holds, the queue's end, no underrun: what slices 1 to 3 promised that a script can see.

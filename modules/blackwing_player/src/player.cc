@@ -108,6 +108,10 @@ struct Player {
     u32    seq = 0;           // the last notification's number
     u64    seek_item  = 0;    // a seek on its way to the ear: the row, and the frame it was sent to
     u64    seek_frame = 0;
+    // A cue: a place taken up and not played (PlayerCue). The row, its frame, and what the
+    // asker said of its rate and length, shown until it is heard. 0: none.
+    u64    cue_item = 0, cue_frame = 0, cue_frames = 0;
+    u32    cue_rate = 0;
     u32    shift = 18;        // a piece is 1 << shift bytes
     u64    committed = 0;     // bytes of pieces committed, across every item: there, being read, or being given back
     u64    returning = 0;     // of those, being given back: gone once hifi's fence has passed
@@ -542,8 +546,23 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
     for (const PlayerStop& x : ctx.received<PlayerStop>()) {
         (void)x;
         p.want_play = false; p.paused = false;
+        p.cue_item = 0;
         flush(p, queue);
         hifi_play(p.hifi); // a pause does not outlive a stop
+    }
+    for (const PlayerCue& x : ctx.received<PlayerCue>()) {
+        Item* it = find(p, x.item);
+        if (!it || it->removed || it->state == PlayerItemState::Failed) { KV_ERROR("player", "there is no row %llu to cue", (unsigned long long)x.item); continue; }
+        // Nothing sounds, as after a stop; then the place, with nothing sent to hifi.
+        p.want_play = false; p.paused = false;
+        flush(p, queue);
+        hifi_play(p.hifi);
+        u64 to = x.frames && x.frame > x.frames ? x.frames : x.frame;
+        jump_to(p, queue, pos_of(p, *it), to, false);
+        p.cue_item = it->id;
+        p.cue_frame = to;
+        p.cue_frames = x.frames;
+        p.cue_rate = (u32)x.rate;
     }
     for (const PlayerNext& x : ctx.received<PlayerNext>()) {
         (void)x;
@@ -611,12 +630,15 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         if (p.cursor >= p.count) continue;
         Item& it = at(p, p.cursor);
         const PlayerItem& r = row_of(queue, it);
-        if (!r.rate) continue; // not heard yet: nothing to count from
+        bool cued = p.cue_item == it.id && !p.want_play;
+        u32 rate = r.rate ? r.rate : cued ? p.cue_rate : 0;
+        u64 frames = r.frames ? r.frames : cued ? p.cue_frames : 0;
+        if (!rate) continue; // not heard yet: nothing to count from
         // From wherever the last seek was going, so repeats add up.
         f64 from = p.seek_item == it.id ? (f64)p.seek_frame : p.transport.item == it.id ? (f64)p.transport.position : 0.0;
-        f64 to = from + x.seconds * (f64)r.rate;
+        f64 to = from + x.seconds * (f64)rate;
         if (to < 0.0) to = 0.0;
-        if (r.frames && to > (f64)r.frames) to = (f64)r.frames;
+        if (frames && to > (f64)frames) to = (f64)frames;
         jump_to(p, queue, p.cursor, (u64)to, heard_now(p, it));
     }
     for (const PlayerPause& x : ctx.received<PlayerPause>()) {
@@ -629,6 +651,18 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         p.want_play = true;
         if (p.paused) { p.paused = false; hifi_play(p.hifi); }
         if (p.cursor < p.count) p.ended_said = false;
+    }
+    // A cue lasts while its row is the place and nothing plays. A seek while cued moved the
+    // row's start: the cue follows it, and is no seek on its way to anyone's ear.
+    if (p.cue_item) {
+        Item* c = find(p, p.cue_item);
+        if (!c || c->removed || c->state == PlayerItemState::Failed || p.want_play || p.cursor >= p.count || at(p, p.cursor).id != p.cue_item) {
+            p.cue_item = 0;
+        } else {
+            p.cue_frame = c->start;
+            c->seek = false;
+            p.seek_item = 0;
+        }
     }
 }
 
@@ -662,6 +696,24 @@ void heard_params(TickContext& ctx, Player& p, u32 gen) {
             p.heard_value[i][j] = p.sent_value[i][j];
             ctx.emit(PlayerParamChanged{i, j, p.heard_value[i][j], ++p.seq});
             any = any || moved;
+        }
+    if (any) publish_chain(ctx, p);
+}
+
+// With nothing reaching the ear (stopped, cued or paused), a parameter's new value has
+// nobody to be heard by. It is the value that will be heard, and is said now: a readout
+// follows the control, a session that sets the chain at start-up sees it set, and the
+// player has nothing left to wait for. hifi has the value all the same, for the next
+// render; when that is heard, there is nothing more to say.
+void settle_params(TickContext& ctx, Player& p) {
+    bool any = false;
+    for (u32 i = 0; i < kStages; ++i)
+        for (u32 j = 0; j < k_chain[i]->params.len; ++j) {
+            if (!p.sent_gen[i][j]) continue;
+            p.sent_gen[i][j] = 0;
+            p.heard_value[i][j] = p.sent_value[i][j];
+            ctx.emit(PlayerParamChanged{i, j, p.heard_value[i][j], ++p.seq});
+            any = true;
         }
     if (any) publish_chain(ctx, p);
 }
@@ -984,6 +1036,18 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
         if (!p.ended_said) { ctx.emit(PlayerQueueEnded{++p.seq}); p.ended_said = true; }
     }
     t.state = (u8)(!p.want_play ? PlayerState::Stopped : p.paused ? PlayerState::Paused : cur ? PlayerState::Playing : PlayerState::Starting);
+    // Cued: held at a row and a frame that have not been heard. The row's rate and length
+    // are the file's once it has been played, and until then what the cue said.
+    if (p.cue_item && !p.want_play) {
+        if (Item* c = find(p, p.cue_item)) {
+            const PlayerItem& r = row_of(queue, *c);
+            t.state = (u8)PlayerState::Paused;
+            t.item = c->id;
+            t.position = p.cue_frame;
+            t.frames = r.frames ? r.frames : p.cue_frames;
+            t.rate = r.rate ? r.rate : p.cue_rate;
+        }
+    }
 
     PlayerOutput& o = p.output;
     o.open = s.device_open; o.shared = s.shared; o.exact = s.exact;
@@ -1021,6 +1085,7 @@ void player_pump(TickContext& ctx) {
     commands(ctx, p, queue);
     from_io(ctx, p, queue);
     from_hifi(ctx, p, queue);
+    if (!p.want_play || p.paused) settle_params(ctx, p);
     take_returns(p);
     advance(ctx, p, queue);
     publish(ctx, p, queue);
@@ -1307,7 +1372,7 @@ constinit const KTableDesc k_ktables[] = {
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = player_pump,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
      .writes = ".queue, .chain, .params, .presets, .transport, .output",
      .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, PlayerSeeked, PlayerParamChanged, HifiUnderrun",
      .main_thread = true, .runs = RunWhen::Always},

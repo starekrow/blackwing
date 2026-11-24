@@ -94,6 +94,7 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerPlay`, `PlayerPause`, `PlayerStop`, `PlayerNext` | event type | in: the transport |
 | `PlayerPrevious`, `PlayerJump` | event type | in: the row before (or this one again); `item`, a row now |
 | `PlayerSeek`, `PlayerSeekBy` | event type | in: `item` (0: the one playing) and `frame`; `seconds` on from the last seek |
+| `PlayerCue` | event type | in: `item`, `frame`, and `frames` and `rate` to show until the row is heard; a place taken up without playing |
 | `PlayerSeeked` | event type | out: `item`, `frame`, `seq`; a seek's target was heard |
 | `PlayerSetParam` | event type | in: `stage`, `param`, `value`; volume is stage 0, param 0 (dB), mute param 1 |
 | `PlayerApplyPreset` | event type | in: `stage`, `preset` (a `player.presets` row's `index`); every parameter of the stage, in one recut |
@@ -133,7 +134,7 @@ What the module registers with the engine, as module `player`:
 - the ktable `player.params` (component `PlayerParam`, cosmetic, a row per parameter of
   every stage: its range, step, unit and the value heard), and `player.presets`
   (`PlayerPreset`, a row per preset a stage carries);
-- the nineteen event types above;
+- the twenty event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
   `seekby`, `volume`, `mute`, `set`, `eq`, `remove`, `move`, `insert`, `clear`, `status`.
@@ -169,6 +170,16 @@ What the module registers with the engine, as module `player`:
 - **The equalizer is stage 1**: band b's gain is parameter `b * 4 + 2`. `player eq preset
   NAME` emits `PlayerApplyPreset`, and the pump sends the preset's forty values in one
   tick, which is one recut; each is said (`PlayerParamChanged`) as it is heard.
+- **A cue is a place taken up and not played** (`PlayerCue`): the transport says `Paused`
+  at the row and the frame, nothing is heard, no device is opened, and the player rests.
+  `PlayerPlay` goes on from there, as a start (the row was never heard, so it is no
+  seek). A row has no rate or length until it has been heard, so the cue may carry them
+  and the transport shows those until it plays. A seek while cued moves the place and
+  stays cued; a stop, a skip or a jump ends it. It is what a session comes back to.
+- **With nothing reaching the ear, a parameter is heard at once.** Stopped, cued or
+  paused, a new value has no frame to be heard in: it is the value that will be heard,
+  and `PlayerParamChanged` says so in the next tick. Until slice 4 it was never said,
+  and the player waited for it for ever.
 - **A stage is described, not known.** The player reads its chain's stages through
   `hifi`'s contract: `player.params` and `player.presets` are whatever the stages say of
   themselves. A face draws its controls from those rows and names no stage.

@@ -9,6 +9,8 @@
 #include "korvid/blackwing_glue/module.h"
 #include "korvid/blackwing_library/module.h"
 #include "korvid/blackwing_player/module.h"
+#include "korvid/blackwing_session/module.h"
+#include "korvid/blackwing_session/session.h"
 #include "korvid/blackwing_library/schema.h"
 #include "korvid/blackwing_player/schema.h"
 #include "korvid/cli/module.h"
@@ -127,7 +129,7 @@ u32 player_commands(Engine& e) {
 
 // The same face over the player itself, playing into a capture device on the wall clock.
 const ModuleDesc* const k_real[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &blackwing_player_module,
-                                    &blackwing_library_module, &blackwing_glue_module, &ui_dev_module};
+                                    &blackwing_library_module, &blackwing_glue_module, &blackwing_session_module, &ui_dev_module};
 
 // Frames, a few milliseconds apart, until a model key shows `want` (or has it in it), or
 // `seconds` pass.
@@ -155,13 +157,13 @@ void answer_tracks(Engine& e, u32 first, u32 count, u32 total) {
     e.events.emit(LibraryResult{kWindow, total, first, count, 9, 0.002});
 }
 // The window as the face last asked for it; null when it has not.
-const StandinCommand* asked(Engine& e) { return standin_last(e, "LibraryQuery"); }
+const StandinCommand* asked_query(Engine& e) { return standin_last(e, "LibraryQuery"); }
 LibraryView asked_view(const StandinCommand* q) { return (LibraryView)(u8)q->value; }
 u64 asked_parent(const StandinCommand* q) { return q->d & 0x00FFFFFFFFFFFFFFull; }
 LibrarySort asked_sort(const StandinCommand* q) { return (LibrarySort)(u8)(q->d >> 56); }
 
 const ModuleDesc* const k_list[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &standin_player_module,
-                                    &standin_library_module, &ui_dev_module};
+                                    &standin_library_module, &blackwing_session_module, &ui_dev_module};
 
 // A chain of two stages for the stand-in: a gain with a level and a switch, an equalizer's
 // first band, and two presets.
@@ -518,7 +520,7 @@ void test_face(kv::TestCtx& c) {
         // The roots, each with its state, and why one is offline, where the root shows.
         KV_CHECK(c, on_screen(e, "/media/usb/more") == 1 && on_screen(e, "offline") == 1 && on_screen(e, "its directory is not there") == 1 && on_screen(e, "1200 tracks") == 1);
         // The face asked for its window: the roots' folders, from the top.
-        const StandinCommand* q = asked(e);
+        const StandinCommand* q = asked_query(e);
         KV_CHECK(c, q && q->a == kWindow && asked_view(q) == LibraryView::Folders && asked_parent(q) == 0 && q->b == 0 && q->c > 0 && shows(e, "l_crumb", "Folders"));
         standin_row(e, kWindow, 0, LibraryRowKind::Directory, 11, "/music");
         e.events.emit(LibraryResult{kWindow, 1, 0, 1, 5, 0.0021});
@@ -530,7 +532,7 @@ void test_face(kv::TestCtx& c) {
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "lo_0"));
         frames(e, 4);
-        q = asked(e);
+        q = asked_query(e);
         const StandinCommand* pr = standin_last(e, "LibraryPrioritize");
         KV_CHECK(c, q && asked_view(q) == LibraryView::Folders && asked_parent(q) == 11 && pr && pr->b == 11 && shows(e, "l_crumb", "Folders / /music") && shows(e, "l_total", "0"));
         standin_rows_clear(e, kWindow);
@@ -607,11 +609,11 @@ void test_face(kv::TestCtx& c) {
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "l_up"));
         frames(e, 4);
-        q = asked(e);
+        q = asked_query(e);
         KV_CHECK(c, q && asked_view(q) == LibraryView::Folders && asked_parent(q) == 0 && shows(e, "l_crumb", "Folders"));
         KV_CHECK(c, krome_press(e, scn, "lv_artists"));
         frames(e, 4);
-        q = asked(e);
+        q = asked_query(e);
         KV_CHECK(c, q && asked_view(q) == LibraryView::Artists && shows(e, "l_view", "artists") && shows(e, "l_crumb", "Artists"));
         standin_rows_clear(e, kWindow);
         LibraryRow* ar = standin_row(e, kWindow, 0, LibraryRowKind::Artist, 501, "Somebody");
@@ -620,7 +622,7 @@ void test_face(kv::TestCtx& c) {
         frames(e, 4);
         KV_CHECK(c, on_screen(e, "2 albums, 20 tracks") == 1 && krome_press(e, scn, "lo_0"));
         frames(e, 4);
-        q = asked(e);
+        q = asked_query(e);
         KV_CHECK(c, q && asked_view(q) == LibraryView::Albums && asked_parent(q) == 501 && shows(e, "l_crumb", "Artists / Somebody"));
         standin_rows_clear(e, kWindow);
         LibraryRow* al = standin_row(e, kWindow, 0, LibraryRowKind::Album, 601, "First");
@@ -629,7 +631,7 @@ void test_face(kv::TestCtx& c) {
         frames(e, 4);
         KV_CHECK(c, on_screen(e, "10 tracks, 1999") == 1 && krome_press(e, scn, "lo_0"));
         frames(e, 4);
-        q = asked(e);
+        q = asked_query(e);
         KV_CHECK(c, q && asked_view(q) == LibraryView::AlbumTracks && asked_parent(q) == 601 && shows(e, "l_crumb", "Artists / Somebody / First"));
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "l_play_all"));
@@ -638,13 +640,13 @@ void test_face(kv::TestCtx& c) {
         KV_CHECK(c, col && col->a == kCollectPlay && col->b == 601 && col->value == (f64)LibraryRowKind::Album && standin_count(e, "PlayerQueueEdit") == 1);
         KV_CHECK(c, krome_press(e, scn, "lv_genres"));
         frames(e, 4);
-        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Genres);
+        KV_CHECK(c, asked_view(asked_query(e)) == LibraryView::Genres);
         KV_CHECK(c, krome_press(e, scn, "lv_tracks") );
         frames(e, 4);
-        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Tracks && asked_sort(asked(e)) == LibrarySort::Default);
+        KV_CHECK(c, asked_view(asked_query(e)) == LibraryView::Tracks && asked_sort(asked_query(e)) == LibrarySort::Default);
         KV_CHECK(c, krome_press(e, scn, "ls_title"));
         frames(e, 4);
-        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Tracks && asked_sort(asked(e)) == LibrarySort::Title && shows(e, "l_sort", "title"));
+        KV_CHECK(c, asked_view(asked_query(e)) == LibraryView::Tracks && asked_sort(asked_query(e)) == LibrarySort::Title && shows(e, "l_sort", "title"));
         // Every track is no one row's: nothing to collect, and the queue is left alone.
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "l_play_all"));
@@ -653,7 +655,7 @@ void test_face(kv::TestCtx& c) {
         // Words typed into the search: a search for them, each time they change.
         KV_CHECK(c, type_into(e, "l_search", "blue mo"));
         frames(e, 4);
-        q = asked(e);
+        q = asked_query(e);
         KV_CHECK(c, q && asked_view(q) == LibraryView::Search && strcmp(q->text, "blue mo") == 0 && shows(e, "l_crumb", "search: blue mo") && shows(e, "l_view", "search"));
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "l_queue_all"));
@@ -662,7 +664,7 @@ void test_face(kv::TestCtx& c) {
         KV_CHECK(c, col && col->a == kCollect && strcmp(col->text, "blue mo") == 0);
         KV_CHECK(c, krome_press(e, scn, "l_up"));
         frames(e, 4);
-        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Tracks && shows(e, "l_search", ""));
+        KV_CHECK(c, asked_view(asked_query(e)) == LibraryView::Tracks && shows(e, "l_search", ""));
         input_pointer_override(e, 5, 795, 0);
         frames(e, 2);
 
@@ -861,6 +863,89 @@ void test_face(kv::TestCtx& c) {
         frames(e, 3);
         KV_CHECK(c, standin_count(e, "PlayerEnqueue") == 1 && shows(e, "q_note", ""));
         engine_shutdown(e);
+    }
+
+    c.begin("face session");
+    {
+        // The face's part of the session: what it asks to have kept, and what it does with
+        // what was kept. The session's own module is in the engine, off: it keeps no file.
+        static SessionKeep asked[32];
+        static u32 nasked;
+        nasked = 0;
+        auto last = [&](const char* key) -> const SessionKeep* {
+            for (u32 i = nasked; i > 0; --i) if (strcmp(asked[i - 1].owner, "ui_dev") == 0 && strcmp(asked[i - 1].key, key) == 0) return &asked[i - 1];
+            return nullptr;
+        };
+        auto text_of = [&](const char* key) -> const char* { const SessionKeep* k = last(key); return k ? k->text : "(never asked)"; };
+        auto number_of = [&](const char* key) -> f64 { const SessionKeep* k = last(key); return k ? k->number : -1.0; };
+        {
+            Engine e;
+            KV_CHECK(c, engine_init(e, k_list));
+            engine_listen(e, engine_event_type_id(e, "SessionKeep"), [](void*, u32, const void* ev) { if (nasked < 32) asked[nasked++] = *(const SessionKeep*)ev; }, nullptr);
+            krome_viewport(e, 1280, 800, 1.0f);
+            make_chain(e);
+            KV_CHECK(c, until_ready(e));
+            Name scn = ui_dev_screen(e);
+            frames(e, 4);
+            KV_CHECK(c, strcmp(text_of("tab"), "chain") == 0 && number_of("lib_sort") == 0.0 && strcmp(text_of("lib_where"), "0 0 Folders\n") == 0);
+            u32 before = nasked;
+            frames(e, 60);
+            KV_CHECK(c, nasked == before); // asked once: not again while nothing changes
+            KV_CHECK(c, krome_press(e, scn, "tab_events") && krome_press(e, scn, "ls_artist") && krome_press(e, scn, "lv_artists"));
+            frames(e, 6);
+            standin_row(e, kWindow, 0, LibraryRowKind::Artist, 501, "Somebody");
+            e.events.emit(LibraryResult{kWindow, 1, 0, 1, 6, 0.001});
+            frames(e, 4);
+            KV_CHECK(c, krome_press(e, scn, "lo_0"));
+            frames(e, 6);
+            KV_CHECK(c, strcmp(text_of("tab"), "events") == 0 && number_of("lib_sort") == (f64)(u8)LibrarySort::Artist);
+            KV_CHECK(c, strcmp(text_of("lib_where"), "3 0 Artists\n4 501 Somebody\n") == 0 && last("w") == nullptr); // no window here: no size to keep
+            engine_shutdown(e);
+        }
+        {
+            // The next start: the session says what it kept, before the screen is built.
+            Engine e;
+            KV_CHECK(c, engine_init(e, k_list));
+            krome_viewport(e, 1280, 800, 1.0f);
+            make_chain(e);
+            auto kept = [&](const char* key, f64 number, const char* text) {
+                SessionKept k{};
+                format(k.owner, sizeof k.owner, "ui_dev"); format(k.key, sizeof k.key, "%s", key); k.number = number; format(k.text, sizeof k.text, "%s", text);
+                e.events.emit(k);
+            };
+            kept("tab", 0.0, "tables");
+            kept("lib_sort", (f64)(u8)LibrarySort::Artist, "");
+            kept("lib_where", 0.0, "3 0 Artists\n4 501 Somebody\n");
+            SessionKept other{};
+            format(other.owner, sizeof other.owner, "another face"); format(other.key, sizeof other.key, "tab"); format(other.text, sizeof other.text, "scan");
+            e.events.emit(other); // not this face's: left alone
+            KV_CHECK(c, until_ready(e));
+            Name scn = ui_dev_screen(e);
+            frames(e, 6);
+            // The tab it was on, the list where it was, sorted as it was.
+            KV_CHECK(c, shows(e, "r_tab", "tables") && on_screen(e, "player.transport") >= 1 && shows(e, "l_crumb", "Artists / Somebody") && shows(e, "l_sort", "artist"));
+            const StandinCommand* q = asked_query(e);
+            KV_CHECK(c, q && asked_view(q) == LibraryView::Albums && asked_parent(q) == 501 && asked_sort(q) == LibrarySort::Artist);
+            KV_CHECK(c, krome_press(e, scn, "l_up"));
+            frames(e, 4);
+            KV_CHECK(c, asked_view(asked_query(e)) == LibraryView::Artists && shows(e, "l_crumb", "Artists"));
+            engine_shutdown(e);
+        }
+        {
+            // A search that was up comes back as a search, with its words in the edit.
+            Engine e;
+            KV_CHECK(c, engine_init(e, k_list));
+            krome_viewport(e, 1280, 800, 1.0f);
+            make_chain(e);
+            SessionKept k{};
+            format(k.owner, sizeof k.owner, "ui_dev"); format(k.key, sizeof k.key, "lib_text"); format(k.text, sizeof k.text, "blue morning");
+            e.events.emit(k);
+            KV_CHECK(c, until_ready(e));
+            frames(e, 6);
+            const StandinCommand* q = asked_query(e);
+            KV_CHECK(c, q && asked_view(q) == LibraryView::Search && strcmp(q->text, "blue morning") == 0 && shows(e, "l_search", "blue morning") && shows(e, "l_view", "search"));
+            engine_shutdown(e);
+        }
     }
 
     c.begin("face fifty thousand");

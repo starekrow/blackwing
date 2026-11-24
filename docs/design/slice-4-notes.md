@@ -431,3 +431,84 @@ and rate limits, the sandbox and the process boundary, a module's own tables and
 events, stage and decoder states, discovery, `require`, snapshots. `on_change` notices
 events and not tables.
 
+## Milestone 6, the session
+
+Nov 23, 2026. The same machine and build.
+
+**As planned:** saved when it changes and at exit, restored paused through the API, the
+player's new command, `ui_dev`'s part. Five open questions are closed here.
+
+**The session is a module, `blackwing_session`**, not code in `blackwing`'s own. It is in
+both engines (a library kept open with no face has a session too: the draft's choice
+stands), and a face has to be able to name its two events, which `blackwing`'s module
+cannot offer a face that does not depend on the executable.
+
+**Its format is a file of its own**, `session.json`, written with `core`'s JSON, in the
+settings directory KR24 gave the engine. It is not in the engine's settings store: a
+queue is not a setting, and a queue in one file and a place in another would be two
+moments. One file is one. The store is there for settings when Blackwing has some.
+
+**A face hands over its part as events.** `SessionKeep{owner, key, number, text}`, and
+`SessionKept` said back at the next start. The session knows no face and a face knows no
+file. A table was the draft's other choice; an event is the same thing with nothing to
+poll.
+
+**`PlayerCue`** (BD32): a row and a frame taken up without playing. The transport says
+`Paused` at that row and frame, nothing is heard, no device is opened, and the player
+rests. A row has no rate or length until it has been heard, so the cue carries the ones
+the session saved, and the transport shows those until the row plays; the test finds
+the first frames heard after `PlayerPlay` to be the file's from that frame. A seek while
+cued moves the place and stays cued.
+
+**Found by restoring: a parameter set while nothing plays was never heard.** `hifi` says
+a parameter is heard when a frame rendered with it reaches the ear. Stopped, cued or
+paused, none does: the chain's table went on showing the old value, the player went on
+asking for ticks to wait for it, and a session that set the volume at start-up saw the
+default and would have saved that at the next quit. With nothing reaching the ear the
+value is now the one that will be heard, and `PlayerParamChanged` says so in the next
+tick. The face's readouts follow a slider while paused because of the same fix.
+
+**How it knows something changed.** Tables do not say when they change (milestone 2's
+finding), so four times a second the session hashes the rows' ids in order, the place,
+the parameters and the kept values, and the frame when nothing plays. A row's id stands
+for its path; the paths are read only when a file is written.
+
+**What cannot be put back**, because the engine cannot say or set it (KR44):
+
+- **Where the window was, and on which display.** `HostWindow` has a size and no
+  position. The window comes back at its size.
+- **A list's place.** A scroll box's offset is Krome's and has no setter. The library's
+  list comes back at the right view, sort and search, at its top.
+- **The window's size is read before the engine starts**, since the window opens in a
+  module's start-up and cannot be resized after. `blackwing` reads the two numbers out
+  of the session file itself, and works out where that file is with a copy of the
+  engine's rule for Linux, because `platform_user_dir` needs an engine. On another OS
+  the window would open at its own size until the engine can be asked earlier.
+
+`ui_dev` keeps the window's size, the tab that is up, the library's sort and search,
+and the way to where its list is. It has no splitters or column widths to keep.
+
+### Measured
+
+| what | |
+|---|---|
+| a thousand rows restored | 18 ticks, 64 rows a tick; the longest tick 0.8 to 1.3 ms |
+| the file for a thousand rows | about 60 KB |
+| a save while playing (a queue of two) | 3.7 KB, in place 4.3 ms after it was asked for |
+| saves while playing | one every ten seconds (the position), and one 3 s after a change |
+| saves while paused or stopped with nothing changing | none |
+
+**In the window, by hand.** A queue of three (one of them a file that is not there), a
+jump to the second, a seek to 95 s, the volume at -9 dB, the `rock` preset, the Events
+tab, the Artists view, a window of 1000 x 700; quit at 99.6 s. Started again with no
+size asked: a window of 1000 x 700, paused on row 2 at 99.6 s of 240, the volume and
+the preset's bands as they were, the Events tab up, Artists in the library; `player
+play` and it is at 101.4 s two seconds on.
+
+**Killed, by hand** (`kill -9` after 27.0 s of playing, the volume at -4 dB): the file
+left has the place at row 1 at 23.3 s. Started again: paused at 23.3 s of the same
+track, the volume at -4 dB, both rows queued. 3.7 s were lost, of a bound of ten.
+
+**Tests** (`blackwing_session`, 47 checks; `blackwing_player`'s cue, 16; `ui_dev`'s
+part, 17; clean under `address,undefined`).
+

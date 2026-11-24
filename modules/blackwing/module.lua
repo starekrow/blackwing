@@ -4,7 +4,8 @@
 -- plays from it, on a loop of its own that needs no display.
 module "blackwing" {
   output        = "exe",
-  deps          = { "core", "platform", "cli", "blackwing_player", "blackwing_library", "blackwing_glue", "blackwing_script", "hifi_platform",
+  deps          = { "core", "platform", "cli", "blackwing_player", "blackwing_library", "blackwing_glue", "blackwing_script", "blackwing_session",
+                    "hifi_platform",
                     "frameloop", "blackwing_window", "ui_dev" },
   engine_module = true,
 }

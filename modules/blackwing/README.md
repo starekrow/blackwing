@@ -21,7 +21,8 @@ blackwing help                       the commands the engine knows
 | `--device NAME` | the output device: `default` (PipeWire on Linux), or `capture` (no hardware) |
 | `--capture-to FILE` | play into the capture device and write what reached it, as raw PCM, at exit (with no face) |
 | `--lead SECONDS` | how far ahead of the playhead audio is kept (5) |
-| `--data DIR` | where the library keeps its index and its list of roots (the per-user data directory's `library/`) |
+| `--data DIR` | where the library keeps its index and its list of roots (the per-user data directory's `library/`), and with it the session (the user's settings directory) |
+| `--no-session` | neither restores how it was left nor saves it |
 | `--verbose` | the engine's INFO lines |
 | `--trace-events` | every event as it is delivered, with who emitted it (dev builds) |
 | `--run-seconds N` | ends the run after N seconds: tests and measurements |
@@ -30,6 +31,13 @@ blackwing help                       the commands the engine knows
 
 With no display, `blackwing` alone says so and exits 1; a command given `--face dev`
 says so and runs with no face. `play`, `library`, `run` and `help` need no display.
+
+**The session.** With a face, or a library kept open, `blackwing` comes back as it was
+left ([blackwing_session](../blackwing_session/README.md)): the queue in its order, the
+place and the position, paused, the volume and the equalizer, and the face's own part.
+It is saved a few seconds after anything changes, every ten seconds while playing, and
+at exit, so a kill loses seconds. `play` and `run` are commands, not sittings: they
+neither restore nor save.
 
 `run` loads one Lua script ([blackwing_script](../blackwing_script/README.md)): every
 command, notification, table and resource of the player and the library by the name
@@ -74,8 +82,8 @@ asks, and four times a second when no one does.
   ([blackwing_window](../blackwing_window/README.md)). The frame loop shuts everything
   down, memory included, so nothing of this file's runs after it.
 - **With none** the loop is this file's own, forty lines over `engine_frame` and
-  `platform_pump`, and the engine is started from seven modules by name (`platform`,
-  `cli`, `player`, `library`, `glue`, `script`, `blackwing`): the frame loop, the window, Krome and the
+  `platform_pump`, and the engine is started from eight modules by name (`platform`,
+  `cli`, `player`, `library`, `glue`, `session`, `script`, `blackwing`): the frame loop, the window, Krome and the
   face are linked and left out, so nothing asks for a display.
 
 With `hifi` holding the device, a player left paused with no face wakes four times a

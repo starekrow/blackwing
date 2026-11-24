@@ -43,6 +43,7 @@ acted on in the tick after the host applies the slice it was emitted in.
 | `PlayerJump` | `item` integer | `player.transport` | plays this row now |
 | `PlayerSeek` | `item` integer (0: the one playing), `frame` integer | `player.transport` | goes to a frame of a row |
 | `PlayerSeekBy` | `seconds` number | `player.transport` | on (negative: back) from the last seek's target, so repeats add up |
+| `PlayerCue` | `item`, `frame` integers; `frames`, `rate` integers (0: not known) | `player.transport` | takes up a place without playing: paused at a row and a frame, with nothing heard |
 | `PlayerEnqueue` | `path` string, `before` integer (0: the end) | `player.queue` | adds a file to the queue |
 | `PlayerQueueEdit` | `op` integer (a `PlayerEditOp`), `item`, `before` integers | `player.queue` | `Remove`, `Move` or `Clear` |
 | `PlayerSetParam` | `stage`, `param` integers, `value` number | `player.params` | sets a parameter of a stage of the chain, by index |

@@ -55,10 +55,19 @@ struct PlayerSeek    { u64 item; u64 frame; };
 // Goes `seconds` on (negative: back) from wherever the last seek was going, or from the
 // frame heard, so repeats add up.
 struct PlayerSeekBy  { f64 seconds; };
+// Takes up a place without playing: the transport is at row `item`, at `frame`, paused,
+// and nothing is heard. PlayerPlay goes on from there. What was sounding stops, as for a
+// PlayerStop. A row has no rate or length until it has been heard, so whoever knows them
+// may say them: `rate` and `frames` are what the transport shows for the row until it
+// plays (0: not known), and the file's own take their place then. A seek while cued moves
+// the place and stays cued; a stop, a skip or a jump ends it.
+struct PlayerCue     { u64 item; u64 frame; u64 frames = 0; u64 rate = 0; };
 // Sets a parameter of a stage of the chain (player.chain's rows, by index): volume is
 // stage 0, parameter 0, in dB (0 at most); its parameter 1 is mute. What is heard changes
 // by a recut, within a callback or two; PlayerParamChanged says when it is heard. A
-// control that is dragged may send one per tick: only the newest value is rendered.
+// control that is dragged may send one per tick: only the newest value is rendered. With
+// nothing reaching the ear (stopped, cued or paused) the value is the one that will be
+// heard, and PlayerParamChanged says so in the next tick.
 struct PlayerSetParam { u32 stage; u32 param; f64 value; };
 // Sets every parameter of a stage to a preset's values (player.presets' rows, by their
 // `index` within the stage): one recut renders them all, and each is said as it is heard.
@@ -124,7 +133,7 @@ enum class PlayerState : u8 {
     Stopped,  // not playing and not meaning to
     Starting, // meaning to play; nothing is being heard yet (reading, decoding, a gap between devices)
     Playing,  // an item is being heard
-    Paused,
+    Paused,   // held: by a pause, or by a cue (a place taken up and not yet played)
     Count
 };
 // "stopped", "starting", "playing", "paused".
@@ -134,8 +143,8 @@ const char* player_state_name(PlayerState s);
 struct PlayerTransport {
     u8   state    = 0;  // a PlayerState
     u8   pad[7]   = {};
-    u64  item     = 0;  // the item being heard; 0 when none is (between the old audio and the new, after a seek or a skip)
-    u64  position = 0;  // the frame of it being heard: where it started, or was sent to, and the frames heard since
+    u64  item     = 0;  // the item being heard, or cued; 0 when none is (between the old audio and the new, after a seek or a skip)
+    u64  position = 0;  // the frame of it being heard: where it started, or was sent to, and the frames heard since; a cue's frame
     u64  frames   = 0;  // its length; 0 when its header does not say
     u32  rate     = 0;  // frames per second of the item being heard
     u32  queued   = 0;  // rows in the list
