@@ -403,14 +403,17 @@ Nothing changes in `hifi`, `hifi_codec`, `hifi_eq`, `hifi_platform` or `blackwin
 The path rule, window ids and quotas are enforced in the host, not in the player or the
 library.
 
-In Korvid, to be put to the engine as requirements:
+In Korvid, written up as requirements in
+[Korvid changes for Blackwing](../PRDs/Korvid-Changes-For-Blackwing.md#found-in-drafting-the-script-module-spec):
 
-| change | why |
-|---|---|
-| a resource's field table without the state hash | `ResourceDesc::fields` makes a resource sim state; these are cosmetic |
-| events in Lua by field table: emit one from a table, read a batch as tables | `script_push_ktable` does this for rows; nothing does it for events |
-| event types and ktables registered after `engine_init` | a script module's own, declared when it loads |
-| `load` restricted to text in `kv_lua_newstate`'s options, and a state on a fixed block | the stage and decoder states live inside `memory_bytes` |
+| ID | change | why |
+|---|---|---|
+| KR17 | a resource's field table without the state hash | `ResourceDesc::fields` makes a resource sim state; these are cosmetic |
+| KR18 | events in Lua by field table: emit one from a table, read a batch as tables | `script_push_ktable` does this for rows; nothing does it for events |
+| KR19 | event types and ktables registered after `engine_init` | a script module's own, declared when it loads |
+
+A state on a fixed block that loads text only needs nothing from the engine:
+`kv_lua_newstate` takes any allocator, and the rest is the host's.
 
 ## Conformance
 

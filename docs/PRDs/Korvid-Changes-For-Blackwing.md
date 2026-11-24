@@ -384,6 +384,72 @@ way to tell which reported paths came through one.
 through a link, asking each directory once of its parent's listing. The watches spent on
 the loop are still spent.
 
+## Found in drafting the script-module spec
+
+Nov 23, 2026. [The script-module spec](../specs/script-modules.md) is a draft and nothing
+of it is built, so none of these blocks anything yet. They are what its binding needs
+from the engine, written down while the reasons are fresh. B33, script modules, is P1.
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR17 | A resource can have a field table without becoming sim state | `core` | P1, wanted by B33 |
+| KR18 | Events can be emitted and read from Lua by their field tables | `script` | P1, wanted by B33 |
+| KR19 | Event types and ktables can be registered after `engine_init` | `core` | P1, wanted by B33 |
+
+### KR17: a cosmetic resource's fields
+
+**What was run into.** A script reads a ktable's rows by field name, from the ktable's
+own field table (`script_push_ktable`). A resource has no such thing unless its
+`ResourceDesc` sets `fields`, and setting it makes the resource sim state, part of the
+state hash, with the published object checked as plain data. `player.transport`,
+`player.output` and `library.scan` are cosmetic: they follow a device's clock and a
+disk, and must not be hashed. So today they have no field table, and nothing outside C++
+can read them by name: not a script, and not `describe`.
+
+**What is asked.** A way to give a resource a field table that describes it without
+hashing it: a flag on `ResourceDesc`, as a ktable has `cosmetic`.
+
+**Workaround today.** None in use. The script host could carry its own copy of the three
+layouts, which is a second home for a fact and drifts.
+
+### KR18: events in Lua
+
+**What was run into.** `modules/script` binds a ktable to Lua from its field table, with
+the type mapping and the errors a script needs. Nothing does the same for events, though
+every one of Blackwing's event types carries a field table (for `--trace-events`). The
+player's and the library's whole API is events in and events out, so a script that can
+read rows and not emit a `PlayerPlay` can do nothing.
+
+**What is asked.** In `script`, beside `script_push_ktable`: emit an event of a named
+type from a Lua table of its fields, with fields left out taking the struct's defaults;
+and push a batch of a type as a list of tables. The same mapping and the same errors as
+a row's: a wrong type, an integer that does not fit, a string too long, an unknown field.
+
+**Workaround today.** None in use. The host could write it over `FieldDesc` itself; it
+would be the ktable binding's code again.
+
+### KR19: registering after start-up
+
+**What was run into.** A module's event types, components and ktables are tables in its
+`ModuleDesc`, laid out by `engine_init`. A script module is found and loaded while the
+engine runs, and the spec lets it declare tables and event types of its own (its
+`publish` capability), for faces and other scripts to read. No call registers one after
+`engine_init`.
+
+**What is asked.** That an event type and a cosmetic ktable can be registered, and taken
+away again, while the engine runs: from a field table built at runtime, never as sim
+state, at a phase boundary. A script module is unloaded and replaced mid-song, so what it
+registered has to go with it.
+
+**Workaround today.** None in use. The host could own a fixed pool of generic tables and
+one generic event type, and hand out pieces; a face would then read a script's rows
+through the host and not by name.
+
+**Looked at and not asked for.** The spec's stage and decoder states live inside a fixed
+block, load text only and open some of Lua's libraries. `kv_lua_newstate` takes any
+`Allocator`, and the rest is the host's to do on its own state, so this needs nothing
+from the engine.
+
 ## Not asked for, and worth knowing
 
 - **`engine_frame` and `platform_pump` were all a custom loop needed.** The comment in
