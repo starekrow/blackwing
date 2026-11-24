@@ -119,7 +119,12 @@ struct Result {
     bool stopped = false;     // a newer ask for its window stopped it: not shown
     LibraryRow* rows = nullptr; // count of them, from mem_alloc
 };
-struct Ask { LibraryQuery q; u32 seq = 0; };
+// A window over paths: one of its paths (from mem_alloc), and the row index it is for.
+struct PathAsk { u32 index = 0; char* path = nullptr; };
+// `paths`: a copy of the window's, for a window over paths; the ask's to free.
+struct Ask { LibraryQuery q; u32 seq = 0; PathAsk* paths = nullptr; u32 npaths = 0; };
+// A LibraryCollect's answer: every path (each from mem_alloc), and how many have been said.
+struct Collected { u32 id = 0; Array<char*> paths; u32 sent = 0; };
 
 // For the scan thread: a root to walk whole.
 struct Walk { u32 root; char path[kPathMax]; };
@@ -138,8 +143,11 @@ struct Shared {
     Array<u32>  drops;
     // main, scan -> writer
     Array<WriteMsg*> writes;
-    // main -> reader: the newest ask for each window
+    // main -> reader: the newest ask for each window; what to collect
     Array<Ask> asks;
+    Array<LibraryCollect> collects;
+    // reader -> main: what was collected
+    Array<Collected*> collected;
     // writer -> tagger: tracks to read; the slot's, which goes first, replaced whole
     Array<TagJobs*> jobs;
     TagJobs*        slot_jobs = nullptr;

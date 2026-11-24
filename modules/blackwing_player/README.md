@@ -89,7 +89,7 @@ Header `korvid/blackwing_player/player.h`:
 
 | name | kind | what |
 |---|---|---|
-| `PlayerEnqueue` | event type | in: `path`, `before` (0: the end); a file joins the queue |
+| `PlayerEnqueue` | event type | in: `path` (any length the OS allows: `kPlayerPathMax`, 4096 bytes), `before` (0: the end); a file joins the queue |
 | `PlayerQueueEdit`, `PlayerEditOp` | event type, enum | in: `op` (`Remove`, `Move`, `Clear`), `item`, `before` |
 | `PlayerPlay`, `PlayerPause`, `PlayerStop`, `PlayerNext` | event type | in: the transport |
 | `PlayerPrevious`, `PlayerJump` | event type | in: the row before (or this one again); `item`, a row now |

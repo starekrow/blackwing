@@ -18,6 +18,9 @@ inline constinit const FieldDesc k_f_LibraryQuery[] = {KV_FIELDS(LibraryQuery, i
 inline constinit const FieldDesc k_f_LibraryClose[] = {KV_FIELDS(LibraryClose, id)};
 inline constinit const FieldDesc k_f_LibraryPrioritize[] = {KV_FIELDS(LibraryPrioritize, path, dir, query, count, tracks)};
 inline constinit const FieldDesc k_f_LibraryOverride[] = {KV_FIELDS(LibraryOverride, track, field, value, clear)};
+inline constinit const FieldDesc k_f_LibraryPath[] = {KV_FIELDS(LibraryPath, id, index, path)};
+inline constinit const FieldDesc k_f_LibraryCollect[] = {KV_FIELDS(LibraryCollect, id, kind, sort, row, text)};
+inline constinit const FieldDesc k_f_LibraryCollected[] = {KV_FIELDS(LibraryCollected, id, index, total, path)};
 inline constinit const FieldDesc k_f_LibraryResult[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation, seconds)};
 inline constinit const FieldDesc k_f_LibraryChanged[] = {KV_FIELDS(LibraryChanged, generation)};
 inline constinit const FieldDesc k_f_LibraryScanFinished[] = {KV_FIELDS(LibraryScanFinished, root, tracks, seconds)};
@@ -28,6 +31,9 @@ inline constinit const EventTypeDesc k_library_events[] = {
     KV_EVENT_EX(LibraryClose, k_f_LibraryClose, 0),
     KV_EVENT_EX(LibraryPrioritize, k_f_LibraryPrioritize, 0),
     KV_EVENT_EX(LibraryOverride, k_f_LibraryOverride, 0),
+    KV_EVENT_EX(LibraryPath, k_f_LibraryPath, 0),
+    KV_EVENT_EX(LibraryCollect, k_f_LibraryCollect, 0),
+    KV_EVENT_EX(LibraryCollected, k_f_LibraryCollected, 0),
     KV_EVENT_EX(LibraryResult, k_f_LibraryResult, 0),
     KV_EVENT_EX(LibraryChanged, k_f_LibraryChanged, 0),
     KV_EVENT_EX(LibraryScanFinished, k_f_LibraryScanFinished, 0),

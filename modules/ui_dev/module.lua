@@ -5,5 +5,5 @@
 module "ui_dev" {
   deps          = { "core", "platform", "platform_hid", "asset", "krome", "kim", "blackwing_player", "blackwing_library" },
   engine_module = true,
-  test_deps     = { "cli" },
+  test_deps     = { "cli", "blackwing_glue" }, -- the test over the player and the library themselves needs what joins them
 }

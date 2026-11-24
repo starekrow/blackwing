@@ -23,6 +23,7 @@ style dev-btn {
     pressed { bg=accent-down }
     focused { border-color=ring }
     disabled { color=off-ink }
+    selected { bg=accent color=on-accent }
 }
 
 def dev-btn label {
@@ -38,7 +39,16 @@ style dev-row {
 }
 
 style dev-cell {
-    size=12 nowrap clip
+    size=12 nowrap
+}
+
+// A cell of a row: one line, clipped to the cell however long it is. A text on one line is
+// as wide as its words, whatever room it is given, so it sits in a box that is the cell's
+// width and clips: no title breaks a row.
+def dev-text value {
+    box clip {
+        text "{value}" [dev-cell]
+    }
 }
 
 style dev-head {

@@ -11,7 +11,9 @@ def transport-panel {
             text "Transport" [dev-title]
             text "{t_state}" id=t_state [dev-value] w=64
             text "{t_row}" id=t_row [dev-title]
-            text "{t_title}" id=t_title [dev-value] w=fill nowrap clip
+            box w=fill clip {
+                text "{t_title}" id=t_title [dev-value] nowrap
+            }
             text "{t_seeking}" id=t_seeking [dev-title]
             text "{t_pos} / {t_len}" id=t_time [dev-value] w=110 right
         }

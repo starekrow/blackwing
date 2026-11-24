@@ -134,6 +134,9 @@ struct Index {
     // `generation` is the index's as the reader knows it: what it has kept of a search or a
     // grouping (the whole ordered list, so a window anywhere is a slice) lasts that long.
     u32  window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user);
+    // The track at a path within a root, as a row of query `query`: false when the index
+    // has none there. For a window over paths (a queue's rows).
+    bool row_at(u32 root, const char* rel, u32 query, LibraryRow* out, const char* (*root_path)(void*, u32), void* user);
     // The reader's: a query is stopped when this says so (checked as sqlite works).
     void stop_when(int (*fn)(void*), void* user);
 
@@ -170,6 +173,7 @@ private:
     sqlite3_stmt* st_count_t = nullptr, *st_count_d = nullptr, *st_count_all = nullptr, *st_count_unread = nullptr;
     sqlite3_stmt* st_vals_del = nullptr, *st_vals_put = nullptr, *st_tags_put = nullptr, *st_search_del = nullptr, *st_dir_of_track = nullptr;
     sqlite3_stmt* st_row = nullptr; // the reader's: a track's row by id
+    sqlite3_stmt* st_row_at = nullptr; // and by its root and path
 };
 
 // The FTS5 expression for words typed: each word a prefix, all of them wanted.

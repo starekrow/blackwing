@@ -20,9 +20,13 @@ struct Engine;
 
 // ---- commands: events the library consumes ------------------------------------------------
 
+// A path, where the library takes or shows one: as long as the OS allows one to be (4095
+// bytes on Linux, which no other system's users are likely to pass).
+constexpr u32 kLibraryPathMax = 4096;
+
 // Adds a directory to the library, and walks it. The path is the OS's, absolute or relative
 // to the working directory; one already a root is not added twice.
-struct LibraryAddRoot    { char path[512]; };
+struct LibraryAddRoot    { char path[kLibraryPathMax]; };
 // Takes a root out of the library: its rows leave the index. The user's overrides for it
 // stay where they are.
 struct LibraryRemoveRoot { u32 root; };
@@ -35,11 +39,11 @@ struct LibraryRemoveRoot { u32 root; };
 // plays); `dir`, a directory's id (a Folders row's); `query`, an open window's tracks; or
 // up to 32 `tracks` by id.
 struct LibraryPrioritize {
-    char path[512] = "";
     u64  dir = 0;
     u32  query = 0;
     u32  count = 0;
     u64  tracks[32] = {};
+    char path[kLibraryPathMax] = "";
 };
 
 // Sets a field of a track (a row's `id`) for the user: `value` wins over every source, in
@@ -60,6 +64,7 @@ enum class LibraryView : u8 {
     Albums,      // the albums; with `parent`, an artist's (an Artists row's id)
     AlbumTracks, // an album's tracks, by disc and track number; `parent` is the album (an Albums row's id)
     Genres,      // the genres
+    Paths,       // the tracks at the paths LibraryPath gave the window: a queue's rows, by what the library knows of them
     Count
 };
 // The order of a window's rows. Default is the view's own: names for Folders, artists and
@@ -83,6 +88,29 @@ struct LibraryQuery {
 // Closes window `id`: its rows leave the table.
 struct LibraryClose { u32 id; };
 
+// A path for window `id`, which becomes (or is) a window over paths (LibraryView::Paths):
+// what the library knows of the file there is the window's row `index`. This is how a
+// queue's rows get their titles: the player knows paths, and the library knows tags. A
+// path the library does not have is a row all the same, with the file's name and a
+// reason. An empty path takes the index out of the window. At most kLibraryMaxWindow
+// paths a window; the rows follow the index as any window's do, and LibraryClose ends it.
+struct LibraryPath { u32 id = 0; u32 index = 0; char path[kLibraryPathMax] = ""; };
+
+// Asks for the paths of every track of something, in its own order: a row by its `kind`
+// and `row` (a LibraryRow's `kind` and `id`: a directory with everything under it, an
+// artist's albums in turn, an album, a genre, a track), or with `text`, the tracks a
+// search finds. `sort` orders a genre's or a search's. The answer is LibraryCollected,
+// one a track, a few dozen a tick. The library does not know what the paths are for:
+// whoever sits between it and a player forwards them (blackwing queues each).
+struct LibraryCollect {
+    u32         id   = 0;        // the asker's, said back with each path
+    u8          kind = 0;        // a LibraryRowKind
+    LibrarySort sort = LibrarySort::Default;
+    u8          pad[2] = {};
+    u64         row  = 0;
+    char        text[128] = "";
+};
+
 // ---- notifications: events the library emits ------------------------------------------------
 
 // Window `id`'s rows are in library.rows: `count` of them from `first`, of `total` the
@@ -94,6 +122,10 @@ struct LibraryChanged { u64 generation; };
 // A root's scan is over: every file under it is a row (its walk took `seconds`), and every
 // one's tags have been read.
 struct LibraryScanFinished { u32 root; u32 tracks; f64 seconds; };
+// One path of a LibraryCollect's answer: track `index` of `total`, what PlayerEnqueue
+// takes. They come in order, and the last has index total - 1. Nothing found is one event
+// with a total of 0 and no path.
+struct LibraryCollected { u32 id; u32 index; u32 total; char path[kLibraryPathMax]; };
 
 // ---- state: what anyone may read ---------------------------------------------------------------
 
@@ -116,8 +148,8 @@ struct LibraryRoot {
     u32  tracks;       // tracks in the index under it
     u32  failed;       // directories that could not be listed
     u32  unread;       // tracks whose tags are still to be read
-    char path[512];
     char reason[96];   // why it is offline
+    char path[kLibraryPathMax];
 };
 
 enum class LibraryRowKind : u8 { Directory, Track, Artist, Album, Genre, Count };
@@ -146,8 +178,8 @@ struct LibraryRow {
     char title[256];
     char artist[256];
     char album[256];
-    char path[512];    // what PlayerEnqueue takes: the root's path and the file's within it; "" when longer than that holds
     char reason[96];   // why its tags could not be read, or why it cannot be played
+    char path[kLibraryPathMax]; // what PlayerEnqueue takes: the root's path and the file's within it; a directory's own path. Last: the rest of a row is its first fourteen hundred bytes
 };
 
 // The resource "library.scan": what the library is doing.
@@ -173,6 +205,7 @@ struct LibraryScan {
 
 constexpr u32 kLibraryMaxWindow = 512; // rows in one window, at most
 constexpr u32 kLibraryMaxRows   = 4096; // rows across every open window
+constexpr u32 kLibraryMaxCollect = 65536; // paths one LibraryCollect answers with, at most
 
 // ---- setting up ----------------------------------------------------------------------------------
 

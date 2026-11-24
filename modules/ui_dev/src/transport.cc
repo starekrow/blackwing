@@ -48,7 +48,8 @@ void transport_sync(TickContext& ctx, Face& f) {
     if (row) format(text, sizeof text, "%u of %u", row->pos, t->queued);
     else     format(text, sizeof text, t->queued ? "past the end of %u" : "nothing queued", t->queued);
     face_set(f, "t_row", text);
-    face_set(f, "t_title", row ? face_file_name(row->path) : "");
+    char title[600];
+    face_set(f, "t_title", row ? face_title(f.title_now, row->path, title, sizeof title) : "");
 
     // A seek on its way to the ear: where it was sent.
     u32 rate = t->rate ? t->rate : row ? row->rate : 0;

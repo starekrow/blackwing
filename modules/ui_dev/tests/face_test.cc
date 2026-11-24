@@ -4,7 +4,10 @@
 // player's command; still costs nothing; hidden, nothing is read or written; a panel that
 // does not load says so where it would be, and the rest work.
 #include "standin.h"
+#include "../../blackwing_library/tests/gen.h"
 #include "korvid/asset/module.h"
+#include "korvid/blackwing_glue/module.h"
+#include "korvid/blackwing_library/module.h"
 #include "korvid/blackwing_player/module.h"
 #include "korvid/cli/module.h"
 #include "korvid/core/engine.h"
@@ -12,6 +15,7 @@
 #include "korvid/core/test.h"
 #include "korvid/core/time.h"
 #include "korvid/krome/krome.h"
+#include "korvid/platform/io.h"
 #include "korvid/platform/module.h"
 #include "korvid/platform_hid/events.h"
 #include "korvid/platform_hid/module.h"
@@ -108,8 +112,20 @@ f64 slider_at(Engine& e, const char* id, f32 fx) {
 }
 bool near(f64 a, f64 b, f64 by) { return a - b <= by && b - a <= by; }
 
+constexpr u32 kWindow = 0xD0E00001, kTitles = 0xD0E00002, kCollect = 0xD0E00011, kCollectPlay = 0xD0E00012; // the face's ids at the library
+
+// How many of the player's commands have arrived (the library's stand-in writes its own
+// into the same list).
+u32 player_commands(Engine& e) {
+    StandinPlayer* s = standin_player(e);
+    u32 n = 0;
+    for (u32 i = 0; s && i < s->ncommands; ++i) n += strncmp(s->commands[i].type, "Player", 6) == 0;
+    return n;
+}
+
 // The same face over the player itself, playing into a capture device on the wall clock.
-const ModuleDesc* const k_real[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &blackwing_player_module, &ui_dev_module};
+const ModuleDesc* const k_real[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &blackwing_player_module,
+                                    &blackwing_library_module, &blackwing_glue_module, &ui_dev_module};
 
 // Frames, a few milliseconds apart, until a model key shows `want` (or has it in it), or
 // `seconds` pass.
@@ -124,7 +140,26 @@ bool until_shows(Engine& e, const char* key, const char* want, f64 seconds = 4.0
     }
 }
 
-const ModuleDesc* const k_list[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &standin_player_module, &ui_dev_module};
+// The library's answer to the face's window, as the stand-in's test gives it: rows
+// [first, first + count) of `total`, each a track called "song <row>".
+void answer_tracks(Engine& e, u32 first, u32 count, u32 total) {
+    standin_rows_clear(e, kWindow);
+    char name[64], title[64];
+    for (u32 i = 0; i < count && first + i < total; ++i) {
+        format(name, sizeof name, "%05u.flac", first + i);
+        format(title, sizeof title, "song %u", first + i);
+        standin_row(e, kWindow, first + i, LibraryRowKind::Track, 1000 + first + i, name, title, "An Artist", "An Album");
+    }
+    e.events.emit(LibraryResult{kWindow, total, first, count, 9, 0.002});
+}
+// The window as the face last asked for it; null when it has not.
+const StandinCommand* asked(Engine& e) { return standin_last(e, "LibraryQuery"); }
+LibraryView asked_view(const StandinCommand* q) { return (LibraryView)(u8)q->value; }
+u64 asked_parent(const StandinCommand* q) { return q->d & 0x00FFFFFFFFFFFFFFull; }
+LibrarySort asked_sort(const StandinCommand* q) { return (LibrarySort)(u8)(q->d >> 56); }
+
+const ModuleDesc* const k_list[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &standin_player_module,
+                                    &standin_library_module, &ui_dev_module};
 
 // A chain of two stages for the stand-in: a gain with a level and a switch, an equalizer's
 // first band, and two presets.
@@ -177,12 +212,12 @@ void test_face(kv::TestCtx& c) {
             standin_clear(e);
             KV_CHECK(c, krome_press(e, scn, b[0]));
             frames(e, 3);
-            KV_CHECK(c, p.ncommands == 1 && standin_count(e, b[1]) == 1);
+            KV_CHECK(c, player_commands(e) == 1 && standin_count(e, b[1]) == 1);
         }
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "back") && krome_press(e, scn, "on"));
         frames(e, 3);
-        KV_CHECK(c, p.ncommands == 2 && p.commands[0].value == -10.0 && p.commands[1].value == 10.0 && standin_count(e, "PlayerSeekBy") == 2);
+        KV_CHECK(c, player_commands(e) == 2 && p.commands[0].value == -10.0 && p.commands[1].value == 10.0 && standin_count(e, "PlayerSeekBy") == 2);
 
         // The bar: a press seeks to where it was pressed, a drag seeks as it goes, and while
         // it is held the bar is the pointer's, whatever the position does.
@@ -322,7 +357,7 @@ void test_face(kv::TestCtx& c) {
         KV_CHECK(c, krome_press(e, scn, id));
         frames(e, 3);
         const StandinCommand* cmd = standin_last(e, "PlayerJump");
-        KV_CHECK(c, cmd && cmd->a == row && p.ncommands == 1);
+        KV_CHECK(c, cmd && cmd->a == row && player_commands(e) == 1);
         format(id, sizeof id, "qx_%u", row);
         KV_CHECK(c, krome_press(e, scn, id));
         frames(e, 3);
@@ -342,7 +377,7 @@ void test_face(kv::TestCtx& c) {
         KV_CHECK(c, krome_press(e, scn, "q_clear"));
         frames(e, 3);
         cmd = standin_last(e, "PlayerQueueEdit");
-        KV_CHECK(c, cmd && cmd->value == (f64)PlayerEditOp::Clear && p.ncommands == 1);
+        KV_CHECK(c, cmd && cmd->value == (f64)PlayerEditOp::Clear && player_commands(e) == 1);
 
         // A path typed in is added, and the edit emptied.
         standin_clear(e);
@@ -356,7 +391,7 @@ void test_face(kv::TestCtx& c) {
         standin_clear(e);
         KV_CHECK(c, krome_press(e, scn, "q_add"));
         frames(e, 3);
-        KV_CHECK(c, p.ncommands == 0);
+        KV_CHECK(c, player_commands(e) == 0);
 
         // The queue emptied under it: the list is empty too.
         for (u32 i = 1; i <= 1000; ++i) standin_remove(e, i);
@@ -451,7 +486,7 @@ void test_face(kv::TestCtx& c) {
         KV_CHECK(c, krome_press(e, scn, "ct_0_1"));
         frames(e, 3);
         set = standin_last(e, "PlayerSetParam");
-        KV_CHECK(c, set && set->a == 0 && set->b == 1 && set->value == 1.0 && p.ncommands == 1);
+        KV_CHECK(c, set && set->a == 0 && set->b == 1 && set->value == 1.0 && player_commands(e) == 1);
         KV_CHECK(c, krome_press(e, scn, "cp_1_1"));
         frames(e, 3);
         set = standin_last(e, "PlayerApplyPreset");
@@ -466,6 +501,320 @@ void test_face(kv::TestCtx& c) {
         engine_shutdown(e);
     }
 
+    c.begin("face library");
+    {
+        Engine e;
+        KV_CHECK(c, engine_init(e, k_list));
+        krome_viewport(e, 1280, 800, 1.0f);
+        make_chain(e);
+        StandinPlayer& p = *standin_player(e);
+        standin_root(e, 1, "/music", LibraryRootState::Idle, 1200);
+        LibraryRoot* gone = standin_root(e, 2, "/media/usb/more", LibraryRootState::Offline, 40);
+        format(gone->reason, sizeof gone->reason, "its directory is not there");
+        KV_CHECK(c, until_ready(e));
+        Name scn = ui_dev_screen(e);
+        // The roots, each with its state, and why one is offline, where the root shows.
+        KV_CHECK(c, on_screen(e, "/media/usb/more") == 1 && on_screen(e, "offline") == 1 && on_screen(e, "its directory is not there") == 1 && on_screen(e, "1200 tracks") == 1);
+        // The face asked for its window: the roots' folders, from the top.
+        const StandinCommand* q = asked(e);
+        KV_CHECK(c, q && q->a == kWindow && asked_view(q) == LibraryView::Folders && asked_parent(q) == 0 && q->b == 0 && q->c > 0 && shows(e, "l_crumb", "Folders"));
+        standin_row(e, kWindow, 0, LibraryRowKind::Directory, 11, "/music");
+        e.events.emit(LibraryResult{kWindow, 1, 0, 1, 5, 0.0021});
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "l_total", "1") && on_screen(e, "/music") == 2 && shows(e, "l_status", "1 rows, answered in 2.1 ms; generation 5")); // the root, and its folder in the list
+
+        // A folder opened: its window asked for, and the folder to be listed before the rest.
+        // What the table holds meanwhile is the list above, and is not shown as this one.
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "lo_0"));
+        frames(e, 4);
+        q = asked(e);
+        const StandinCommand* pr = standin_last(e, "LibraryPrioritize");
+        KV_CHECK(c, q && asked_view(q) == LibraryView::Folders && asked_parent(q) == 11 && pr && pr->b == 11 && shows(e, "l_crumb", "Folders / /music") && shows(e, "l_total", "0"));
+        standin_rows_clear(e, kWindow);
+        standin_row(e, kWindow, 0, LibraryRowKind::Directory, 21, "Albums");
+        LibraryRow* t1 = standin_row(e, kWindow, 1, LibraryRowKind::Track, 101, "01 one.flac", "One", "Somebody", "First");
+        t1->rate = 44100; t1->frames = 44100 * 185; format(t1->date, sizeof t1->date, "1999");
+        LibraryRow* t2 = standin_row(e, kWindow, 2, LibraryRowKind::Track, 102, "02 two.flac");
+        t2->missing = 1;
+        LibraryRow* t3 = standin_row(e, kWindow, 3, LibraryRowKind::Track, 103, "03 three.flac", "Three");
+        t3->offline = 1;
+        LibraryRow* t4 = standin_row(e, kWindow, 4, LibraryRowKind::Track, 104, "04 four.flac");
+        format(t4->reason, sizeof t4->reason, "not a FLAC file");
+        e.events.emit(LibraryResult{kWindow, 5, 0, 5, 6, 0.001});
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "l_total", "5") && on_screen(e, "One") == 1 && on_screen(e, "3:05, 1999") == 1 && on_screen(e, "Somebody") == 1);
+        KV_CHECK(c, on_screen(e, "02 two.flac") == 1 && on_screen(e, "missing") == 1 && on_screen(e, "its root is offline") == 1 && on_screen(e, "not a FLAC file") == 1);
+        // At rest for a moment: what is in view is what is scanned next.
+        standin_clear(e);
+        f64 until = time_now() + 0.5;
+        while (time_now() < until) { frames(e, 1); time_sleep(0.01); }
+        pr = standin_last(e, "LibraryPrioritize");
+        KV_CHECK(c, pr && pr->a == kWindow && pr->b == 0 && standin_count(e, "LibraryPrioritize") == 1 && standin_count(e, "LibraryQuery") == 0);
+
+        // A row queued is one command, whatever kind it is; the folder itself too.
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "lq_1") && krome_press(e, scn, "lq_0"));
+        frames(e, 3);
+        KV_CHECK(c, standin_count(e, "LibraryCollect") == 2 && player_commands(e) == 0);
+        const StandinCommand* col = standin_last(e, "LibraryCollect");
+        KV_CHECK(c, col && col->a == kCollect && col->b == 21 && col->value == (f64)LibraryRowKind::Directory);
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "l_queue_all"));
+        frames(e, 3);
+        col = standin_last(e, "LibraryCollect");
+        KV_CHECK(c, col && col->a == kCollect && col->b == 11 && col->value == (f64)LibraryRowKind::Directory);
+        // Played: the queue emptied, the row collected, and play once the last path is in.
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "lp_1"));
+        frames(e, 3);
+        col = standin_last(e, "LibraryCollect");
+        const StandinCommand* edit = standin_last(e, "PlayerQueueEdit");
+        KV_CHECK(c, col && col->a == kCollectPlay && col->b == 101 && col->value == (f64)LibraryRowKind::Track && edit && edit->value == (f64)PlayerEditOp::Clear);
+        KV_CHECK(c, standin_count(e, "PlayerPlay") == 0);
+        LibraryCollected got{};
+        got.id = kCollectPlay; got.index = 0; got.total = 2;
+        format(got.path, sizeof got.path, "/music/01 one.flac");
+        e.events.emit(got);
+        frames(e, 6);
+        KV_CHECK(c, standin_count(e, "PlayerPlay") == 0); // not all in yet
+        got.index = 1;
+        e.events.emit(got);
+        frames(e, 8);
+        KV_CHECK(c, standin_count(e, "PlayerPlay") == 1);
+
+        // A field edited: the track's title, for the user; and given back.
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "lo_1"));
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "l_edit_open", "true") && shows(e, "l_edit_name", "One") && shows(e, "l_edit_field", "title") && shows(e, "l_edit_value", "One"));
+        krome_set(e, scn, "l_edit_value", "One, Corrected");
+        frames(e, 2);
+        KV_CHECK(c, krome_press(e, scn, "l_edit_save"));
+        frames(e, 4);
+        const StandinCommand* ov = standin_last(e, "LibraryOverride");
+        KV_CHECK(c, ov && ov->a == 101 && ov->b == 0 && strcmp(ov->text, "title=One, Corrected") == 0 && shows(e, "l_edit_open", "false"));
+        KV_CHECK(c, krome_press(e, scn, "lo_1"));
+        frames(e, 4);
+        KV_CHECK(c, krome_press(e, scn, "l_edit_clear"));
+        frames(e, 4);
+        ov = standin_last(e, "LibraryOverride");
+        KV_CHECK(c, ov && ov->a == 101 && ov->b == 1 && standin_count(e, "LibraryOverride") == 2);
+
+        // Up, and the other views: artists, an artist's albums, an album's tracks; sorted; searched.
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "l_up"));
+        frames(e, 4);
+        q = asked(e);
+        KV_CHECK(c, q && asked_view(q) == LibraryView::Folders && asked_parent(q) == 0 && shows(e, "l_crumb", "Folders"));
+        KV_CHECK(c, krome_press(e, scn, "lv_artists"));
+        frames(e, 4);
+        q = asked(e);
+        KV_CHECK(c, q && asked_view(q) == LibraryView::Artists && shows(e, "l_view", "artists") && shows(e, "l_crumb", "Artists"));
+        standin_rows_clear(e, kWindow);
+        LibraryRow* ar = standin_row(e, kWindow, 0, LibraryRowKind::Artist, 501, "Somebody");
+        ar->albums = 2; ar->count = 20;
+        e.events.emit(LibraryResult{kWindow, 1, 0, 1, 6, 0.001});
+        frames(e, 4);
+        KV_CHECK(c, on_screen(e, "2 albums, 20 tracks") == 1 && krome_press(e, scn, "lo_0"));
+        frames(e, 4);
+        q = asked(e);
+        KV_CHECK(c, q && asked_view(q) == LibraryView::Albums && asked_parent(q) == 501 && shows(e, "l_crumb", "Artists / Somebody"));
+        standin_rows_clear(e, kWindow);
+        LibraryRow* al = standin_row(e, kWindow, 0, LibraryRowKind::Album, 601, "First");
+        al->count = 10; format(al->date, sizeof al->date, "1999");
+        e.events.emit(LibraryResult{kWindow, 1, 0, 1, 6, 0.001});
+        frames(e, 4);
+        KV_CHECK(c, on_screen(e, "10 tracks, 1999") == 1 && krome_press(e, scn, "lo_0"));
+        frames(e, 4);
+        q = asked(e);
+        KV_CHECK(c, q && asked_view(q) == LibraryView::AlbumTracks && asked_parent(q) == 601 && shows(e, "l_crumb", "Artists / Somebody / First"));
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "l_play_all"));
+        frames(e, 3);
+        col = standin_last(e, "LibraryCollect");
+        KV_CHECK(c, col && col->a == kCollectPlay && col->b == 601 && col->value == (f64)LibraryRowKind::Album && standin_count(e, "PlayerQueueEdit") == 1);
+        KV_CHECK(c, krome_press(e, scn, "lv_genres"));
+        frames(e, 4);
+        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Genres);
+        KV_CHECK(c, krome_press(e, scn, "lv_tracks") );
+        frames(e, 4);
+        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Tracks && asked_sort(asked(e)) == LibrarySort::Default);
+        KV_CHECK(c, krome_press(e, scn, "ls_title"));
+        frames(e, 4);
+        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Tracks && asked_sort(asked(e)) == LibrarySort::Title && shows(e, "l_sort", "title"));
+        // Every track is no one row's: nothing to collect, and the queue is left alone.
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "l_play_all"));
+        frames(e, 3);
+        KV_CHECK(c, standin_count(e, "LibraryCollect") == 0 && player_commands(e) == 0);
+        // Words typed into the search: a search for them, each time they change.
+        KV_CHECK(c, type_into(e, "l_search", "blue mo"));
+        frames(e, 4);
+        q = asked(e);
+        KV_CHECK(c, q && asked_view(q) == LibraryView::Search && strcmp(q->text, "blue mo") == 0 && shows(e, "l_crumb", "search: blue mo") && shows(e, "l_view", "search"));
+        standin_clear(e);
+        KV_CHECK(c, krome_press(e, scn, "l_queue_all"));
+        frames(e, 3);
+        col = standin_last(e, "LibraryCollect");
+        KV_CHECK(c, col && col->a == kCollect && strcmp(col->text, "blue mo") == 0);
+        KV_CHECK(c, krome_press(e, scn, "l_up"));
+        frames(e, 4);
+        KV_CHECK(c, asked_view(asked(e)) == LibraryView::Tracks && shows(e, "l_search", ""));
+        input_pointer_override(e, 5, 795, 0);
+        frames(e, 2);
+
+        // A root added by its path, typed; one removed.
+        standin_clear(e);
+        KV_CHECK(c, type_into(e, "l_root_path", "/srv/music"));
+        input_key_override(e, Key::Enter, true);
+        frames(e, 1);
+        input_key_override(e, Key::Enter, false);
+        frames(e, 3);
+        const StandinCommand* add = standin_last(e, "LibraryAddRoot");
+        KV_CHECK(c, add && strcmp(add->text, "/srv/music") == 0 && shows(e, "l_root_path", ""));
+        KV_CHECK(c, krome_press(e, scn, "lr_2"));
+        frames(e, 3);
+        const StandinCommand* rem = standin_last(e, "LibraryRemoveRoot");
+        KV_CHECK(c, rem && rem->a == 2);
+        input_pointer_override(e, 5, 795, 0);
+        frames(e, 2);
+
+        // The queue's rows are asked of the library by their paths, and shown by its titles.
+        standin_item(e, 1, "/music/Album/01 First.flac", PlayerItemState::Playing);
+        standin_item(e, 2, "/music/Album/02 Second.flac");
+        standin_item(e, 3, "/elsewhere/03 Third.flac");
+        p.transport.queued = p.transport.left = 3;
+        p.transport.item = p.transport.place = 1;
+        p.transport.place_pos = 1;
+        standin_clear(e);
+        frames(e, 10);
+        KV_CHECK(c, standin_count(e, "LibraryPath") == 3);
+        const StandinCommand* lp = standin_last(e, "LibraryPath");
+        KV_CHECK(c, lp && lp->a == kTitles && lp->b == 2 && strcmp(lp->text, "/elsewhere/03 Third.flac") == 0);
+        KV_CHECK(c, on_screen(e, "01 First.flac") >= 1 && shows(e, "t_title", "01 First.flac")); // not answered yet: the file's name
+        LibraryRow* ta = standin_row(e, kTitles, 0, LibraryRowKind::Track, 901, "01 First.flac", "First Song", "The Band");
+        format(ta->path, sizeof ta->path, "/music/Album/01 First.flac");
+        LibraryRow* tb = standin_row(e, kTitles, 1, LibraryRowKind::Track, 902, "02 Second.flac", "Second Song");
+        format(tb->path, sizeof tb->path, "/music/Album/02 Second.flac");
+        LibraryRow* tc = standin_row(e, kTitles, 2, LibraryRowKind::Track, 0, "03 Third.flac");
+        format(tc->path, sizeof tc->path, "/elsewhere/03 Third.flac");
+        frames(e, 3);
+        KV_CHECK(c, shows(e, "t_title", "The Band - First Song") && on_screen(e, "The Band - First Song") == 2 && on_screen(e, "Second Song") == 1 && on_screen(e, "03 Third.flac") == 1);
+        // The queue shifts under the answers: a row is not shown under another file's title.
+        standin_remove(e, 1);
+        standin_find(e, 2)->pos = 1;
+        standin_find(e, 3)->pos = 2;
+        p.transport.queued = p.transport.left = 2;
+        p.transport.item = p.transport.place = 2;
+        standin_clear(e);
+        frames(e, 2);
+        KV_CHECK(c, on_screen(e, "First Song") == 0 && on_screen(e, "02 Second.flac") >= 1);
+        frames(e, 10);
+        KV_CHECK(c, standin_count(e, "LibraryPath") == 3); // rows 0 and 1 asked again by their new paths, row 2 taken out
+        lp = standin_last(e, "LibraryPath");
+        KV_CHECK(c, lp != nullptr);
+
+        // Hidden: its windows onto the library are closed. Seen again: asked for again.
+        standin_clear(e);
+        e.events.emit(WindowVisibility{false, WindowHidden::Minimized});
+        ticks(e, 3);
+        KV_CHECK(c, standin_count(e, "LibraryClose") == 2 && standin_count(e, "LibraryQuery") == 0);
+        ticks(e, 60);
+        KV_CHECK(c, standin_count(e, "LibraryQuery") == 0 && standin_count(e, "LibraryPath") == 0);
+        e.events.emit(WindowVisibility{true, WindowHidden::None});
+        frames(e, 10);
+        KV_CHECK(c, standin_count(e, "LibraryQuery") == 1 && standin_count(e, "LibraryPath") == 2);
+        engine_shutdown(e);
+    }
+
+    c.begin("face fifty thousand");
+    {
+        // A library of fifty thousand tracks that answers two frames after it is asked. The
+        // scrollbar is dragged from end to end: every frame within a refresh, rows not yet
+        // answered drawn as placeholders, and the rows in view filled soon after it stops.
+        Engine e;
+        KV_CHECK(c, engine_init(e, k_list));
+        krome_viewport(e, 1280, 800, 1.0f);
+        make_chain(e);
+        KV_CHECK(c, until_ready(e));
+        Name scn = ui_dev_screen(e);
+        KV_CHECK(c, krome_press(e, scn, "lv_tracks"));
+        frames(e, 4);
+        const u32 total = 50000;
+        // The stand-in library: what was asked two frames ago is answered now.
+        StandinCommand pending[3] = {};
+        bool have[3] = {};
+        u32 answered = 0, seen = 0;
+        auto serve = [&]() {
+            StandinPlayer& sp = *standin_player(e);
+            if (have[0]) { answer_tracks(e, (u32)pending[0].b, (u32)pending[0].c, total); ++answered; }
+            pending[0] = pending[1]; have[0] = have[1];
+            have[1] = false;
+            for (; seen < sp.ncommands; ++seen)
+                if (strcmp(sp.commands[seen].type, "LibraryQuery") == 0) { pending[1] = sp.commands[seen]; have[1] = true; have[0] = false; } // the newest replaces the one before
+            if (sp.ncommands > 900) { standin_clear(e); seen = 0; }
+        };
+        for (u32 i = 0; i < 12; ++i) { serve(); frames(e, 1); }
+        KV_CHECK(c, shows(e, "l_total", "50000") && on_screen(e, "song 0") >= 1 && on_screen(e, "...") == 0);
+        // A notch of the wheel is already there: the window was asked for wider than the view.
+        u32 before_wheel = answered;
+        input_pointer_override(e, 300, 400, 0, -1.0f);
+        for (u32 i = 0; i < 6; ++i) { serve(); frames(e, 1); }
+        const KromeTree* tree = krome_tree(e, scn);
+        u32 list_node = tree ? krome_find(*tree, name_intern("l_list")) : KROME_NONE;
+        KV_CHECK(c, list_node != KROME_NONE && tree->nodes[list_node].scroll.y > 0.0f); // it moved
+        KV_CHECK(c, answered == before_wheel && on_screen(e, "...") == 0);                // and asked for nothing
+        input_pointer_override(e, 300, 400, 0, 1.0f);
+        for (u32 i = 0; i < 6; ++i) { serve(); frames(e, 1); }
+
+        rect2 list{};
+        KV_CHECK(c, krome_find_rect(e, scn, "l_list", &list));
+        f32 bar_x = list.x + list.w - 3.0f;
+        f64 worst = 0.0;
+        u32 with_placeholders = 0, dragged = 0;
+        auto frame = [&](f32 y, bool down) {
+            serve();
+            input_pointer_override(e, bar_x, y, down ? 1 : 0);
+            f64 t0 = time_now();
+            frames(e, 1);
+            f64 took = time_now() - t0;
+            if (took > worst) worst = took;
+        };
+        frame(list.y + 6.0f, false);
+        frame(list.y + 6.0f, true);
+        const u32 steps = 180; // three seconds, top to bottom
+        for (u32 i = 1; i <= steps; ++i) {
+            frame(list.y + 6.0f + (list.h - 12.0f) * (f32)i / (f32)steps, true);
+            ++dragged;
+            if (on_screen(e, "...")) ++with_placeholders;
+        }
+        // At rest, still held: how long until what is in view is filled.
+        u32 to_filled = 0;
+        while (to_filled < 60 && on_screen(e, "...")) { frame(list.y + list.h - 6.0f, true); ++to_filled; }
+        frame(list.y + list.h - 6.0f, false);
+        input_pointer_override(e, 5, 795, 0);
+        for (u32 i = 0; i < 4; ++i) { serve(); frames(e, 1); }
+        u32 first = (u32)atof(krome_model_text(e, scn, "l_first"));
+        KV_INFO("test", "face: fifty thousand rows dragged end to end in %u frames: the longest %.2f ms, %u with placeholders, filled %u frames after it stopped; %u windows answered, the last from row %u",
+                dragged, worst * 1e3, with_placeholders, to_filled, answered, first);
+        KV_CHECK(c, on_screen(e, "song 49999") == 1 && on_screen(e, "...") == 0 && first > 49000);
+        KV_CHECK(c, with_placeholders > 0 && to_filled <= 6);  // a hundred milliseconds at 60 Hz
+#if !KV_DEBUG && !defined(__SANITIZE_THREAD__) && !defined(__SANITIZE_ADDRESS__)
+        KV_CHECK(c, worst < 1.0 / 60.0); // one refresh of a 60 Hz display; not a debug or a sanitizer build's to meet
+#endif
+        // A track that changes under the list at rest changes in place: the list does not move.
+        LibraryRow* changed = nullptr;
+        KTable* lr = engine_ktable(e, "library.rows");
+        for (u32 i = 0; i < lr->rows_of<LibraryRow>().len; ++i)
+            if (lr->is_alive(i) && lr->rows_of<LibraryRow>()[i].query == kWindow && lr->rows_of<LibraryRow>()[i].index == 49990) changed = &lr->rows_of<LibraryRow>()[i];
+        KV_CHECK(c, changed != nullptr);
+        if (changed) format(changed->title, sizeof changed->title, "tags just read");
+        frames(e, 3);
+        KV_CHECK(c, on_screen(e, "tags just read") == 1 && on_screen(e, "song 49999") == 1 && (u32)atof(krome_model_text(e, scn, "l_first")) == first);
+        engine_shutdown(e);
+    }
+
     c.begin("face on the player");
     {
         // No stand-in: the player, a capture device of its own on the wall clock, and the
@@ -477,6 +826,12 @@ void test_face(kv::TestCtx& c) {
         PlayerConfig pc;
         pc.device = "capture";
         player_configure(pc);
+        char tmp[1024], data[1100];
+        KV_CHECK(c, io_make_temp_dir("bw_face", tmp, sizeof tmp));
+        format(data, sizeof data, "%s/data", tmp);
+        LibraryConfig lc;
+        lc.data_dir = data;
+        library_configure(lc);
         Engine e;
         KV_CHECK(c, engine_init(e, k_real));
         krome_viewport(e, 1280, 800, 1.0f);
@@ -527,7 +882,65 @@ void test_face(kv::TestCtx& c) {
         // Removed by its row's button: the queue is empty.
         KV_CHECK(c, krome_press(e, scn, "qx_1"));
         KV_CHECK(c, until_shows(e, "q_summary", "0 rows, 0 left"));
+        // Flat and unmuted again, by the same controls.
+        KV_CHECK(c, krome_press(e, scn, "cp_1_0") && krome_press(e, scn, "ct_0_1"));
+        KV_CHECK(c, until_shows(e, "c_v_0_1", "off") && until_shows(e, "c_flat_1", "flat"));
+
+        // ---- and the library ----
+        // A root, by its path typed in: walked, read, and shown with its counts.
+        char music[1100];
+        format(music, sizeof music, "%s/music", tmp);
+        kvtest::make_library(music, 60, 12);
+        KV_CHECK(c, type_into(e, "l_root_path", music));
+        input_key_override(e, Key::Enter, true);
+        frames(e, 1);
+        input_key_override(e, Key::Enter, false);
+        f64 scan_until = time_now() + 20.0;
+        while (time_now() < scan_until && !(on_screen(e, "60 tracks, 0 unread") == 1 && on_screen(e, "idle") == 1)) { frames(e, 1); time_sleep(0.004); }
+        KV_CHECK(c, on_screen(e, "60 tracks, 0 unread") == 1 && on_screen(e, "idle") == 1 && on_screen(e, music) >= 1);
+        input_pointer_override(e, 5, 795, 0);
+        frames(e, 2);
+        // Browsed: its folder, the artists, an artist's albums, an album's tracks, the genres.
+        auto listed = [&](const char* text, f64 seconds = 4.0) {
+            f64 end = time_now() + seconds;
+            for (;;) { frames(e, 1); if (on_screen(e, text)) return true; if (time_now() > end) { KV_ERROR("test", "\"%s\" did not come on screen", text); return false; } time_sleep(0.004); }
+        };
+        KV_CHECK(c, krome_press(e, scn, "lo_0") && listed("Compilations"));           // the root's folder, opened
+        KV_CHECK(c, krome_press(e, scn, "lv_artists") && listed("4 albums, 48 tracks"));
+        KV_CHECK(c, krome_press(e, scn, "lo_0") && until_shows(e, "l_total", "4") && listed("12 tracks, 19"));
+        KV_CHECK(c, krome_press(e, scn, "lo_0") && until_shows(e, "l_total", "12") && listed("Track Zq"));
+        KV_CHECK(c, krome_press(e, scn, "lv_genres") && listed("Electronic") && listed("60 tracks"));
+        KV_CHECK(c, krome_press(e, scn, "lv_tracks") && until_shows(e, "l_total", "60"));
+
+        // Searched, and the one found played: the queue is that track, by the library's title.
+        KV_CHECK(c, type_into(e, "l_search", "zq37") && until_shows(e, "l_total", "1") && listed("Track Zq37"));
+        input_pointer_override(e, 5, 795, 0);
+        KV_CHECK(c, krome_press(e, scn, "lp_0"));
+        KV_CHECK(c, until_shows(e, "q_summary", "1 rows", 4.0, true) && until_shows(e, "t_title", "Track Zq37", 4.0, true));
+        KV_CHECK(c, until_shows(e, "t_state", "stopped", 4.0)); // a tenth of a second of it
+        // Its title corrected, by hand: shown in the list, and in the queue.
+        KV_CHECK(c, krome_press(e, scn, "lo_0") && until_shows(e, "l_edit_open", "true"));
+        krome_set(e, scn, "l_edit_value", "A Better Title");
+        frames(e, 2);
+        KV_CHECK(c, krome_press(e, scn, "l_edit_save") && listed("A Better Title"));
+        f64 both_until = time_now() + 4.0;
+        while (time_now() < both_until && on_screen(e, "A Better Title") < 2) { frames(e, 1); time_sleep(0.004); }
+        KV_CHECK(c, on_screen(e, "A Better Title") == 2); // the library's row, and the queue's
+        // An album queued from its row: twelve more, in its own order.
+        KV_CHECK(c, krome_press(e, scn, "l_up") && krome_press(e, scn, "lv_albums") && until_shows(e, "l_total", "5"));
+        KV_CHECK(c, krome_press(e, scn, "lq_1") && until_shows(e, "q_summary", "13 rows", 4.0, true));
+        // The queue's titles are the library's: the list above shows albums, so every track's title on screen is a queue row's.
+        f64 titles_until = time_now() + 4.0;
+        while (time_now() < titles_until && on_screen(e, "Track Zq") < 5) { frames(e, 1); time_sleep(0.004); }
+        KV_CHECK(c, on_screen(e, "Track Zq") >= 5);
+        // The queue emptied, and the root removed.
+        KV_CHECK(c, krome_press(e, scn, "q_clear") && until_shows(e, "q_summary", "0 rows, 0 left"));
+        KV_CHECK(c, krome_press(e, scn, "lr_1"));
+        f64 gone_until = time_now() + 4.0;
+        while (time_now() < gone_until && on_screen(e, music)) { frames(e, 1); time_sleep(0.004); }
+        KV_CHECK(c, on_screen(e, music) == 0 && shows(e, "o_underruns", "0"));
         engine_shutdown(e);
+        io_remove_tree(tmp);
         player_configure(PlayerConfig{});
     }
 
@@ -549,7 +962,7 @@ void test_face(kv::TestCtx& c) {
         KV_CHECK(c, u.broken == 1 && !u.failed);
         KV_CHECK(c, on_screen(e, "ui_dev/queue.kimb") == 1 && on_screen(e, "queue: this panel did not load") == 1);
         // The transport beside it works, and the stand-in's player is untouched by any of it.
-        KV_CHECK(c, standin_player(e)->ncommands == 0);
+        KV_CHECK(c, player_commands(e) == 0);
         standin_player(e)->transport.state = (u8)PlayerState::Paused;
         frames(e, 3);
         KV_CHECK(c, shows(e, "t_state", "paused") && krome_press(e, ui_dev_screen(e), "play"));

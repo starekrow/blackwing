@@ -38,7 +38,20 @@ constinit u32 g_results = 0;            // LibraryResult seen
 void on_finished(TickContext&, Span<const LibraryScanFinished> ev) { for (auto& e : ev) { ++g_finished; g_finished_tracks = e.tracks; } }
 void on_changed(TickContext&, Span<const LibraryChanged> ev) { g_changed += ev.len; }
 void on_result(TickContext&, Span<const LibraryResult> ev) { for (auto& e : ev) { if (e.id < 16) g_result[e.id] = e; ++g_results; } }
+// What a LibraryCollect answered with, by the asker's id: the paths in the order they came.
+struct Got { u32 id; u32 index; u32 total; char path[600]; };
+constinit Got g_got[512] = {};
+constinit u32 g_ngot = 0;
+void on_collected(TickContext&, Span<const LibraryCollected> ev) {
+    for (auto& e : ev) {
+        if (g_ngot == 512) return;
+        Got& g = g_got[g_ngot++];
+        g.id = e.id; g.index = e.index; g.total = e.total;
+        format(g.path, sizeof g.path, "%s", e.path);
+    }
+}
 constinit const HandlerDesc k_handlers[] = {
+    {.name = ".collected", KV_ON(LibraryCollected, on_collected), .phase = Phase::PostSim},
     {.name = ".finished", KV_ON(LibraryScanFinished, on_finished), .phase = Phase::PostSim},
     {.name = ".changed",  KV_ON(LibraryChanged, on_changed),       .phase = Phase::PostSim},
     {.name = ".result",   KV_ON(LibraryResult, on_result),         .phase = Phase::PostSim},
@@ -843,7 +856,7 @@ void test_library_corpus(TestCtx& c) {
     }
     // Every audio file a row; every row its tags, or a reason.
     LibraryRoot rt = r.root(1);
-    u32 rows = 0, no_audio = 0, unexplained = 0, too_long = 0;
+    u32 rows = 0, no_audio = 0, unexplained = 0, too_long = 0, past_511 = 0;
     Array<u64> ids;
     for (u32 first = 0;; first += kLibraryMaxWindow) {
         if (!r.query(3, LibraryView::Tracks, 0, "", first, kLibraryMaxWindow)) break;
@@ -855,6 +868,7 @@ void test_library_corpus(TestCtx& c) {
             ++rows;
             if (x.rate == 0) { ++no_audio; if (!x.reason[0]) ++unexplained; }
             if (!x.path[0] && strstr(x.reason, "longer than the player takes")) ++too_long;
+            if (strlen(x.path) > 511) { ++past_511; IoStat st; if (!io_stat(x.path, &st) || !st.is_file) KV_ERROR("test", "a long path that is not a file: %s", x.path); }
         }
         u32 n = w.len;
         w.free();
@@ -863,9 +877,10 @@ void test_library_corpus(TestCtx& c) {
     ids.free();
     u64 read = r.scan().bytes_read;
     if (rows != audio) KV_ERROR("test", "root says %u tracks", rt.tracks);
-    KV_INFO("test", "library corpus: %u audio files, %u rows, %u without audio (each with its reason), %u unexplained, %u too long to play; "
-            "%.1f MB read, the scan %.1f s", audio, rows, no_audio, unexplained, too_long, read / 1e6, took);
-    KV_CHECK(c, rt.tracks == audio && rows == audio && unexplained == 0 && too_long == 1);
+    KV_INFO("test", "library corpus: %u audio files, %u rows, %u without audio (each with its reason), %u unexplained, %u too long to play, %u past 511 bytes; "
+            "%.1f MB read, the scan %.1f s", audio, rows, no_audio, unexplained, too_long, past_511, read / 1e6, took);
+    // A path of any length the OS allows is a row with its path (slice 4: it was refused past 511 bytes).
+    KV_CHECK(c, rt.tracks == audio && rows == audio && unexplained == 0 && too_long == 0 && past_511 == 1);
     KV_CHECK(c, read < (40u << 20)); // a hundred megabytes of art among it, not read
     KV_CHECK(c, r.query(4, LibraryView::Search, 0, "huge"));
     { Array<LibraryRow> h = r.rows(4); KV_CHECK(c, h.len == 1 && strstr(h[0].title, "Huge Art") && h[0].rate == 44100); h.free(); }
@@ -873,3 +888,117 @@ void test_library_corpus(TestCtx& c) {
     format(p, sizeof p, "%s/tree/locked", root); chmod(p, 0755);
     io_remove_tree(tmp);
 }
+
+// What slice 4's face needs of the library: a window over paths (a queue's rows, by what
+// the library knows of them), and the paths of every track of a row of any kind, in its
+// own order, from one command.
+void test_library_paths(TestCtx& c) {
+    c.begin("library paths");
+    char tmp[1024], music[1100], data[1100], p[2600];
+    KV_CHECK(c, io_make_temp_dir("bw_paths", tmp, sizeof tmp));
+    format(music, sizeof music, "%s/music", tmp);
+    format(data, sizeof data, "%s/data", tmp);
+    kvtest::make_library(music, 60, 12); // five albums of twelve
+    Rig r;
+    KV_CHECK(c, r.start(data));
+    r.add(music);
+    KV_CHECK(c, r.until([&] { return g_finished == 1 && r.scan().unread == 0 && !r.scan().active; }, 30.0));
+    KV_CHECK(c, r.query(1, LibraryView::Tracks, 0, "", 0, 10));
+    Array<LibraryRow> tracks = r.rows(1);
+    KV_CHECK(c, tracks.len == 10 && tracks[0].path[0] && tracks[2].title[0]);
+
+    // A window over paths: a row for each, at the index given, the library's or not.
+    auto path = [&](u32 id, u32 index, const char* at) { LibraryPath lp; lp.id = id; lp.index = index; format(lp.path, sizeof lp.path, "%s", at); r.say(lp); };
+    u32 before = g_results;
+    path(7, 40, tracks[2].path);
+    path(7, 41, tracks[0].path);
+    path(7, 42, "/nowhere/at all/x.flac");
+    format(p, sizeof p, "%s/not there.flac", music);
+    path(7, 43, p);
+    KV_CHECK(c, r.until([&] { return g_results > before && g_result[7].id == 7; }));
+    Array<LibraryRow> rows = r.rows(7);
+    KV_CHECK(c, rows.len == 4 && g_result[7].count == 4 && g_result[7].total == 4);
+    if (rows.len == 4) {
+        KV_CHECK(c, rows[0].index == 40 && rows[0].id == tracks[2].id && strcmp(rows[0].title, tracks[2].title) == 0 && strcmp(rows[0].path, tracks[2].path) == 0);
+        KV_CHECK(c, rows[1].index == 41 && rows[1].id == tracks[0].id && strcmp(rows[1].artist, tracks[0].artist) == 0 && rows[1].rate == 44100);
+        KV_CHECK(c, rows[2].index == 42 && rows[2].id == 0 && strcmp(rows[2].name, "x.flac") == 0 && strstr(rows[2].reason, "not under a root") && strcmp(rows[2].path, "/nowhere/at all/x.flac") == 0);
+        KV_CHECK(c, rows[3].index == 43 && rows[3].id == 0 && strcmp(rows[3].name, "not there.flac") == 0 && strstr(rows[3].reason, "no track at this path") && rows[3].root == 1);
+    }
+    rows.free();
+    // An index given another path; one taken out with an empty one.
+    before = g_results;
+    path(7, 40, tracks[5].path);
+    path(7, 42, "");
+    KV_CHECK(c, r.until([&] { return g_results > before && g_result[7].count == 3; }));
+    rows = r.rows(7);
+    KV_CHECK(c, rows.len == 3 && rows[0].index == 40 && rows[0].id == tracks[5].id && rows[1].index == 41 && rows[2].index == 43);
+    rows.free();
+    // An override shows in it, as in any window, when the index moves on.
+    LibraryOverride o;
+    o.track = tracks[5].id;
+    format(o.field, sizeof o.field, "title");
+    format(o.value, sizeof o.value, "A Title By Hand");
+    r.say(o);
+    KV_CHECK(c, r.until([&] { Array<LibraryRow> w = r.rows(7); bool ok = w.len == 3 && strcmp(w[0].title, "A Title By Hand") == 0; w.free(); return ok; }));
+    // Closed: its rows go. A query cannot open one.
+    r.say(LibraryClose{7});
+    KV_CHECK(c, r.until([&] { Array<LibraryRow> w = r.rows(7); bool none = w.len == 0; w.free(); return none; }));
+
+    // The tracks of a row of any kind, from one command, in the order its own view has.
+    auto collect = [&](u32 id, LibraryRowKind kind, u64 row, const char* text = "") {
+        g_ngot = 0;
+        LibraryCollect lc;
+        lc.id = id; lc.kind = (u8)kind; lc.row = row;
+        format(lc.text, sizeof lc.text, "%s", text);
+        r.say(lc);
+        return r.until([&] { return g_ngot && (g_got[g_ngot - 1].total == 0 || g_got[g_ngot - 1].index + 1 == g_got[g_ngot - 1].total); });
+    };
+    auto in_order = [&](u32 id) {
+        for (u32 i = 0; i < g_ngot; ++i) if (g_got[i].id != id || g_got[i].index != i || g_got[i].total != g_ngot) return false;
+        return g_ngot > 0;
+    };
+    KV_CHECK(c, r.query(2, LibraryView::Albums, 0, ""));
+    Array<LibraryRow> albums = r.rows(2);
+    KV_CHECK(c, albums.len == 5 && albums[1].kind == (u8)LibraryRowKind::Album && albums[1].count == 12);
+    // An album: its tracks by number.
+    KV_CHECK(c, r.query(3, LibraryView::AlbumTracks, albums[1].id, ""));
+    Array<LibraryRow> of_album = r.rows(3);
+    KV_CHECK(c, of_album.len == 12 && collect(21, LibraryRowKind::Album, albums[1].id) && g_ngot == 12 && in_order(21));
+    bool same = g_ngot == 12;
+    for (u32 i = 0; i < 12 && same; ++i) same = strcmp(g_got[i].path, of_album[i].path) == 0;
+    KV_CHECK(c, same);
+    // An artist: every album's, an album at a time.
+    KV_CHECK(c, r.query(4, LibraryView::Artists, 0, ""));
+    Array<LibraryRow> artists = r.rows(4);
+    // (The generator's fourth layout is a compilation, which the library files under an artist of its own.)
+    KV_CHECK(c, artists.len == 2 && artists[0].count == 48 && artists[0].albums == 4 && artists[1].count == 12);
+    KV_CHECK(c, collect(22, LibraryRowKind::Artist, artists[0].id) && g_ngot == 48 && in_order(22));
+    bool by_album = g_ngot == 48;
+    for (u32 i = 0; i + 1 < g_ngot && by_album; ++i) {
+        // Twelve in a row share a directory, and the next twelve another.
+        const char* a = strrchr(g_got[i].path, '/');
+        const char* b = strrchr(g_got[i + 1].path, '/');
+        bool same_dir = a && b && (a - g_got[i].path) == (b - g_got[i + 1].path) && strncmp(g_got[i].path, g_got[i + 1].path, (usize)(a - g_got[i].path)) == 0;
+        by_album = same_dir == ((i + 1) % 12 != 0);
+    }
+    KV_CHECK(c, by_album);
+    // A folder, with everything under it: the root's.
+    KV_CHECK(c, r.query(5, LibraryView::Folders, 0, ""));
+    Array<LibraryRow> top = r.rows(5);
+    KV_CHECK(c, top.len == 1 && top[0].kind == (u8)LibraryRowKind::Directory);
+    KV_CHECK(c, collect(23, LibraryRowKind::Directory, top[0].id) && g_ngot == 60 && in_order(23));
+    u32 real = 0;
+    for (u32 i = 0; i < g_ngot; ++i) { IoStat st; real += io_stat(g_got[i].path, &st) && st.is_file; }
+    KV_CHECK(c, real == 60);
+    // One track; a search; a genre; and nothing, which says so once.
+    KV_CHECK(c, collect(24, LibraryRowKind::Track, tracks[3].id) && g_ngot == 1 && strcmp(g_got[0].path, tracks[3].path) == 0 && g_got[0].total == 1);
+    KV_CHECK(c, collect(25, LibraryRowKind::Track, 0, "zq37") && g_ngot == 1 && strstr(g_got[0].path, "Zq37"));
+    KV_CHECK(c, r.query(6, LibraryView::Genres, 0, ""));
+    Array<LibraryRow> genres = r.rows(6);
+    KV_CHECK(c, genres.len == 1 && genres[0].count == 60 && collect(26, LibraryRowKind::Genre, genres[0].id) && g_ngot == 60 && in_order(26));
+    KV_CHECK(c, collect(27, LibraryRowKind::Album, 123456789) && g_ngot == 1 && g_got[0].total == 0 && g_got[0].path[0] == 0 && g_got[0].id == 27);
+    genres.free(); top.free(); artists.free(); of_album.free(); albums.free(); tracks.free();
+    r.stop();
+    io_remove_tree(tmp);
+}
+

@@ -15,7 +15,7 @@ namespace kv {
 
 namespace {
 
-constexpr u32 kQueueView = 512; // rows handed over at once, at most
+constexpr u32 kQueueView = kFaceView - 1; // rows handed over at once, at most: the title window's, less the transport's row
 
 const char* item_state_text(const PlayerItem& r, u32 place_pos) {
     switch ((PlayerItemState)r.state) {
@@ -80,7 +80,8 @@ void queue_sync(TickContext& ctx, Face& f) {
         format(text, sizeof text, "%llu", (unsigned long long)r->id);
         b.set(o, "id", b.string(text));
         b.set(o, "pos", b.integer(r->pos));
-        b.set(o, "title", b.string(face_file_name(r->path)));
+        char title[600];
+        b.set(o, "title", b.string(face_title(k < kFaceView ? f.title_rows[k] : nullptr, r->path, title, sizeof title)));
         b.set(o, "state", b.string(item_state_text(*r, t->place_pos)));
         if (r->rate) format(text, sizeof text, "%u Hz, %u ch, %u bit", r->rate, r->channels, r->bits);
         else text[0] = 0;

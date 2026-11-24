@@ -2,8 +2,8 @@
 
 Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 `hifi_platform`, `blackwing_player` and `blackwing` have code (slice 1), `hifi_eq`
-(slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev` and
-`blackwing_window` (slice 4, under way); the rest are skeletons. The
+(slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev`,
+`blackwing_window` and `blackwing_glue` (slice 4, under way); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
@@ -20,6 +20,7 @@ Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 | [ui_wsz](ui_wsz/README.md) | the classic face: Winamp `.wsz` skins |
 | [ui_clean](ui_clean/README.md) | the clean face |
 | [ui_compact](ui_compact/README.md) | the clean face, compact |
+| [blackwing_glue](blackwing_glue/README.md) | where the player and the library hear each other: a file queued is scanned next, what the library collects is queued |
 | [blackwing_window](blackwing_window/README.md) | what every face shares of the window: closing it ends the run |
 | [blackwing](blackwing/README.md) | the application: the executable around the player, the library and a face |
 
@@ -43,5 +44,6 @@ shows a script, by name. They hang from
 
 Three layers. `hifi*` is the audio path and knows nothing of music collections or
 players. `blackwing_player` is a player with no face and no library, which another
-project could link. `blackwing`, the library and the faces are the application around
-it. The faces depend on the player and the library for their declarations only.
+project could link. `blackwing`, the library, the glue between the two and the faces are
+the application around it. The faces depend on the player and the library for their
+declarations only.

@@ -1,0 +1,114 @@
+// The Library panel: the roots, the views (folders, artists, albums, genres, every track,
+// a search), and a list of whichever is open. The list holds only the rows in view: it
+// says which those are (l_rows), ui_dev asks the library for that window and hands over
+// what comes back. A row of any kind is opened, queued or played; a track is edited.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def library-panel {
+    col [dev-panel] id=library w=fill h=fill {
+        row gap=8 middle w=fill {
+            text "Library" [dev-title]
+            text "{l_status}" id=l_status [dev-value] w=fill nowrap clip
+        }
+        col w=fill {
+            each root in l_roots {
+                row [dev-row] middle {
+                    dev-text "{root.path}" w=fill color=@root.ink
+                    dev-text "{root.state}" w=52 color=@root.ink
+                    dev-text "{root.counts}" w=236
+                    dev-text "{root.reason}" w=130 color=@root.ink
+                    hit [dev-btn] id="lr_{root.id}" -> l_remove_root {
+                        text "remove" size=11
+                    }
+                }
+            }
+        }
+        row gap=6 middle w=fill {
+            input id=l_root_path @l_root_path placeholder="a directory to add as a root" w=fill -> l_add_root
+            dev-btn "Add root" id=l_add_root -> l_add_root
+        }
+        row gap=4 middle w=fill {
+            hit [dev-btn] id=lv_folders @l_view=folders -> l_view {
+                text "Folders" size=12
+            }
+            hit [dev-btn] id=lv_artists @l_view=artists -> l_view {
+                text "Artists" size=12
+            }
+            hit [dev-btn] id=lv_albums @l_view=albums -> l_view {
+                text "Albums" size=12
+            }
+            hit [dev-btn] id=lv_genres @l_view=genres -> l_view {
+                text "Genres" size=12
+            }
+            hit [dev-btn] id=lv_tracks @l_view=tracks -> l_view {
+                text "Tracks" size=12
+            }
+            input id=l_search @l_search placeholder="search" w=fill change=l_search
+        }
+        row gap=4 middle w=fill {
+            dev-btn "Up" id=l_up -> l_up
+            text "{l_crumb}" id=l_crumb [dev-value] w=fill nowrap clip
+            text "sort" [dev-title]
+            hit [dev-btn] id=ls_default @l_sort=default -> l_sort {
+                text "own" size=11
+            }
+            hit [dev-btn] id=ls_title @l_sort=title -> l_sort {
+                text "title" size=11
+            }
+            hit [dev-btn] id=ls_artist @l_sort=artist -> l_sort {
+                text "artist" size=11
+            }
+            hit [dev-btn] id=ls_album @l_sort=album -> l_sort {
+                text "album" size=11
+            }
+            hit [dev-btn] id=ls_date @l_sort=date -> l_sort {
+                text "date" size=11
+            }
+            hit [dev-btn] id=ls_path @l_sort=path -> l_sort {
+                text "path" size=11
+            }
+            dev-btn "Queue all" id=l_queue_all -> l_queue_all
+            dev-btn "Play all" id=l_play_all -> l_play_all
+        }
+        col id=l_list scroll w=fill h=fill [list] {
+            each row in l_rows height=22 count=@l_total from=@l_first -> l_rows {
+                row [dev-row] middle {
+                    dev-text "{row.kind}" w=38 color=muted
+                    dev-text "{row.title}" w=fill color=@row.ink
+                    dev-text "{row.artist}" w=116
+                    dev-text "{row.album}" w=116
+                    dev-text "{row.extra}" w=80
+                    dev-text "{row.reason}" w=110 color=@row.ink
+                    row gap=2 w=132 {
+                        hit [dev-btn] id="lo_{row.index}" -> l_open {
+                            text "{row.open}" size=11
+                        }
+                        hit [dev-btn] id="lq_{row.index}" -> l_queue {
+                            text "queue" size=11
+                        }
+                        hit [dev-btn] id="lp_{row.index}" -> l_play {
+                            text "play" size=11
+                        }
+                    }
+                }
+                placeholder {
+                    row [dev-row] middle {
+                        text "..." [dev-cell] color=muted
+                    }
+                }
+            }
+        }
+        if l_edit_open {
+            row gap=6 middle w=fill {
+                text "{l_edit_name}" id=l_edit_name [dev-cell] w=200
+                input id=l_edit_field @l_edit_field placeholder="field" w=110
+                input id=l_edit_value @l_edit_value placeholder="its value for you; empty hides it" w=fill -> l_edit_save
+                dev-btn "Save" id=l_edit_save -> l_edit_save
+                dev-btn "Its own again" id=l_edit_clear -> l_edit_clear
+                dev-btn "Cancel" id=l_edit_cancel -> l_edit_cancel
+            }
+        }
+    }
+}

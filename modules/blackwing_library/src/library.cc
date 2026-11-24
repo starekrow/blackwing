@@ -40,6 +40,7 @@ namespace lib {
 constexpr f64 kCommitSeconds = 0.25; // the writer commits at most this often while batches come
 constexpr u32 kMaxReads      = 48;   // the tagger's reads in the I/O queue at once
 constexpr f64 kRefillSeconds = 0.25; // open windows are asked again at most this often
+constexpr u32 kCollectPerTick = 64;  // LibraryCollected events said in one tick
 
 // ---- the writer ------------------------------------------------------------------------------
 
@@ -584,6 +585,123 @@ int stop_check(void* user) {
     return atomic_load(&c.sh->stop_epoch, MO_RELAXED) != c.epoch ? 1 : 0;
 }
 
+char* keep_text(const char* s) {
+    usize n = strlen(s);
+    char* out = (char*)mem_alloc(n + 1);
+    memcpy(out, s, n + 1);
+    return out;
+}
+void free_ask(Ask& a) {
+    for (u32 i = 0; i < a.npaths; ++i) mem_free(a.paths[i].path);
+    if (a.paths) mem_free(a.paths);
+    a.paths = nullptr;
+    a.npaths = 0;
+}
+void free_collected(Collected* c) {
+    for (char* p : c->paths) mem_free(p);
+    c->paths.free();
+    mem_free(c);
+}
+
+// A window over paths, answered: each path's root is the root whose path it begins with
+// (the longest, should roots nest), and its row the track there. A path under no root, or
+// with no track at it, is a row all the same: the file's name, and why.
+void answer_paths(Index& ix, const Ask& a, const RootPaths& roots, Result& r) {
+    r.total = a.npaths;
+    for (u32 i = 0; i < a.npaths; ++i) {
+        const char* path = a.paths[i].path;
+        LibraryRow& row = r.rows[r.count++];
+        const Shared::RootLine* best = nullptr;
+        usize best_len = 0;
+        for (const Shared::RootLine& l : roots.lines) {
+            usize n = strlen(l.path);
+            if (n >= best_len && strncmp(path, l.path, n) == 0 && path[n] == '/') { best = &l; best_len = n; }
+        }
+        bool have = best && ix.row_at(best->id, path + best_len + 1, a.q.id, &row, root_path_of, (void*)&roots);
+        if (!have) {
+            row = LibraryRow{};
+            row.query = a.q.id;
+            row.kind = (u8)LibraryRowKind::Track;
+            row.root = best ? best->id : 0;
+            const char* name = path;
+            for (const char* p = path; *p; ++p) if (*p == '/' && p[1]) name = p + 1;
+            format(row.name, sizeof row.name, "%s", name);
+            format(row.path, sizeof row.path, "%s", path);
+            format(row.reason, sizeof row.reason, "%s", best ? "the library has no track at this path" : "not under a root of the library");
+        }
+        row.index = a.paths[i].index;
+    }
+}
+
+// A LibraryCollect, answered with the windows any face would open: every window of the
+// view, a kLibraryMaxWindow at a time, until its total is reached.
+struct Collector {
+    Index* ix; const RootPaths* roots; u64 generation; Collected* out; LibraryRow* rows; u32 depth = 0;
+    bool full() const { return out->paths.len >= kLibraryMaxCollect; }
+    void add(const LibraryRow& r) {
+        if (r.kind == (u8)LibraryRowKind::Track && r.path[0] && !r.missing && !full()) out->paths.push(keep_text(r.path));
+    }
+    // Every row of a view, to fn; directories and groups as well as tracks.
+    template <class F> void each(LibraryView view, u64 parent, const char* text, LibrarySort sort, F fn) {
+        for (u32 first = 0; !full();) {
+            LibraryQuery q;
+            q.id = 0; q.view = view; q.sort = sort; q.parent = parent; q.first = first; q.count = kLibraryMaxWindow;
+            format(q.text, sizeof q.text, "%s", text);
+            u32 total = 0;
+            u32 n = ix->window(q, generation, rows, &total, root_path_of, (void*)roots);
+            // A window's rows are read into the one buffer: taken before the next overwrites them.
+            for (u32 i = 0; i < n; ++i) fn(rows[i]);
+            first += n;
+            if (n == 0 || first >= total) break;
+        }
+    }
+    void tracks(LibraryView view, u64 parent, const char* text, LibrarySort sort) { each(view, parent, text, sort, [&](const LibraryRow& r) { add(r); }); }
+    // A directory: its directories in turn, each with everything under it, then its own
+    // tracks, as the Folders view shows them.
+    void directory(u64 dir) {
+        if (++depth > 256) { --depth; return; }
+        Array<u64> dirs;
+        Array<char*> own;
+        each(LibraryView::Folders, dir, "", LibrarySort::Default, [&](const LibraryRow& r) {
+            if (r.kind == (u8)LibraryRowKind::Directory) dirs.push(r.id);
+            else if (r.kind == (u8)LibraryRowKind::Track && r.path[0] && !r.missing) own.push(keep_text(r.path));
+        });
+        for (u64 d : dirs) directory(d);
+        for (char* p : own) { if (full()) mem_free(p); else out->paths.push(p); }
+        dirs.free();
+        own.free();
+        --depth;
+    }
+};
+
+void answer_collect(Index& ix, const LibraryCollect& c, const RootPaths& roots, u64 generation, Collected* out) {
+    LibraryRow* rows = (LibraryRow*)mem_alloc(sizeof(LibraryRow) * kLibraryMaxWindow);
+    Collector k{&ix, &roots, generation, out, rows};
+    if (c.text[0]) {
+        k.tracks(LibraryView::Search, 0, c.text, c.sort);
+    } else switch ((LibraryRowKind)c.kind) {
+    case LibraryRowKind::Directory: k.directory(c.row); break;
+    case LibraryRowKind::Album:     k.tracks(LibraryView::AlbumTracks, c.row, "", LibrarySort::Default); break;
+    case LibraryRowKind::Genre:     k.tracks(LibraryView::Tracks, c.row, "", c.sort); break;
+    case LibraryRowKind::Artist: {
+        Array<u64> albums;
+        k.each(LibraryView::Albums, c.row, "", LibrarySort::Default, [&](const LibraryRow& r) { if (r.kind == (u8)LibraryRowKind::Album) albums.push(r.id); });
+        for (u64 a : albums) k.tracks(LibraryView::AlbumTracks, a, "", LibrarySort::Default);
+        albums.free();
+    } break;
+    case LibraryRowKind::Track: {
+        Index::TrackAt at;
+        if (ix.track_info(c.row, &at)) {
+            char path[kPathMax + 4200];
+            format(path, sizeof path, "%s/%s", root_path_of((void*)&roots, at.root), at.rel);
+            if (strlen(path) < kLibraryPathMax) out->paths.push(keep_text(path));
+        }
+    } break;
+    default: break;
+    }
+    mem_free(rows);
+}
+
 void read_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     os_mutex_lock(&sh.lock);
@@ -593,21 +711,26 @@ void read_thread(void* arg) {
     bool up = false;
     RootPaths roots;
     Array<Ask> todo;
+    Array<LibraryCollect> collects;
     for (;;) {
         os_mutex_lock(&sh.lock);
-        while (!sh.quit && sh.asks.len == 0) os_cond_wait(&sh.read_wake, &sh.lock);
+        while (!sh.quit && sh.asks.len == 0 && sh.collects.len == 0) os_cond_wait(&sh.read_wake, &sh.lock);
         if (sh.quit) { os_mutex_unlock(&sh.lock); break; }
         for (const Ask& a : sh.asks) todo.push(a);
         sh.asks.clear();
+        for (const LibraryCollect& c : sh.collects) collects.push(c);
+        sh.collects.clear();
         roots.lines.clear();
         for (const Shared::RootLine& l : sh.root_lines) roots.lines.push(l);
         os_mutex_unlock(&sh.lock);
         if (!up) up = ix.open(sh.index_path, false);
-        for (const Ask& a : todo) {
+        for (Ask& a : todo) {
             Result r;
             r.id = a.q.id; r.seq = a.seq; r.first = a.q.first;
             r.generation = atomic_load(&sh.generation, MO_ACQUIRE);
-            u32 want = a.q.count < kLibraryMaxWindow ? a.q.count : kLibraryMaxWindow;
+            bool by_path = a.q.view == LibraryView::Paths;
+            u32 want = by_path ? a.npaths : a.q.count < kLibraryMaxWindow ? a.q.count : kLibraryMaxWindow;
+            if (by_path) r.first = 0;
             r.rows = (LibraryRow*)mem_alloc(sizeof(LibraryRow) * (want ? want : 1));
             // Which window this is, so a newer ask for it can stop it in sqlite.
             os_mutex_lock(&sh.lock);
@@ -618,6 +741,7 @@ void read_thread(void* arg) {
             os_mutex_unlock(&sh.lock);
             f64 t0 = time_now();
             if (newer) r.stopped = true; // already asked again: not worth starting
+            else if (up && by_path) answer_paths(ix, a, roots, r);
             else if (up) {
                 ix.stop_when(stop_check, &check);
                 r.count = ix.window(a.q, r.generation, r.rows, &r.total, root_path_of, &roots);
@@ -632,10 +756,24 @@ void read_thread(void* arg) {
             sh.reading_window = 0;
             sh.results.push(r);
             os_mutex_unlock(&sh.lock);
+            free_ask(a);
         }
         todo.clear();
+        for (const LibraryCollect& c : collects) {
+            Collected* out = (Collected*)mem_alloc(sizeof(Collected));
+            new (out) Collected{};
+            out->id = c.id;
+            if (up) answer_collect(ix, c, roots, atomic_load(&sh.generation, MO_ACQUIRE), out);
+            if (up && ix.damaged) { ix.close(); up = false; }
+            os_mutex_lock(&sh.lock);
+            sh.collected.push(out);
+            os_mutex_unlock(&sh.lock);
+        }
+        collects.clear();
     }
+    for (Ask& a : todo) free_ask(a);
     todo.free();
+    collects.free();
     roots.lines.free();
     ix.close();
 }
@@ -665,6 +803,8 @@ struct Window {
     LibraryQuery q;
     u32    seq = 0;           // the newest ask sent for it
     u32    answered = 0;      // the newest ask a result has come for
+    Array<PathAsk> paths;     // a window over paths: its paths, each from mem_alloc
+    bool   dirty = false;     // its paths changed this tick: asked once when all are in
     bool   open = false;
     u64    shown_generation = 0;
     Array<Handle> rows;
@@ -687,6 +827,8 @@ struct Library {
     OsThread tagger, watcher;
     Array<Reading> reading;
     Array<ReadAsk> waiting;       // asked, not yet in the queue (it was full)
+    u32      collects_out = 0;    // LibraryCollects sent to the reader and not yet answered
+    Array<Collected*> sending;    // answered: their paths said a few dozen a tick, in order
 };
 
 Library* state(Engine& e) { return engine_module_state_as<Library>(e, "library"); }
@@ -762,11 +904,18 @@ void add_root(Library& L, KTable* table, u32 id, const char* path, bool save) {
 
 void ask(Library& L, Window& w) {
     w.seq = ++L.seq;
+    Ask fresh{w.q, w.seq};
+    if (w.q.view == LibraryView::Paths && w.paths.len) {
+        // The reader gets a copy: the window's own may change before it has answered.
+        fresh.npaths = w.paths.len;
+        fresh.paths = (PathAsk*)mem_alloc(sizeof(PathAsk) * w.paths.len);
+        for (u32 i = 0; i < w.paths.len; ++i) fresh.paths[i] = PathAsk{w.paths[i].index, keep_text(w.paths[i].path)};
+    }
     os_mutex_lock(&L.sh->lock);
     if (L.sh->reading_window == w.id) atomic_add_fetch(&L.sh->stop_epoch, 1u, MO_RELAXED); // the one being answered stops
     bool replaced = false;
-    for (Ask& a : L.sh->asks) if (a.q.id == w.id) { a.q = w.q; a.seq = w.seq; replaced = true; } // the older ask is dropped unanswered
-    if (!replaced) L.sh->asks.push(Ask{w.q, w.seq});
+    for (Ask& a : L.sh->asks) if (a.q.id == w.id) { free_ask(a); a = fresh; replaced = true; } // the older ask is dropped unanswered
+    if (!replaced) L.sh->asks.push(fresh);
     os_cond_signal(&L.sh->read_wake);
     os_mutex_unlock(&L.sh->lock);
 }
@@ -774,6 +923,12 @@ void ask(Library& L, Window& w) {
 Window* window(Library& L, u32 id) {
     for (Window& w : L.windows) if (w.id == id) return &w;
     return nullptr;
+}
+
+void free_paths(Window& w) {
+    for (PathAsk& p : w.paths) mem_free(p.path);
+    w.paths.free();
+    w.paths = Array<PathAsk>{};
 }
 
 void clear_rows(KTable* rows, Window& w) {
@@ -810,9 +965,39 @@ void commands(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     for (const LibraryQuery& q : ctx.received<LibraryQuery>()) {
         Window* w = window(L, q.id);
         if (!w) { L.windows.push(Window{}); w = &L.windows.last(); w->id = q.id; }
+        if (q.view == LibraryView::Paths) continue; // a window over paths is made of LibraryPath, not asked for
+        free_paths(*w);
         w->q = q;
         w->open = true;
         ask(L, *w);
+    }
+    for (const LibraryPath& p : ctx.received<LibraryPath>()) {
+        Window* w = window(L, p.id);
+        if (!w) { L.windows.push(Window{}); w = &L.windows.last(); w->id = p.id; }
+        if (!w->open || w->q.view != LibraryView::Paths) {
+            free_paths(*w);
+            w->q = LibraryQuery{};
+            w->q.id = p.id;
+            w->q.view = LibraryView::Paths;
+            w->open = true;
+        }
+        u32 at = 0;
+        while (at < w->paths.len && w->paths[at].index != p.index) ++at;
+        if (at < w->paths.len) { mem_free(w->paths[at].path); w->paths[at] = w->paths[w->paths.len - 1]; --w->paths.len; }
+        char path[kPathMax];
+        if (p.path[0] && normal_path(p.path, path, sizeof path)) {
+            if (w->paths.len < kLibraryMaxWindow) w->paths.push(PathAsk{p.index, keep_text(path)});
+            else KV_WARN("library", "window %u has %u paths already: no more are taken", p.id, kLibraryMaxWindow);
+        }
+        w->dirty = true;
+    }
+    for (Window& w : L.windows) if (w.dirty) { w.dirty = false; ask(L, w); }
+    for (const LibraryCollect& c : ctx.received<LibraryCollect>()) {
+        os_mutex_lock(&L.sh->lock);
+        L.sh->collects.push(c);
+        os_cond_signal(&L.sh->read_wake);
+        os_mutex_unlock(&L.sh->lock);
+        ++L.collects_out;
     }
     for (const LibraryPrioritize& p : ctx.received<LibraryPrioritize>()) {
         SlotMsg* m = (SlotMsg*)mem_alloc(sizeof(SlotMsg));
@@ -858,6 +1043,7 @@ void commands(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
             if (L.windows[i].id != c.id) continue;
             clear_rows(rows, L.windows[i]);
             L.windows[i].rows.free();
+            free_paths(L.windows[i]);
             L.windows[i] = L.windows[L.windows.len - 1];
             --L.windows.len;
             break;
@@ -880,6 +1066,8 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     L.sh->notes.clear();
     for (const Result& r : L.sh->results) results.push(r);
     L.sh->results.clear();
+    for (Collected* c : L.sh->collected) { L.sending.push(c); if (L.collects_out) --L.collects_out; }
+    L.sh->collected.clear();
     L.scan_res.rebuilt = L.sh->rebuilt;
     format(L.scan_res.dir, sizeof L.scan_res.dir, "%s", L.sh->walking_dir);
     os_mutex_unlock(&L.sh->lock);
@@ -1018,6 +1206,28 @@ void library_pump(TickContext& ctx) {
     io_pump(ctx, L);
     from_threads(ctx, L, roots, rows);
 
+    // What was collected, said in order, the oldest ask's first: a few dozen paths a tick,
+    // so that ten thousand of them are not one tick's work for whoever takes them.
+    for (u32 said = 0; L.sending.len && said < kCollectPerTick;) {
+        Collected* c = L.sending[0];
+        if (c->paths.len == 0) {
+            LibraryCollected none{};
+            none.id = c->id;
+            ctx.emit(none);
+            ++said;
+        }
+        for (; c->sent < c->paths.len && said < kCollectPerTick; ++c->sent, ++said) {
+            LibraryCollected e{};
+            e.id = c->id; e.index = c->sent; e.total = c->paths.len;
+            format(e.path, sizeof e.path, "%s", c->paths[c->sent]);
+            ctx.emit(e);
+        }
+        if (c->sent < c->paths.len) break;
+        free_collected(c);
+        for (u32 i = 1; i < L.sending.len; ++i) L.sending[i - 1] = L.sending[i];
+        --L.sending.len;
+    }
+
     // The generation, said when it moves; open windows asked again, a few times a second.
     f64 now = time_now();
     if (L.scan_res.generation != L.said_generation) {
@@ -1047,7 +1257,7 @@ void library_pump(TickContext& ctx) {
     s.active = busy || atomic_load(&L.sh->tags_active, MO_RELAXED) ? 1 : 0;
     // The next tick at the clock's rate (engine_want_ticks) while a scan runs, a read is
     // out, or a window has been asked for and not answered: an answer waits for a tick.
-    bool owed = s.active || L.reading.len || L.waiting.len;
+    bool owed = s.active || L.reading.len || L.waiting.len || L.collects_out || L.sending.len;
     for (const Window& w : L.windows) owed = owed || (w.open && w.seq != w.answered);
     if (owed) engine_want_ticks(*ctx.engine);
     if (now - L.rate_at >= 1.0) {
@@ -1141,6 +1351,11 @@ void library_shutdown(Engine& e, ModuleInstance&) {
     if (L->reader.handle) os_thread_join(&L->reader);
     for (WriteMsg* m : sh.writes) { if (m->batch) { m->batch->free(); mem_free(m->batch); } mem_free(m); }
     for (Result& r : sh.results) mem_free(r.rows);
+    for (Ask& a : sh.asks) free_ask(a);
+    for (Collected* c : sh.collected) free_collected(c);
+    for (Collected* c : L->sending) free_collected(c);
+    sh.collects.free(); sh.collected.free(); L->sending.free();
+    for (Window& w : L->windows) free_paths(w);
     for (WriteMsg* m : sh.writes) { if (m->tags) { m->tags->free(); mem_free(m->tags); } if (m->slot) { m->slot->tracks.free(); mem_free(m->slot); } }
     for (TagJobs* b : sh.jobs) { b->free(); mem_free(b); }
     if (sh.slot_jobs) { sh.slot_jobs->free(); mem_free(sh.slot_jobs); }
@@ -1202,9 +1417,9 @@ constinit const KTableDesc k_ktables[] = {
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = library_pump,
-     .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize, LibraryOverride",
+     .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize, LibraryOverride, LibraryPath, LibraryCollect",
      .writes = ".roots, .rows, .scan",
-     .emits = "LibraryResult, LibraryChanged, LibraryScanFinished",
+     .emits = "LibraryResult, LibraryChanged, LibraryScanFinished, LibraryCollected",
      .main_thread = true, .runs = RunWhen::Always},
 };
 

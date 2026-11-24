@@ -110,20 +110,12 @@ void on_underrun(TickContext&, Span<const HifiUnderrun> events) {
 }
 void on_queue_ended(TickContext& ctx, Span<const PlayerQueueEnded>) { if (!g_keep) engine_request_quit(*ctx.engine); }
 
-// ---- the library: what it says, and the glue between it and the player ----------------------
+// ---- the library: what it says ---------------------------------------------------------------
+// (What the player and the library say to each other is blackwing_glue's.)
 
 void on_scan_finished(TickContext&, Span<const LibraryScanFinished> events) {
     for (const LibraryScanFinished& e : events) printf("walked root %u: %u tracks in %.1f s\n", e.root, e.tracks, e.seconds);
     fflush(stdout);
-}
-// Playing a file prioritizes it: its tags are read next, if they have not been. The player
-// and the library do not know each other; this is where one hears the other.
-void on_enqueue(TickContext& ctx, Span<const PlayerEnqueue> events) {
-    for (const PlayerEnqueue& e : events) {
-        LibraryPrioritize p;
-        memcpy(p.path, e.path, sizeof p.path);
-        ctx.emit(p);
-    }
 }
 // `library find`'s answer, when it comes: a numbered list `library play` takes a number from.
 void on_result(TickContext& ctx, Span<const LibraryResult> events) {
@@ -149,14 +141,15 @@ void blackwing_tick(TickContext& ctx) {
     Engine& e = *ctx.engine;
     if (!g_started) {
         g_started = true;
+        // As events, not command lines: a path is whatever the shell passed, any length the OS takes.
         bool failed = false;
         for (int i = 0; i < g_start_count && !failed; ++i) {
-            char line[1200];
-            if (strchr(g_start_args[i], '"') || strlen(g_start_args[i]) > 1000) { fprintf(stderr, "blackwing: cannot name this file on the command line: %s\n", g_start_args[i]); failed = true; break; }
-            format(line, sizeof line, g_start_library ? "library add \"%s\"" : "player add \"%s\"", g_start_args[i]);
-            failed = !cli_run(e, line, nullptr, nullptr);
+            const char* arg = g_start_args[i];
+            if (strlen(arg) >= kPlayerPathMax) { fprintf(stderr, "blackwing: this path is longer than a path can be: %s\n", arg); failed = true; break; }
+            if (g_start_library) { LibraryAddRoot r{}; format(r.path, sizeof r.path, "%s", arg); e.events.emit(r); }
+            else                 { PlayerEnqueue q{}; format(q.path, sizeof q.path, "%s", arg); e.events.emit(q); }
         }
-        if (!failed && g_start_play) failed = !cli_run(e, "player play", nullptr, nullptr);
+        if (!failed && g_start_play) e.events.emit(PlayerPlay{});
         if (failed) { g_code = 2; engine_request_quit(e); }
         engine_want_ticks(e); // the commands are events: the player acts on them in the next tick, which should not wait for a heartbeat
     }
@@ -179,7 +172,6 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".underrun",    KV_ON(HifiUnderrun, on_underrun),        .phase = Phase::PostSim},
     {.name = ".queue_ended", KV_ON(PlayerQueueEnded, on_queue_ended), .phase = Phase::PostSim},
     {.name = ".scanned",     KV_ON(LibraryScanFinished, on_scan_finished), .phase = Phase::PostSim},
-    {.name = ".enqueued",    KV_ON(PlayerEnqueue, on_enqueue),        .phase = Phase::PreSim, .emits = "LibraryPrioritize"},
     {.name = ".found",       KV_ON(LibraryResult, on_result),         .phase = Phase::PostSim, .reads = "library.rows"},
 };
 
@@ -281,7 +273,7 @@ bool have_display() {
 
 // The engine with no face: the modules a machine with no display can start. The frame
 // loop, the window, Krome and the faces are linked in and left out.
-constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "blackwing"};
+constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "blackwing"};
 constinit const ModuleDesc* g_headless[KV_COUNTOF(k_headless)] = {};
 Span<const ModuleDesc* const> headless_modules() {
     u32 n = 0;

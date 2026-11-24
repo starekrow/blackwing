@@ -19,20 +19,20 @@ def queue-panel {
             text "#" [dev-head] w=36
             text "title" [dev-head] w=fill
             text "state" [dev-head] w=60
-            text "format" [dev-head] w=130
-            text "held" [dev-head] w=64
-            text "reason" [dev-head] w=180
+            text "format" [dev-head] w=124
+            text "held" [dev-head] w=84
+            text "reason" [dev-head] w=160
             box w=150
         }
         col id=q_list scroll w=fill h=fill [list] {
             each row in q_rows height=22 count=@q_total from=@q_first -> q_view {
                 row [dev-row] middle {
-                    text "{row.pos}" [dev-cell] w=36 color=@row.ink
-                    text "{row.title}" [dev-cell] w=fill color=@row.ink
-                    text "{row.state}" [dev-cell] w=60 color=@row.ink
-                    text "{row.format}" [dev-cell] w=130
-                    text "{row.held}" [dev-cell] w=64
-                    text "{row.reason}" [dev-cell] w=180
+                    dev-text "{row.pos}" w=36 color=@row.ink
+                    dev-text "{row.title}" w=fill color=@row.ink
+                    dev-text "{row.state}" w=60 color=@row.ink
+                    dev-text "{row.format}" w=124
+                    dev-text "{row.held}" w=84
+                    dev-text "{row.reason}" w=160
                     row gap=2 w=150 {
                         hit [dev-btn] id="qj_{row.id}" -> q_jump { text "play" size=11 }
                         hit [dev-btn] id="qu_{row.id}" -> q_up { text "up" size=11 }

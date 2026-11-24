@@ -2,6 +2,7 @@
 // when it is not what the screen already shows, and the panels' two halves (a table read
 // into the model, an event turned into a command).
 #pragma once
+#include "korvid/blackwing_library/library.h"
 #include "korvid/core/engine.h"
 #include "korvid/core/json.h"
 #include "korvid/core/name.h"
@@ -15,6 +16,24 @@ constexpr u32 kFaceParams = 192; // parameters the Chain panel has keys for
 
 // One model key as the screen shows it: a hash of the value last written.
 struct FaceKey { const char* key = nullptr; u64 shown = 0; };
+
+// The windows the face opens onto the library, and the ids it collects under: any numbers
+// nobody else is likely to pick.
+constexpr u32 kFaceLibWindow   = 0xD0E00001; // the Library panel's list
+constexpr u32 kFaceTitleWindow = 0xD0E00002; // the queue's rows, by their paths
+constexpr u32 kFaceCollect     = 0xD0E00011; // a row's tracks, to be queued
+constexpr u32 kFaceCollectPlay = 0xD0E00012; // the same, and played once they are all in
+constexpr u32 kFaceView        = 512;        // rows of a list handed over at once, at most
+constexpr u32 kFaceCrumbs      = 12;
+
+// Where the Library panel's list is: a view, what it is of, and what to call it.
+struct FaceCrumb { LibraryView view = LibraryView::Folders; u64 parent = 0; char name[96] = ""; };
+// A window as it was last asked for.
+struct FaceAsk {
+    LibraryView view = LibraryView::Count; LibrarySort sort = LibrarySort::Default; u64 parent = 0; char text[128] = ""; u32 first = 0, count = 0;
+};
+// A path the title window was given, at a queue row's index.
+struct FaceTitle { u32 index = 0; u64 hash = 0; };
 
 struct Face {
     Engine* e = nullptr;
@@ -36,6 +55,33 @@ struct Face {
     u64     bar_frames = 0;
     // Queue: the rows its list has built, as it last said.
     u32     q_first = 0, q_count = 0;
+    // The queue's titles: what the library was asked of the rows in view (their paths, by
+    // row), and this tick's answers, by place in the view; and the transport's row.
+    FaceTitle titles[kFaceView];
+    u32     ntitles = 0;
+    u32     titles_rest = 0;   // ticks the view has been where it is
+    u32     titles_first = 0, titles_count = 0;
+    const LibraryRow* title_rows[kFaceView]; // valid for the tick: row q_first + k of the queue
+    const LibraryRow* title_now = nullptr;   // the transport's row
+    // Library: where the list is (the last crumb), how it is sorted, what is searched for;
+    // the rows its list has built; what was last asked, and what came back.
+    FaceCrumb crumbs[kFaceCrumbs];
+    u32     ncrumbs = 1;
+    LibrarySort lib_sort = LibrarySort::Default;
+    char    lib_text[128] = "";
+    u32     lib_first = 0, lib_count = 0;
+    FaceAsk lib_asked;
+    bool    lib_open = false;      // the window is open in the library
+    bool    lib_answered = false;  // what was last asked has come back
+    bool    lib_stale = false;     // the rows in the table are another list's: not shown
+    u64     lib_ask_tick = 0;
+    u32     lib_total = 0;
+    f64     lib_seconds = 0.0;
+    u64     lib_generation = 0;
+    f64     lib_moved_at = 0.0;    // when the list was last somewhere else
+    bool    lib_prioritized = false;
+    u64     edit_track = 0;        // the track whose field is being edited
+    u32     play_in = 0;           // ticks until PlayerPlay: what was collected to play is in
     // Chain: what its stages' definition was written from; the parameter being dragged.
     u64     chain_sig = 0;
     bool    chain_drag = false;
@@ -75,5 +121,15 @@ bool queue_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 void output_sync(TickContext& ctx, Face& f);
 void chain_sync(TickContext& ctx, Face& f);
 bool chain_event(TickContext& ctx, Face& f, const KromeEvent& ev);
+void library_sync(TickContext& ctx, Face& f);
+bool library_event(TickContext& ctx, Face& f, const KromeEvent& ev);
+// The queue's rows in view (and the transport's), asked of the library by their paths; and
+// this tick's answers looked up. Before the Transport and the Queue write their titles.
+void titles_sync(TickContext& ctx, Face& f);
+// What to call a queue row: the library's title for it (with its artist) when it has one
+// for this path, else the file's name. `out` is the caller's.
+const char* face_title(const LibraryRow* row, const char* path, char* out, usize cap);
+// The face's windows onto the library closed (hidden, or going away): asked again when wanted.
+void library_close(TickContext& ctx, Face& f);
 
 } // namespace kv

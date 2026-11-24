@@ -49,8 +49,8 @@ The fields `unused` of the six commands that carry nothing are not shown: emit t
 **`PlayerEnqueue.path` from a script** must be a path the module was shown: the `path`
 of a `library.rows` row in one of its own windows, or of a `player.queue` row; or it
 names a decoder of the module's own
-([hifi_codec](../hifi_codec/SCRIPT.md#sound-from-nothing)). Any other is refused by the host before the player sees it, as a Lua error at the `emit`. A row
-whose `path` is `""` (longer than the field holds) cannot be enqueued by a script.
+([hifi_codec](../hifi_codec/SCRIPT.md#sound-from-nothing)). Any other is refused by the host before the player sees it, as a Lua error at the `emit`. A path
+is any length the OS allows: 4095 bytes (`kPlayerPathMax` less its NUL).
 
 **`PlayerSetParam`** reaches every stage, the built-in ones
 ([hifi_eq](../hifi_eq/SCRIPT.md) has their parameters) and guest ones. A control that

@@ -62,6 +62,9 @@ void open_shell(Face& f) {
     f.fresh = true;
     f.seek_drag = f.chain_drag = false;
     f.q_first = f.q_count = 0;
+    f.lib_first = f.lib_count = 0;
+    f.lib_stale = true;
+    f.edit_track = 0;
     f.stats.failed = false;
     ++f.attempts;
     face_forget(f);
@@ -141,7 +144,7 @@ void on_event(TickContext& ctx, Span<const KromeEvent> events) {
     if (f.screen.is_null()) return;
     for (const KromeEvent& ev : events) {
         if (ev.screen != f.screen.hash) continue;
-        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || chain_event(ctx, f, ev)) {
+        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || chain_event(ctx, f, ev) || library_event(ctx, f, ev)) {
             ++f.stats.commands;
             f.awake = kAwakeTicks;
             engine_want_ticks(*ctx.engine);
@@ -151,12 +154,39 @@ void on_event(TickContext& ctx, Span<const KromeEvent> events) {
 
 // Which rows a list of the screen's has built: kept for the panel that fills it.
 void on_view(TickContext& ctx, Span<const KromeView> views) {
-    static const Name q_view = name_intern("q_view");
+    static const Name q_view = name_intern("q_view"), l_rows = name_intern("l_rows");
     Face& f = ctx.state_as<Face>();
     for (const KromeView& v : views) {
         if (f.screen.is_null() || v.screen != f.screen.hash) continue;
         if (v.event == q_view.hash) { f.q_first = v.first; f.q_count = v.count; }
+        if (v.event == l_rows.hash) { f.lib_first = v.first; f.lib_count = v.count; }
         f.awake = kAwakeTicks;
+    }
+}
+
+// The library's answer for the face's window: how long the list is, and that it has come.
+void on_result(TickContext& ctx, Span<const LibraryResult> results) {
+    Face& f = ctx.state_as<Face>();
+    for (const LibraryResult& r : results) {
+        if (r.id != kFaceLibWindow) continue;
+        if (ctx.tick <= f.lib_ask_tick) continue; // an older ask's, said in the tick the newer one was sent
+        f.lib_total = r.total;
+        f.lib_seconds = r.seconds;
+        f.lib_generation = r.generation;
+        f.lib_answered = true;
+        f.lib_stale = false;
+        f.awake = kAwakeTicks;
+    }
+}
+
+// What was collected to be played is all in: play, a tick or two on, once whoever forwards
+// the paths to the player has forwarded the last.
+void on_collected(TickContext& ctx, Span<const LibraryCollected> paths) {
+    Face& f = ctx.state_as<Face>();
+    for (const LibraryCollected& p : paths) {
+        if (p.id != kFaceCollectPlay && p.id != kFaceCollect) continue;
+        f.awake = kAwakeTicks;
+        if (p.id == kFaceCollectPlay && p.total && p.index + 1 == p.total) f.play_in = 3;
     }
 }
 
@@ -173,6 +203,7 @@ void on_visibility(TickContext& ctx, Span<const WindowVisibility> events) {
     Face& f = ctx.state_as<Face>();
     for (const WindowVisibility& v : events) {
         if (f.hidden && v.visible) f.fresh = true;
+        if (!f.hidden && !v.visible) library_close(ctx, f); // no window onto the library while nobody looks
         f.hidden = !v.visible;
     }
 }
@@ -181,6 +212,7 @@ void ui_dev_sync(TickContext& ctx) {
     Face& f = ctx.state_as<Face>();
     Engine& e = *ctx.engine;
     if (f.awake) { --f.awake; engine_want_ticks(e); }
+    if (f.play_in) { engine_want_ticks(e); if (--f.play_in == 0) ctx.emit(PlayerPlay{}); }
     if (f.wanted) open_shell(f);
     if (f.screen.is_null()) return;
     if (f.hidden) { ++f.stats.asleep; return; }
@@ -196,7 +228,9 @@ void ui_dev_sync(TickContext& ctx) {
     }
     if (f.fresh) { face_forget(f); f.fresh = false; }
     ++f.stats.syncs;
+    titles_sync(ctx, f);
     transport_sync(ctx, f);
+    library_sync(ctx, f);
     queue_sync(ctx, f);
     output_sync(ctx, f);
     chain_sync(ctx, f);
@@ -207,6 +241,7 @@ bool ui_dev_startup(Engine& e, ModuleInstance& self) {
     if (!f) return false;
     self.set_state(f);
     f->e = &e;
+    format(f->crumbs[0].name, sizeof f->crumbs[0].name, "Folders");
     // Opened in the first tick, not here: the files it is given by hand are compiled, and
     // every module it reads is up by then.
     f->wanted = g_ui_dev_config.enabled && g_ui_dev_config.open;
@@ -216,14 +251,18 @@ bool ui_dev_startup(Engine& e, ModuleInstance& self) {
 
 constinit const HandlerDesc k_handlers[] = {
     {.name = ".events", KV_ON(KromeEvent, on_event), .phase = Phase::PreSim,
-     .reads = "^player.queue, ^player.params", // as the phase found them: what the screen was showing
-     .emits = "PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit, PlayerEnqueue"},
+     .reads = "^player.queue, ^player.params, ^library.rows", // as the phase found them: what the screen was showing
+     .emits = "PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit, PlayerEnqueue, "
+              "LibraryAddRoot, LibraryRemoveRoot, LibraryOverride, LibraryCollect"},
     {.name = ".view", KV_ON(KromeView, on_view), .phase = Phase::PreSim},
-    {.name = ".visibility", KV_ON(WindowVisibility, on_visibility), .phase = Phase::PreSim},
+    {.name = ".visibility", KV_ON(WindowVisibility, on_visibility), .phase = Phase::PreSim, .emits = "LibraryClose"},
+    {.name = ".result", KV_ON(LibraryResult, on_result), .phase = Phase::PostSim, .before = ".sync"},
+    {.name = ".collected", KV_ON(LibraryCollected, on_collected), .phase = Phase::PostSim, .before = ".sync"},
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync,
-     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets", .main_thread = true, .runs = RunWhen::Always},
+     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets, library.roots, library.rows, library.scan",
+     .emits = "LibraryQuery, LibraryPrioritize, LibraryPath, PlayerPlay", .main_thread = true, .runs = RunWhen::Always},
     {.name = ".frame", .phase = Phase::Frame, .fn = ui_dev_frame, .main_thread = true},
 };
 
@@ -288,7 +327,7 @@ KV_MODULE_DEFINE(ui_dev_module) = {
     .systems  = k_systems,
     .handlers = k_handlers,
     .startup  = ui_dev_startup,
-    .memory   = {.reserve = 256 * 1024},
+    .memory   = {.reserve = 1024 * 1024},
 };
 
 } // namespace kv

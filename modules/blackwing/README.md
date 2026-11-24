@@ -44,15 +44,16 @@ a bad command line, 3 if a dev build leaked.
 
 ## How it works
 
-`play` is sugar: it runs `player add` for each file and `player play`, the player's own
-commands, which emit the player's events. The module (`blackwing_module`) has six
+`play` is sugar: in the first tick `blackwing.tick` emits `PlayerEnqueue` for each file
+and `PlayerPlay`, the events the player's own commands emit (`library DIR...` emits
+`LibraryAddRoot`). A path is whatever the shell passed, any length the OS takes. The module (`blackwing_module`) has six
 handlers on the player's notifications: five print a line ("at 71.5 s of 1" for a
 seek), and `PlayerQueueEnded` asks the engine to quit (not in `library` mode). Two more
 print the library's walks as they finish and `library find`'s answer; `library play`
 reads the find's row from `library.rows` and emits `PlayerEnqueue` and `PlayerPlay`. The
-player and the library do not know each other: this is the glue. So is one more handler:
-`PlayerEnqueue`, heard as the player hears it, becomes `LibraryPrioritize` for its path, so
-playing a file has its tags read next.
+player and the library do not know each other; what joins them (a file queued is scanned
+next, what the library collects is queued) is [blackwing_glue](../blackwing_glue/README.md),
+which is in both engines.
 
 **Two loops, one rule.** The player asks for the next tick (`engine_want_ticks`) while it
 plays, or has anything on its way to the ear or off the disk; the library asks while it
@@ -67,8 +68,8 @@ asks, and four times a second when no one does.
   ([blackwing_window](../blackwing_window/README.md)). The frame loop shuts everything
   down, memory included, so nothing of this file's runs after it.
 - **With none** the loop is this file's own, forty lines over `engine_frame` and
-  `platform_pump`, and the engine is started from five modules by name (`platform`,
-  `cli`, `player`, `library`, `blackwing`): the frame loop, the window, Krome and the
+  `platform_pump`, and the engine is started from six modules by name (`platform`,
+  `cli`, `player`, `library`, `glue`, `blackwing`): the frame loop, the window, Krome and the
   face are linked and left out, so nothing asks for a display.
 
 With `hifi` holding the device, a player left paused with no face wakes four times a

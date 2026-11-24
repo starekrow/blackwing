@@ -8,6 +8,7 @@ void test_library_cancel(kv::TestCtx&);
 void test_library_overrides(kv::TestCtx&);
 void test_library_changes(kv::TestCtx&);
 void test_library_corpus(kv::TestCtx&);
+void test_library_paths(kv::TestCtx&);
 
 int main() {
     kv::TestCtx c;
@@ -17,6 +18,7 @@ int main() {
     test_library_overrides(c);
     test_library_changes(c);
     test_library_corpus(c);
+    test_library_paths(c);
     kv::names_shutdown();
     kv::mem_shutdown();
     return kv::test_report(c, "blackwing_library_tests");

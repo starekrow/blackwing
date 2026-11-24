@@ -194,3 +194,90 @@ window, a two-minute track drew about 27 frames a second: its bar moves eight pi
 second, and each change is presented twice (milestone 1). This is what "the bar's
 pixel" costs; the close decides whether it is too much.
 
+## Milestone 3, the library's panels
+
+Nov 23, 2026. The same machine and build.
+
+**As planned:** the Library panel (roots, every view, search, sort, a row of any kind
+opened, queued or played, a field edited), the fifty thousand on screen, titles in the
+queue, and the three changes to the API the PRD named. Three of its open questions are
+closed here.
+
+**The long path: a longer field** (BD16). Every field that holds a path is 4096 bytes:
+`PlayerEnqueue`, `PlayerItem`, `LibraryAddRoot`, `LibraryRoot`, `LibraryPrioritize`,
+`LibraryRow` and the two new events (`kPlayerPathMax`, `kLibraryPathMax`; the two modules
+do not share a header). That is Linux's limit, which Windows and macOS users will not
+reach. The other shape, a table of paths and an id, would have been a third thing every
+customer joins against to learn what a row is; a longer field is nothing new to learn. A
+row's path is its last field, so the rest of a row stays in its first few hundred bytes.
+The cost is memory when the tables are full: 17 MB for a queue of 4,096 rows and 23 MB
+for 4,096 library rows, committed as rows are made. The corpus's one track "too long to
+play" is a row with its path, and the library's test checks it is a file. `blackwing`'s
+command line no longer goes through the engine's (which cut at a thousand bytes and
+could not quote a quote): its files and directories are emitted as events.
+
+**Queueing a whole row: the library answers with paths, and glue forwards them** (BD15).
+`LibraryCollect{id, kind, row, text}` asks for every track of a directory (with
+everything under it), an artist, an album, a genre, a track or a search, in its own
+order; the answer is `LibraryCollected`, a path each, sixty-four a tick. The reader
+answers it with the windows any face would open, so no new SQL. The library never says
+"queue" and the player never hears of a library: `blackwing_glue` turns each path into a
+`PlayerEnqueue`. Whoever asks decides what it is for. To play a row the face empties the
+queue, collects under an id of its own, and emits `PlayerPlay` when the last path of that
+id has come; a script does the same.
+
+**The glue is a module now**, `blackwing_glue`, not `blackwing`'s own handlers: the test
+that drives the player and the library through the face needs them joined, and
+`main.cc` cannot be linked into a test. It has the handler it had (a file queued is
+scanned next) and the new one.
+
+**A queue row's title: a window over paths** (BD12). `LibraryPath{id, index, path}` makes
+window `id` a window over paths; its row `index` is what the library knows of the file
+there, and a path it does not have is a row with the file's name and a reason. The face
+sends one for each queue row in view and the transport's, when the view has been still
+for three ticks, and thereafter only for an index whose path changed. The window is
+refilled as any is, so a title appears when its tags are read, which for a queued file is
+next (the glue). A row is shown under the library's title only if the answer's file name
+is the row's: the queue moves under the answers.
+
+**The fifty thousand, on screen** (BD8). The Library panel's list is Krome's sparse one.
+The face asks the library for where the list is, half as wide again each side, and asks
+again only when the list leaves what was asked: a wheel's notch asks for nothing. Rows
+of another list still in the table are not shown as this one's. In the test a stand-in
+library of fifty thousand tracks answers two frames late and the scrollbar is dragged
+from end to end in 180 frames: **the longest frame 1.6 ms** (Krome's build and layout,
+no renderer), placeholders on every frame of the drag, and the rows in view filled one
+frame after it stops. A row that changes under the list at rest changes in place.
+
+**What is in view is prioritized** (BD9): a list of tracks at rest for 0.3 s is
+`LibraryPrioritize` for its window, once; a folder opened is prioritized as a directory
+at once. Hidden, the face closes both its windows; seen again, it asks again.
+
+**Found in the API, and left:**
+
+- **An artist's tracks with no album are in no view.** The Albums view of an artist lists
+  albums, and a track with no album tag has none. Collecting an artist collects what the
+  face shows under it, so such tracks are neither shown nor queued by artist. They are
+  in Tracks, Folders and Search. The library's to settle (with BL23, perhaps).
+- **"Every track" is no row's**, so `Queue all` does nothing there. Deliberate: it is
+  fifty thousand paths.
+
+**Found in Krome:** a text on one line is as wide as its words whatever room its row
+gives it, and `clip` on the text does not cut it: a long path ran across the next three
+cells. A cell is now a box of the cell's width that clips, with the text inside
+(`dev-text`). This is "no title breaks a row"; the titles in other scripts are the
+close's.
+
+**Tests.** The library: a window over paths (found, not under a root, no track there, an
+index replaced and one taken out, an override showing, closed) and a collect of each
+kind against the views' own order (33 checks). The face against stand-ins for both
+(`standin.cc` grew a library): roots with a reason, every view opened from a row, the
+window not shown stale, prioritize at rest, a row queued and played, play waiting for the
+last path, a field edited and given back, sort, search typed a key at a time, a root
+added and removed, titles in the queue and not under the wrong file, hidden and seen
+again, and the fifty thousand. Then the player, the library and the glue themselves: a
+root typed in and scanned, browsed by folder, artist, album and genre, a search, the one
+found played and its title shown from the library, the title corrected by hand and seen
+in both lists, an album queued from its row, the queue cleared, the root removed. 224
+checks in `ui_dev`, 210 in the library; clean under `address,undefined` and `thread`.
+

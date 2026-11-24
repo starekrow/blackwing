@@ -4,10 +4,10 @@ The development face: a plain, dense, complete window over the player and the li
 It is built first, and it is how the rest is developed. It reads their tables and emits
 their commands, and calls no function of either.
 
-**Status:** slice 4, milestone 2. The frame is built (the screen, a panel that fails
-alone, asleep while hidden, still when nothing changes) and the player's four panels are
-in it: Transport, Queue, Output and Chain. The library's panels and the inspectors are
-the [slice's](../../docs/PRDs/Blackwing-Slice-4-PRD.md) next milestones.
+**Status:** slice 4, milestone 3. The frame is built (the screen, a panel that fails
+alone, asleep while hidden, still when nothing changes) and five panels are in it:
+Transport, Library, Queue, Output and Chain. The inspectors (Scan, Events, Tables) are
+the [slice's](../../docs/PRDs/Blackwing-Slice-4-PRD.md) next milestone.
 
 ## How it works
 
@@ -38,7 +38,8 @@ is where the user is: what a list has in view, which slider is held.
 | panel | file | shows | does |
 |---|---|---|---|
 | Transport | `transport.cc` | the state, the row and its file's name, position and length in the device's time, a seek on its way | play, pause, stop, next, previous, ten seconds back and on, and the bar: a press or a drag is a `PlayerSeek` each time it moves |
-| Queue | `queue.cc` | every row in the list's order: place, name, state, format, bytes held, reason | play a row now, remove it, move it up or down, clear, add a path typed in |
+| Library | `library.cc` | the roots with their states and counts, and why one is offline; the list of whichever view is open, each row with what is missing, offline or unreadable | add and remove a root; folders, artists, albums, genres, every track, a search; sort; open a row, queue it, play it; edit a track's field |
+| Queue | `queue.cc` | every row in the list's order: place, the library's title for it (else its file's name), state, format, bytes held, reason | play a row now, remove it, move it up or down, clear, add a path typed in |
 | Output | `output.cc` | the device, its format, the lead, underruns, the last recut and jump; exact, and why not | |
 | Chain | `chain.cc` | each stage and whether it is flat; every parameter with the value heard | a slider a parameter, a switch for one that is 0 or 1, a button a preset |
 
@@ -55,6 +56,29 @@ value heard.
 **The queue is a list over a window** (Krome's sparse `each`): it lays out as if every
 row were there, says which it has built (`KromeView`), and `queue.cc` hands over those,
 found in the table by `pos`. A queue of four thousand rows is sixty in the model.
+
+**The library's list is one too, over a window of the library's.** The face asks for
+where the list is (`LibraryQuery`, window `kFaceLibWindow`), half as wide again each side,
+and again only when the list leaves what was asked, so a wheel's notch asks for nothing;
+a newer ask replaces the one before, which the library stops. Rows not yet answered are
+placeholders. Rows of another list still in the table are not shown as this one's
+(`lib_stale`, until `LibraryResult` comes for what was asked). When a list of tracks has
+been at rest for 0.3 s the face emits `LibraryPrioritize` for its window: what is looked
+at is scanned next. A folder opened is prioritized at once, as a directory.
+
+**A row of any kind is queued with one command**, `LibraryCollect`, by the row's kind and
+id; the application's glue turns the library's answer into the player's commands. To
+play a row the face empties the queue first, and emits `PlayerPlay` when the last
+`LibraryCollected` of its id has come.
+
+**A queue row's title is the library's.** The player knows paths. For each queue row in
+view, and the transport's, the face sends `LibraryPath` (window `kFaceTitleWindow`, the
+row's place as its index) once the view has been still for three ticks, and after that
+only for an index whose path changed. A row is shown under the answer's title only when
+the answer's file name is the row's, since the queue moves under the answers.
+
+**A window onto the library is open only while it is looked at.** Hidden, the face closes
+both; seen again, it asks again.
 
 **The chain's controls are written from the tables.** `chain.cc` writes the definition
 `chain-stages` as markup from `player.params` and `player.presets`, compiles it
@@ -99,9 +123,12 @@ tests, with a stand-in.
 | `ui_dev_stats(e)` | model writes, commands, ticks looked at and passed over, panels standing in, whether the screen failed |
 
 What it registers: `ui_dev.sync` (PostSim; reads the player's two resources and four
-tables), `ui_dev.events` (on `KromeEvent`; emits the player's twelve commands),
-`ui_dev.view` (on `KromeView`), `ui_dev.visibility` (on `WindowVisibility`),
-`ui_dev.frame` (Frame).
+tables and the library's resource and two tables; emits `LibraryQuery`,
+`LibraryPrioritize`, `LibraryPath`, `PlayerPlay`), `ui_dev.events` (on `KromeEvent`;
+emits the player's twelve commands and four of the library's), `ui_dev.view` (on
+`KromeView`), `ui_dev.result` and `ui_dev.collected` (on the library's answers),
+`ui_dev.visibility` (on `WindowVisibility`; emits `LibraryClose`), `ui_dev.frame`
+(Frame).
 
 ## Tests
 
@@ -109,19 +136,24 @@ tables), `ui_dev.events` (on `KromeEvent`; emits the player's twelve commands),
 controls pressed by id (`krome_press`) or by a pointer and a keyboard the test moves
 (`input_pointer_override`, `input_text_override`).
 
-- **Against a stand-in** (`standin.cc`): a module named `player` that registers the
-  player's events, tables and resources from `blackwing_player/schema.h`, publishes
-  values the test sets by hand and writes down the commands it is sent. Neither the
-  player nor the library is in the engine. Every transport command from its own control;
+- **Against stand-ins** (`standin.cc`): a module named `player` and one named `library`
+  that register the two APIs' events, tables and resources from their `schema.h`,
+  publish values the test sets by hand and write down the commands they are sent.
+  Neither the player nor the library is in the engine. The library's panel: every view
+  opened from a row, queue and play, an edit, sort, search, roots, titles, and fifty
+  thousand rows that answer two frames late while the scrollbar is dragged end to end. Every transport command from its own control;
   the bar pressed, dragged and let go; a thousand queued rows scrolled, edited and added
   to; exact and each reason why not; the chain's controls made from descriptions, a
   slider held while the value heard changes under it, a parameter added while it runs;
   ten still seconds costing no frame, layout, paint, model write or request; hidden,
   nothing read or written; a panel whose file is not markup saying so in its place.
-- **On the player**: the same face over `blackwing_player` and a capture device on the
-  wall clock. A path is typed into the edit and entered, played, the volume dragged, a
-  preset pressed, the bar pressed, paused, played to its end, the row removed. The test
-  emits no command and reads only what the screen shows.
+- **On the player and the library**: the same face over `blackwing_player` on a capture
+  device on the wall clock, `blackwing_library` on a directory the test makes, and
+  `blackwing_glue`. A path is typed into the edit and entered, played, the volume
+  dragged, a preset pressed, the bar pressed, paused, played to its end, the row removed;
+  then a root typed in, browsed by every view, searched, the one found played, its title
+  corrected, an album queued from its row, the root removed. The test emits no command
+  and reads only what the screen shows.
 
 ## Behaviour worth knowing
 
@@ -129,8 +161,10 @@ controls pressed by id (`krome_press`) or by a pointer and a keyboard the test m
   hand (`krome_provide`) wins over the file, so mending the file needs a restart.
 - **The model is one table for every panel**, since they are one screen: keys carry
   their panel's letter (`t_state`, `q_rows`, `o_why`, `c_v_1_14`).
-- **A row's buttons carry its id** (`qx_17`, `cs_1_14`), and the C++ reads the number
-  back out of the node's name: an event carries a node and one number, no more.
+- **A row's buttons carry its id** (`qx_17`, `cs_1_14`, `lq_3`), and the C++ reads the
+  number back out of the node's name: an event carries a node and one number, no more.
+- **A cell is a box that clips**, with its text inside (`dev-text`): a text on one line
+  is as wide as its words, whatever room its row gives it.
 - **A sparse list's `placeholder` block needs `widgets.kim`'s definition of that name**:
   Krome's check does not know the word (KR27).
 - **A string of 56 bytes or more** is written as a document (`krome_set_doc`); a

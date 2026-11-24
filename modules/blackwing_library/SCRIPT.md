@@ -30,6 +30,8 @@ end
 |---|---|---|---|
 | `LibraryQuery` | `id` integer, `view` integer (a `LibraryView`), `sort` integer (a `LibrarySort`), `parent` integer, `text` string (127 bytes at most), `first`, `count` integers | `library.query` | opens window `id`, or replaces what it shows: `count` rows (512 at most) from `first` |
 | `LibraryClose` | `id` integer | `library.query` | closes window `id`; its rows leave the table |
+| `LibraryPath` | `id`, `index` integers, `path` string | `library.query` | window `id` becomes (or is) a window over paths: what the library knows of the file at `path` is its row `index`. An empty path takes the index out. 512 paths a window at most |
+| `LibraryCollect` | `id` integer, `kind` integer (a `LibraryRowKind`), `row` integer, `sort` integer, `text` string | `library.query` | asks for the paths of every track of a row (a directory with everything under it, an artist, an album, a genre, a track), or with `text` of a search; answered with `LibraryCollected` |
 | `LibraryPrioritize` | `dir` integer, or `query` integer, or `tracks` (a list of up to 32 ids) with `count` | `library.query` | names what someone is looking at, so it is scanned next. One slot: a newer call takes the last one's place |
 | `LibraryOverride` | `track` integer, `field` string, `value` string, `clear` integer (0 or 1) | `library.override` | sets a field of a track for the user; kept in Blackwing's own data, never in the music |
 | `LibraryAddRoot` | none from a script | `library.roots` | the host asks the user for a directory, and adds what they pick |
@@ -48,6 +50,16 @@ that is an error at the `emit`.
 takes it from a face. A module should name what its user is looking at, not what it
 would like scanned.
 
+**`LibraryPath.path`** from a script must be a path it was shown, as `PlayerEnqueue.path`
+must: a `player.queue` row's, or a `library.rows` row's. It is how a queue's rows get
+their titles: the player knows paths and the library knows tags.
+
+**`LibraryCollect`** is how a row of any kind is queued in one command. The library
+answers with paths and does not know what they are for; `blackwing_glue`, in the
+application, queues each ([blackwing_glue](../blackwing_glue/README.md)). A script that
+wants them played empties the queue first and emits `PlayerPlay` when the last
+`LibraryCollected` of its `id` has come.
+
 **`LibraryPrioritize.path`** is refused from a script. **`LibraryAddRoot.path`** is
 ignored: a script never names a directory.
 
@@ -61,8 +73,9 @@ An empty `value` hides the field; `clear = 1` takes the override away.
 | `LibraryResult` | `id`, `total`, `first`, `count`, `generation` integers, `seconds` number | window `id`'s rows are in `library.rows`: `count` from `first`, of `total` |
 | `LibraryChanged` | `generation` integer | something a query might show has changed. A few times a second at most while a scan runs |
 | `LibraryScanFinished` | `root`, `tracks` integers, `seconds` number | a root's scan is over |
+| `LibraryCollected` | `id`, `index`, `total` integers, `path` string | one path of a `LibraryCollect`'s answer: track `index` of `total`, in order, sixty-four a tick at most. Nothing found is one event with a `total` of 0 and no path |
 
-A script receives `LibraryResult` for its own windows only.
+A script receives `LibraryResult` and `LibraryCollected` for its own windows and asks only.
 
 ## Tables
 
@@ -103,7 +116,7 @@ query's whole list, from 0.
 | `date` | string | as its tags have it; an album's earliest |
 | `name` | string | the file's or the directory's own name; a group's name |
 | `title`, `artist`, `album` | strings | UTF-8 |
-| `path` | string | what `PlayerEnqueue` takes; `""` when longer than the field holds |
+| `path` | string | what `PlayerEnqueue` takes: any length the OS allows (4095 bytes) |
 | `reason` | string | why its tags could not be read, or why it cannot be played |
 
 Strings are UTF-8 with U+FFFD for what was not. They are the files' own words: a script
@@ -131,13 +144,13 @@ that shows them treats them as data.
 
 | enum | values |
 |---|---|
-| `LibraryView` | `Folders` 0, `Tracks` 1, `Search` 2, `Artists` 3, `Albums` 4, `AlbumTracks` 5, `Genres` 6 |
+| `LibraryView` | `Folders` 0, `Tracks` 1, `Search` 2, `Artists` 3, `Albums` 4, `AlbumTracks` 5, `Genres` 6, `Paths` 7 (a window made of `LibraryPath`, not asked for with a query) |
 | `LibrarySort` | `Default` 0, `Title` 1, `Artist` 2, `Album` 3, `Date` 4, `Path` 5 |
 | `LibraryRootState` | `Walking` 0, `Reading` 1, `Idle` 2, `Offline` 3 |
 | `LibraryRowKind` | `Directory` 0, `Track` 1, `Artist` 2, `Album` 3, `Genre` 4 |
 
-`kv.surface("library").constants` has `kLibraryMaxWindow` (512) and `kLibraryMaxRows`
-(4096).
+`kv.surface("library").constants` has `kLibraryMaxWindow` (512), `kLibraryMaxRows`
+(4096), `kLibraryMaxCollect` (65536) and `kLibraryPathMax` (4096).
 
 ## Not here
 
@@ -149,3 +162,7 @@ that shows them treats them as data.
 
 A field table for `library.scan`. Nothing else: window ids, the row quota and the path
 rules are the host's.
+
+Changed by slice 4, the first thing to read this surface from outside: a path is any
+length the OS allows, in every field that holds one; `LibraryPath` and the `Paths` view;
+`LibraryCollect` and `LibraryCollected`.

@@ -175,7 +175,27 @@ reader for as long as the index's generation lasts, so every window of it after 
 is a slice.
 
 A row carries what is needed to play it: `path` is the root's path and the file's within
-it, which `PlayerEnqueue` takes (empty, with a reason, when it is longer than that holds).
+it, which `PlayerEnqueue` takes. A path is any length the OS allows (`kLibraryPathMax`,
+4096 bytes with its NUL), in every field that holds one.
+
+**A window over paths** (`LibraryView::Paths`) is how a queue's rows get their titles. The
+player knows paths and the library knows tags, so whoever shows a queue sends
+`LibraryPath{id, index, path}` for each row it shows: the window is made of them, and its
+row `index` is what the library knows of the file there. The reader finds each path's
+root (the root whose path it begins with, the longest should roots nest) and the track at
+the rest (`Index::row_at`). A path under no root, or with no track at it, is a row all
+the same, with the file's name and a reason. The window is refilled when the index moves
+on, as any is, so a title appears when its tags are read; an empty path takes an index
+out, and `LibraryClose` ends it.
+
+**The tracks of a row of any kind** are asked for with `LibraryCollect`: a directory with
+everything under it (its directories in turn, then its own tracks), an artist (each album
+in turn), an album, a genre, one track, or the tracks a search finds. The reader answers
+it with the windows any face would open, every window of the view until its total, and
+keeps the paths; the pump says them as `LibraryCollected`, sixty-four a tick, in order,
+so ten thousand are not one tick's work for whoever takes them. The library does not
+know what the paths are for. In `blackwing`, [blackwing_glue](../blackwing_glue/README.md)
+queues each.
 
 ## Using it
 
@@ -205,18 +225,21 @@ Header `korvid/blackwing_library/library.h`:
 | `LibraryAddRoot { path }`, `LibraryRemoveRoot { root }` | events in | a directory in, a root out |
 | `LibraryQuery { id, view, sort, parent, text, first, count }` | event in | opens or changes window `id` |
 | `LibraryClose { id }` | event in | its rows leave the table |
+| `LibraryPath { id, index, path }` | event in | a path for a window over paths: its row `index`; empty takes it out |
+| `LibraryCollect { id, kind, sort, row, text }` | event in | asks for every track's path of a row of any kind, or of a search |
+| `LibraryCollected { id, index, total, path }` | event out | one path of the answer, in order; a total of 0 and no path when nothing was found |
 | `LibraryPrioritize { path, dir, query, count, tracks }` | event in | the slot: scanned next |
 | `LibraryOverride { track, field, value, clear }` | event in | the user's value for a field of a track, kept in Blackwing's data |
 | `LibraryResult { id, total, first, count, generation, seconds }` | event out | the window's rows are in `library.rows`; how long the index took |
 | `LibraryChanged { generation }` | event out | the index has moved on |
 | `LibraryScanFinished { root, tracks, seconds }` | event out | a root's scan is over: walked (in `seconds`) and every track read |
-| `LibraryView` | enum | `Folders`, `Tracks`, `Search`, `Artists`, `Albums`, `AlbumTracks`, `Genres` |
+| `LibraryView` | enum | `Folders`, `Tracks`, `Search`, `Artists`, `Albums`, `AlbumTracks`, `Genres`, `Paths` |
 | `LibrarySort` | enum | `Default`, `Title`, `Artist`, `Album`, `Date`, `Path` |
 | `LibraryRoot` | component | a row of `library.roots`: `id`, `state`, `dirs`, `tracks`, `failed`, `unread`, `path`, `reason` |
 | `LibraryRootState` | enum | `Walking`, `Reading`, `Idle`, `Offline` |
 | `LibraryRow` | component | a row of `library.rows`: `query`, `index`, `id`, `kind` (directory, track, artist, album, genre), names, numbers, `count`, `albums`, `date`, `path`, `reason` |
 | `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `cancelled`, `names_per_second`, `tags_per_second`, `slot`, `dir` |
-| `kLibraryMaxWindow`, `kLibraryMaxRows` | constants | 512 rows a window, 4096 in all |
+| `kLibraryMaxWindow`, `kLibraryMaxRows`, `kLibraryMaxCollect`, `kLibraryPathMax` | constants | 512 rows a window, 4096 in all; 65536 paths a collect; a path's 4096 bytes |
 | `LibraryConfig`, `library_configure` | record, function | `data_dir`, `quiet_seconds` (1), `offline_seconds` (60), `poll_seconds` (60), `poll_roots`; before `engine_init` |
 | `library_scan(e)` | function | the resource, for code outside the schedule |
 

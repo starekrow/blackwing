@@ -150,7 +150,7 @@ bool Index::open(const char* path, bool writer) {
 void Index::close() {
     sqlite3_stmt** all[] = {&st_root, &st_unroot_t, &st_unroot_d, &st_unroot_s, &st_unroot_r, &st_dir_find, &st_dir_put, &st_dir_state,
                             &st_track_find, &st_track_put, &st_track_seen, &st_search_put, &st_count_t, &st_count_d, &st_count_all,
-                            &st_count_unread, &st_vals_del, &st_vals_put, &st_tags_put, &st_search_del, &st_dir_of_track, &st_row};
+                            &st_count_unread, &st_vals_del, &st_vals_put, &st_tags_put, &st_search_del, &st_dir_of_track, &st_row, &st_row_at};
     for (sqlite3_stmt** s : all) { if (*s) sqlite3_finalize(*s); *s = nullptr; }
     if (db) sqlite3_close_v2(db);
     db = nullptr;
@@ -777,6 +777,50 @@ u32 search_expression(const char* text, char* out, u32 cap) {
     return words;
 }
 
+namespace {
+// A track's row from a statement over kTrackCols: its path joined to its root's.
+void fill_track_row(sqlite3_stmt* s, LibraryRow& r, u32 query, const char* (*root_path)(void*, u32), void* user) {
+    r = LibraryRow{};
+    r.query = query;
+    r.kind = (u8)LibraryRowKind::Track;
+    r.id = (u64)sqlite3_column_int64(s, 0);
+    r.root = (u32)sqlite3_column_int64(s, 1);
+    text_into(r.name, sizeof r.name, sqlite3_column_text(s, 2));
+    text_into(r.title, sizeof r.title, sqlite3_column_text(s, 3));
+    text_into(r.artist, sizeof r.artist, sqlite3_column_text(s, 4));
+    text_into(r.album, sizeof r.album, sqlite3_column_text(s, 5));
+    r.track_number = (u32)sqlite3_column_int(s, 6);
+    r.disc_number = (u32)sqlite3_column_int(s, 7);
+    r.size = (u64)sqlite3_column_int64(s, 8);
+    r.frames = (u64)sqlite3_column_int64(s, 9);
+    r.rate = (u32)sqlite3_column_int(s, 10);
+    const char* rp = root_path(user, r.root);
+    const void* rel = sqlite3_column_blob(s, 11);
+    int rn = sqlite3_column_bytes(s, 11);
+    usize need = strlen(rp) + 1 + (usize)rn;
+    if (need < sizeof r.path) format(r.path, sizeof r.path, "%s/%.*s", rp, rn, (const char*)rel);
+    else format(r.reason, sizeof r.reason, "its path is %zu bytes, longer than the player takes", need);
+    r.missing = (u8)sqlite3_column_int(s, 12);
+    if (!r.reason[0]) text_into(r.reason, sizeof r.reason, sqlite3_column_text(s, 13));
+    text_into(r.date, sizeof r.date, sqlite3_column_text(s, 14));
+}
+} // namespace
+
+bool Index::row_at(u32 root, const char* rel, u32 query, LibraryRow* out, const char* (*root_path)(void*, u32), void* user) {
+    if (!st_row_at) {
+        char sql[512];
+        format(sql, sizeof sql, "SELECT %s FROM tracks t WHERE t.root = ? AND t.path = ?", kTrackCols);
+        if (!ok(sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &st_row_at, nullptr))) return false;
+    }
+    sqlite3_reset(st_row_at);
+    sqlite3_bind_int64(st_row_at, 1, root);
+    sqlite3_bind_blob(st_row_at, 2, rel, (int)strlen(rel), SQLITE_TRANSIENT);
+    bool have = sqlite3_step(st_row_at) == SQLITE_ROW;
+    if (have) fill_track_row(st_row_at, *out, query, root_path, user);
+    sqlite3_reset(st_row_at); // a statement left on a row holds its read open
+    return have;
+}
+
 u32 Index::window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* total, const char* (*root_path)(void*, u32), void* user) {
     *total = 0;
     u32 want = q.count < kLibraryMaxWindow ? q.count : kLibraryMaxWindow;
@@ -789,31 +833,7 @@ u32 Index::window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* t
         sqlite3_finalize(s);
         return n;
     };
-    auto fill_track = [&](sqlite3_stmt* s, LibraryRow& r) {
-        r = LibraryRow{};
-        r.query = q.id;
-        r.kind = (u8)LibraryRowKind::Track;
-        r.id = (u64)sqlite3_column_int64(s, 0);
-        r.root = (u32)sqlite3_column_int64(s, 1);
-        text_into(r.name, sizeof r.name, sqlite3_column_text(s, 2));
-        text_into(r.title, sizeof r.title, sqlite3_column_text(s, 3));
-        text_into(r.artist, sizeof r.artist, sqlite3_column_text(s, 4));
-        text_into(r.album, sizeof r.album, sqlite3_column_text(s, 5));
-        r.track_number = (u32)sqlite3_column_int(s, 6);
-        r.disc_number = (u32)sqlite3_column_int(s, 7);
-        r.size = (u64)sqlite3_column_int64(s, 8);
-        r.frames = (u64)sqlite3_column_int64(s, 9);
-        r.rate = (u32)sqlite3_column_int(s, 10);
-        const char* rp = root_path(user, r.root);
-        const void* rel = sqlite3_column_blob(s, 11);
-        int rn = sqlite3_column_bytes(s, 11);
-        usize need = strlen(rp) + 1 + (usize)rn;
-        if (need < sizeof r.path) format(r.path, sizeof r.path, "%s/%.*s", rp, rn, (const char*)rel);
-        else format(r.reason, sizeof r.reason, "its path is %zu bytes, longer than the player takes", need);
-        r.missing = (u8)sqlite3_column_int(s, 12);
-        if (!r.reason[0]) text_into(r.reason, sizeof r.reason, sqlite3_column_text(s, 13));
-        text_into(r.date, sizeof r.date, sqlite3_column_text(s, 14));
-    };
+    auto fill_track = [&](sqlite3_stmt* s, LibraryRow& r) { fill_track_row(s, r, q.id, root_path, user); };
     auto run_tracks = [&](sqlite3_stmt* s, u32 index) {
         while (got < want && sqlite3_step(s) == SQLITE_ROW) {
             fill_track(s, out[got]);
@@ -992,6 +1012,7 @@ u32 Index::window(const LibraryQuery& q, u64 generation, LibraryRow* out, u32* t
     case LibraryView::Genres:
         groups(LibraryRowKind::Genre, "t.missing = 0 AND t.genre_hash != 0", 0, false, "t.sort_genre", "MIN(t.genre_hash), MIN(t.genre), count(*)");
         break;
+    case LibraryView::Paths: break; // answered by the reader, a path at a time (row_at): no window of the index's own
     case LibraryView::Count: break;
     }
     return got;

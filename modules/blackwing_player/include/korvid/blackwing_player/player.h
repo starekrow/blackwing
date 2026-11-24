@@ -21,9 +21,13 @@ struct Engine;
 
 // ---- commands: events the player consumes ----------------------------------------------
 
+// A path, where the player takes or shows one: as long as the OS allows one to be (4095
+// bytes on Linux, which no other system's users are likely to pass).
+constexpr u32 kPlayerPathMax = 4096;
+
 // Adds a file to the queue: before row `before`, or at the end (0). The path is the OS's,
 // absolute or relative to the working directory.
-struct PlayerEnqueue { char path[512]; u64 before = 0; };
+struct PlayerEnqueue { char path[kPlayerPathMax]; u64 before = 0; };
 // An edit of the queue. Remove: row `item` leaves the list (and the table). Move: row
 // `item` goes before row `before` (0: to the end); its id stays. Clear: every row goes,
 // and playing stops. The place stays at the row it was at; if that row is removed, the
@@ -112,8 +116,8 @@ struct PlayerItem {
     u64  frames;      // its length as its header says; 0 until Started, or when it does not say
     u64  size;        // the file's bytes; 0 until it has been looked at
     u64  bytes_read;  // of those, how many are in memory now
-    char path[512];
     char reason[96];  // why it Failed, or how it was damaged
+    char path[kPlayerPathMax]; // last: a row's other fields are its first two hundred bytes
 };
 
 enum class PlayerState : u8 {
