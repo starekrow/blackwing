@@ -1,6 +1,6 @@
 # Blackwing
 
-A hi-fi local music player built on the [Korvid](../korvid) engine. It plays FLAC and MP3
+A hi-fi local music player built on the [Korvid](https://github.com/starekrow/korvid) engine. It plays FLAC and MP3
 files from the command line through PipeWire on Linux, or into a capture device that keeps what
 it was given.
 
@@ -12,8 +12,17 @@ it was given.
 ## Building
 
 Korvid is expected beside this checkout, at `../korvid` ([korvid.config](korvid.config)
-says so), at a version whose `kormake` is 1.2 or newer and compiles C (Korvid's slice 10,
-KR14: the library's vendored sqlite is C).
+says so). Blackwing builds on Korvid's slice 12 (the I/O rework and the loop that waits,
+KR26 and KR27), which is on Korvid's `slice-12` branch until it reaches `main`:
+
+```bash
+git clone https://github.com/starekrow/blackwing.git
+git clone -b slice-12 https://github.com/starekrow/korvid.git
+```
+
+Korvid's `kormake` is built from that checkout (`korvid/tools/kormake/bootstrap.sh`); it
+must be 1.2 or newer and compile C (Korvid's slice 10, KR14: the library's vendored
+sqlite is C).
 
 On Linux, the PipeWire development package, for the headers and `pkg-config` file that
 `hifi_platform` builds against. On Debian and Ubuntu:
