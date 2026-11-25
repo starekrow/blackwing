@@ -12,12 +12,11 @@ it was given.
 ## Building
 
 Korvid is expected beside this checkout, at `../korvid` ([korvid.config](korvid.config)
-says so). Blackwing builds on Korvid's slice 12 (the I/O rework and the loop that waits,
-KR26 and KR27), which is on Korvid's `slice-12` branch until it reaches `main`:
+says so), at slice 12 or later (the I/O rework and the loop that waits, KR26 and KR27):
 
 ```bash
 git clone https://github.com/starekrow/blackwing.git
-git clone -b slice-12 https://github.com/starekrow/korvid.git
+git clone https://github.com/starekrow/korvid.git
 ```
 
 Korvid's `kormake` is built from that checkout (`korvid/tools/kormake/bootstrap.sh`); it
