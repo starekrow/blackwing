@@ -201,8 +201,9 @@ controls pressed by id (`krome_press`) or by a pointer and a keyboard the test m
   number back out of the node's name: an event carries a node and one number, no more.
 - **A cell is a box that clips**, with its text inside (`dev-text`): a text on one line
   is as wide as its words, whatever room its row gives it.
-- **A sparse list's `placeholder` block needs `widgets.kim`'s definition of that name**:
-  Krome's check does not know the word (KR27).
+- **A sparse list's `placeholder` block** is the `each`'s own (`count=` or `from=`), and
+  Krome's check knows it (KR27, Korvid slice 12): a `placeholder` anywhere else is refused
+  with its line.
 - **A path typed in can be 510 bytes.** Krome hands a text back in 512 and cuts a longer
   one silently (KR43); the face refuses one that may have been cut, and says so beside
   the edit. A longer path is queued from its row.

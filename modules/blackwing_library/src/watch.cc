@@ -104,7 +104,7 @@ bool has_entries(const char* dir) {
 void watch_thread(void* arg) {
     Shared& sh = *(Shared*)arg;
     FsWatcher w;
-    bool up = w.init(FsWatchBackend::Auto, sh.poll_seconds, sh.poll_seconds);
+    bool up = w.open(FsWatchBackend::Auto, sh.poll_seconds, sh.poll_seconds);
     if (!up) KV_WARN("library", "the watcher will not start: changes are found by the walk at start-up only");
     Array<Watched> watched;
     Strings ps;
@@ -217,10 +217,10 @@ void watch_thread(void* arg) {
             char abs[kPathMax];
             format(abs, sizeof abs, "%s/%s", x->path, rel);
             IoStat st;
-            bool there = io_stat(abs, &st);
+            bool there = io_stat_file(abs, &st);
             if (p.dir_gone) {
-                if (!there || !st.is_dir) b->gone.push(GoneMsg{p.root, b->s.add(rel), true});
-            } else if (there && st.is_file) {
+                if (!there || !st.is_dir()) b->gone.push(GoneMsg{p.root, b->s.add(rel), true});
+            } else if (there && st.is_file()) {
                 add_track(*b, p.root, rel, (u32)strlen(rel), st.size, st.mtime_ns, tag_mem);
             } else if (!there) {
                 b->gone.push(GoneMsg{p.root, b->s.add(rel), false});
@@ -281,7 +281,7 @@ void watch_thread(void* arg) {
         if (!sh.quit) os_cond_timed_wait(&sh.watch_wake, &sh.lock, 0.1);
         os_mutex_unlock(&sh.lock);
     }
-    if (up) w.free();
+    if (up) w.close();
     watched.free();
     ps.free();
     pending.free();

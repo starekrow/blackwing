@@ -120,7 +120,7 @@ inline Made make_library(const char* root, u32 n, u32 per_album = 12, u64 seed =
             flac_file(f, tg);
             if (al.layout == 3) format(path, sizeof path, "%s/%02u - %s - %s.flac", al.dir, t + 1, al.artist, title);
             else                format(path, sizeof path, "%s/%02u - %s.flac", al.dir, t + 1, title);
-            io_write_now(path, f.b, f.n);
+            io_write_file(path, f.b, f.n);
             ++m.files;
             m.bytes += f.n;
         }

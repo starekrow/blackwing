@@ -39,7 +39,7 @@ bool override_load(const char* path, OverrideFile* out, char* problem, u32 cap) 
     problem[0] = 0;
     IoBytes b;
     i32 err = 0;
-    if (!io_read_now(path, &b, nullptr, &err)) return true; // none: no overrides
+    if (!io_read_file(path, &b, nullptr, &err)) return true; // none: no overrides
     if (b.size > kMaxFile) { format(problem, cap, "it is %zu bytes, more than an override file is", b.size); b.free(); return false; }
     const char* p = (const char*)b.data;
     const char* end = p + b.size;
@@ -106,7 +106,7 @@ bool override_save(const char* path, const OverrideFile& f) {
     if (char* slash = strrchr(dir, '/')) *slash = 0;
     io_make_dirs(dir);
     format(tmp, sizeof tmp, "%s.new", path);
-    bool ok = f.entries.len ? io_write_now(tmp, text.data, text.len) && io_rename(tmp, path) : (io_remove(path), true);
+    bool ok = f.entries.len ? io_write_file(tmp, text.data, text.len) && io_rename(tmp, path) : (io_remove(path), true);
     text.free();
     return ok;
 }

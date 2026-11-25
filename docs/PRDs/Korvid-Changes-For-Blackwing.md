@@ -12,8 +12,8 @@ asked, and how to tell it is done. The findings themselves are in
 
 Each was written before Korvid took it, with Blackwing's workaround named so the cost of
 waiting was clear. Korvid's slices 10 and 11 took the first twenty-five: Status has where
-each landed and what Blackwing does with it now. KR26 and KR27 are new, from building
-slice 4. KR28 to KR42 are new, from the skin import note, and are for work in no phase yet.
+each landed and what Blackwing does with it now. KR26 and KR27, from building slice 4,
+landed in Korvid's slice 12. KR28 to KR42 are new, from the skin import note, and are for work in no phase yet.
 
 One of these blocked the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
 backend, and a project cannot link PipeWire today without editing the engine.
@@ -55,8 +55,8 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | used in part: the session is a file of its own in the settings directory (slice 4, milestone 6). The store is not used yet: a session is not a setting. The index has not moved to the cache directory |
 | KR25 | `image/jpeg.h`: baseline, progressive, scaled, EXIF, fuzzed | not yet: BL25 and slice 6 |
 
-| KR26 | not asked of Korvid before: found in slice 4, milestone 1 | the still window polls: about 230 wakeups a second |
-| KR27 | not asked of Korvid before: found in slice 4, milestone 2 | worked round: a definition named `placeholder` in `ui_dev/widgets.kim` |
+| KR26 | slice 12: `platform_wait`, `platform_wake`, watched wakers, standing watches | used: the face's loop waits (paused, about 7 to 11 wakeups a second and 0.6% of a core, from 230 and 2.5%); the headless loop waits in `platform_wait` where it slept, so a CLI command is answered in 0.2 ms, not at the next heartbeat; the library's threads `platform_wake` the loop when they have something for it |
+| KR27 | slice 12: `kimb_check` knows a sparse `each`'s `placeholder` | used: `widgets.kim`'s stand-in definition is gone |
 | KR43 | not asked of Korvid before: found in slice 4, milestone 4 | a path typed into the face is refused past 510 bytes, with a line beside the edit |
 | KR44 | not asked of Korvid before: found in slice 4, milestone 6 | the window comes back at its size and not its place; a list comes back at its top |
 | KR45 | not asked of Korvid before: found at slice 4's close | nothing: a present that blocks holds the player's ticks |

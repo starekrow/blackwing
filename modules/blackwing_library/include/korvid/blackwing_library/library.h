@@ -211,7 +211,7 @@ constexpr u32 kLibraryMaxCollect = 65536; // paths one LibraryCollect answers wi
 
 struct LibraryConfig {
     // Where the index and the list of roots are kept; "" or null: the per-user data
-    // directory (platform_pref_path) and "library/" under it.
+    // directory (platform_user_dir's Data) and "library/" under it.
     const char* data_dir = nullptr;
     f64  quiet_seconds   = 1.0;  // a changed file is looked at once it has been quiet this long
     f64  offline_seconds = 60.0; // an offline root is looked at again this often

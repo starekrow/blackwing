@@ -6,6 +6,8 @@
 #include "index.h"
 #include "korvid/core/array.h"
 #include "korvid/core/os_thread.h"
+#include "korvid/platform/io.h"
+#include "korvid/platform/module.h"
 
 namespace kv::lib {
 
@@ -98,7 +100,7 @@ struct WriteMsg {
 
 // A read the tagger wants, and its answer.
 struct ReadAsk  { u32 job = 0, gen = 0; u64 at = 0, len = 0; bool slot = false; char path[kPathMax]; };
-struct ReadDone { u32 job = 0, gen = 0; u64 at = 0; void* data = nullptr; usize size = 0; i32 err = 0; bool ok = false; };
+struct ReadDone { u32 job = 0, gen = 0; u64 at = 0; IoBytes bytes; i32 err = 0; bool ok = false; }; // bytes: the tagger's to free
 
 // For the main thread.
 enum class NoteKind : u8 { Counts, Walked, Offline, Committed, WalkStarted };
@@ -130,6 +132,7 @@ struct Collected { u32 id = 0; Array<char*> paths; u32 sent = 0; };
 struct Walk { u32 root; char path[kPathMax]; };
 
 struct Shared {
+    Engine* engine = nullptr;       // for tell_main: the engine outlives every thread here
     OsMutex lock;
     OsCond  scan_wake, write_wake, read_wake;
     bool    quit = false;
@@ -184,6 +187,11 @@ struct Shared {
     struct RootLine { u32 id; char path[kPathMax]; bool offline = false; u32 tracks = 0; bool to_walk = true; };
     Array<RootLine> root_lines;
 };
+
+// A thread put something on a list the main thread takes (notes, results, collected,
+// read_asks): the main loop's wait ends now and the pass after it ticks, so it is taken
+// at once rather than at the next heartbeat. Any thread; with or without the lock.
+inline void tell_main(Shared& sh) { if (sh.engine) platform_wake(*sh.engine); }
 
 void scan_thread(void* shared);
 void write_thread(void* shared);

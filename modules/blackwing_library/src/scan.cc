@@ -12,7 +12,6 @@
 #include "korvid/core/time.h"
 #include "korvid/core/utf8.h"
 #include "korvid/platform/io.h"
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,11 +39,11 @@ struct RootWalk {
 
 const char* errno_words(i32 err) {
     switch (err) {
-    case ENOENT:  return "it is not there";
-    case ENOTDIR: return "it is not a directory";
-    case EACCES:  return "it may not be read (no permission)";
-    case EIO:     return "the disk could not read it (an I/O error)";
-    default:      return "it could not be listed";
+    case Err::NotFound: return "it is not there";
+    case Err::NotDir:   return "it is not a directory";
+    case Err::Denied:   return "it may not be read (no permission)";
+    case Err::Io:       return "the disk could not read it (an I/O error)";
+    default:            return "it could not be listed";
     }
 }
 
@@ -92,14 +91,14 @@ bool on_entry(void* user, const IoDirEntry& e) {
     if (n >= sizeof rel) return true; // a path longer than the OS takes: nothing to open
     char name[512];
     shown(e.name, name, sizeof name);
-    if (e.st.is_dir) {
+    if (e.st.is_dir()) {
         if (e.is_link) return true; // not followed: a loop cannot form, nor a walk leave its root
         l.w->queue.add(rel, n);
         DirMsg d{l.w->root, l.b->s.add(rel, n), l.b->s.add(l.rel), l.b->s.add(name), l.b->s.add(""), 0};
         l.b->dirs.push(d);
         return true;
     }
-    if (!e.st.is_file || !audio_name(e.name)) return true;
+    if (!e.st.is_file() || !audio_name(e.name)) return true;
     add_track(*l.b, l.w->root, rel, n, e.st.size, e.st.mtime_ns, l.tag_mem);
     ++l.found;
     return true;
@@ -293,7 +292,7 @@ void scan_thread(void* arg) {
         if (!w.has_more()) {
             send(sh, batch, &since);
             IoStat st;
-            u64 volume = io_stat(w.path, &st) ? st.volume : 0;
+            u64 volume = io_stat_file(w.path, &st) ? st.volume : 0;
             send_walk(sh, WriteKind::Walked, w.root, time_now() - w.started, w.files, w.root_failed, volume, w.reason);
             bool again = w.again;
             u32 root = w.root;

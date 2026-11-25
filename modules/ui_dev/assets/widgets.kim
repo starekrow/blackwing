@@ -78,17 +78,6 @@ def dev-slider {
     }
 }
 
-// A sparse list's block for a row it does not hold yet is written `placeholder { ... }`
-// inside its `each`. Krome's builder knows the word; its check, which the cook runs, does
-// not, and takes it for a node that is neither a kernel's nor a definition.
-// This definition satisfies the check and changes nothing: the builder finds the block by
-// its word before it looks any definition up. Asked of Korvid as KR27.
-def placeholder {
-    box {
-        slot
-    }
-}
-
 // A panel that did not load: where it would be, the file, the line and the message.
 style dev-broken {
     bg=danger radius=6 pad=8 gap=4 border=1 border-color=raised-edge

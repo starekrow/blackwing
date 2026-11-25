@@ -249,7 +249,7 @@ bool load_script(Host& h) {
     // The user's script: text, run once; what it returns is its record.
     IoBytes file;
     const char* path = g_script_config.file;
-    if (!io_read_now(path, &file)) {
+    if (!io_read_file(path, &file)) {
         char why[600];
         format(why, sizeof why, "%s cannot be read", path);
         fail(h, "the script", why);

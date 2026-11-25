@@ -214,7 +214,7 @@ int main(int argc, char** argv) {
         kvtest::Made m = kvtest::make_library(music, kFiles, kPerAlbum);
         printf("made %llu files (%.1f MB) in %llu albums in %.1f s under %s\n", (unsigned long long)m.files, (f64)m.bytes / 1e6,
                (unsigned long long)m.dirs, time_now() - t, music);
-        io_write_now(marker, "", 0);
+        io_write_file(marker, "", 0);
     }
     io_remove_tree(data);
 
@@ -302,9 +302,9 @@ int main(int argc, char** argv) {
         char ix[2200];
         format(ix, sizeof ix, "%s/index.sqlite", data);
         IoStat st;
-        if (io_stat(ix, &st)) index_bytes = st.size;
+        if (io_stat_file(ix, &st)) index_bytes = st.size;
         format(ix, sizeof ix, "%s/index.sqlite-wal", data);
-        if (io_stat(ix, &st)) index_bytes += st.size;
+        if (io_stat_file(ix, &st)) index_bytes += st.size;
     }
     printf("index: %.1f MB for %u tracks\n", (f64)index_bytes / 1e6, kFiles);
 

@@ -27,6 +27,7 @@
 #include "korvid/core/memory.h"
 #include "korvid/core/time.h"
 #include "korvid/platform/io.h"
+#include "korvid/platform/paths.h"
 #include "korvid/platform/module.h"
 #include "vendor/sqlite3.h"
 #include <new>
@@ -58,7 +59,7 @@ void save_roots(Shared& sh) {
     os_mutex_unlock(&sh.lock);
     char tmp[kPathMax + 8];
     format(tmp, sizeof tmp, "%s.new", path);
-    if (!io_write_now(tmp, text.data ? text.data : "", text.len) || !io_rename(tmp, path))
+    if (!io_write_file(tmp, text.data ? text.data : "", text.len) || !io_rename(tmp, path))
         KV_ERROR("library", "the list of roots could not be saved to %s", path);
     text.free();
 }
@@ -195,7 +196,7 @@ void scan_overrides(Shared& sh, Index& ix, u32 root, const char* root_path) {
         format(path, sizeof path, "%s/%s", x.base, rel);
         format(dir, sizeof dir, "%.*s", name ? (int)(name - rel) : 0, rel);
         IoStat st;
-        if (!io_stat(path, &st)) return true;
+        if (!io_stat_file(path, &st)) return true;
         if (x.ix->override_seen(path) != st.mtime_ns) take_in_overrides(*x.sh, *x.ix, x.root, dir, path, st.mtime_ns);
         return true;
     }, &w);
@@ -319,7 +320,7 @@ void write_thread(void* arg) {
                 override_set(f, name, (TagField)m->field, m->value, m->clear);
                 if (!override_save(path, f)) KV_ERROR("library", "the override could not be saved to %s", path);
                 IoStat st;
-                ix.set_override_seen(path, io_stat(path, &st) ? st.mtime_ns : -2);
+                ix.set_override_seen(path, io_stat_file(path, &st) ? st.mtime_ns : -2);
                 atomic_add_fetch(&sh.overrides_epoch, 1u, MO_RELEASE);
                 TagValue ov[64];
                 u32 n = override_values(f, name, ov, 64);
@@ -402,7 +403,7 @@ void write_thread(void* arg) {
                 }
                 os_mutex_unlock(&sh.lock);
                 IoStat st;
-                if (root && io_stat(m->path, &st) && ix.override_seen(m->path) != st.mtime_ns) {
+                if (root && io_stat_file(m->path, &st) && ix.override_seen(m->path) != st.mtime_ns) {
                     take_in_overrides(sh, ix, root, rel_dir, m->path, st.mtime_ns);
                     touch(root);
                 }
@@ -556,6 +557,7 @@ void write_thread(void* arg) {
         for (const Note& n : notes) sh.notes.push(n);
         os_cond_signal(&sh.read_wake); // open windows may want filling again
         os_mutex_unlock(&sh.lock);
+        tell_main(sh);
         notes.clear();
         touched.clear();
         walked.clear();
@@ -758,6 +760,7 @@ void read_thread(void* arg) {
             sh.reading_window = 0;
             sh.results.push(r);
             os_mutex_unlock(&sh.lock);
+            tell_main(sh);
             free_ask(a);
         }
         todo.clear();
@@ -770,6 +773,7 @@ void read_thread(void* arg) {
             os_mutex_lock(&sh.lock);
             sh.collected.push(out);
             os_mutex_unlock(&sh.lock);
+            tell_main(sh);
         }
         collects.clear();
     }
@@ -1154,16 +1158,14 @@ void io_pump(TickContext& ctx, Library& L) {
     // What has come.
     for (u32 i = 0; i < L.reading.len;) {
         Reading& r = L.reading[i];
-        const IoCompletion* c = nullptr;
-        if (io) for (const IoCompletion& x : io->completions()) if (x.request == r.request) { c = &x; break; }
-        if (!c && io) { ++i; continue; }
+        IoCompletion c;
+        if (io && !io->take(r.request, &c)) { ++i; continue; } // still on its way
         ReadDone d;
         d.job = r.ask.job; d.gen = r.ask.gen; d.at = r.ask.at;
-        if (c) {
-            d.ok = c->status == IoStatus::Done;
-            d.data = c->data; d.size = c->size; d.err = c->error;
-            atomic_add_fetch(&L.sh->bytes_read, (u64)c->size, MO_RELAXED);
-            io->reap(r.request);
+        if (io) {
+            d.ok = c.status == IoStatus::Done;
+            d.bytes = c.bytes; d.err = c.error;
+            atomic_add_fetch(&L.sh->bytes_read, (u64)c.bytes.size, MO_RELAXED);
         }
         done.push(d);
         L.reading[i] = L.reading[L.reading.len - 1];
@@ -1179,10 +1181,11 @@ void io_pump(TickContext& ctx, Library& L) {
             rq.priority = a.slot ? IoPriority::Normal : IoPriority::Low;
             rq.offset = a.at;
             rq.length = (usize)a.len;
+            rq.owner = &L; // the library's own list: drained at shutdown
             Handle h = io ? io->read_file(rq) : Handle{};
             if (h.is_null()) {
                 if (io) break; // the queue is full: next tick
-                ReadDone d; d.job = a.job; d.gen = a.gen; d.at = a.at; d.err = 5; done.push(d); // no queue at all
+                ReadDone d; d.job = a.job; d.gen = a.gen; d.at = a.at; d.err = Err::Io; done.push(d); // no queue at all
             } else {
                 L.reading.push(Reading{h, a});
             }
@@ -1275,7 +1278,7 @@ void library_pump(TickContext& ctx) {
 // The list of roots from roots.txt: an id, a tab, a path, a line.
 void load_roots(Library& L, KTable* table) {
     IoBytes b;
-    if (!io_read_now(L.sh->roots_path, &b)) return;
+    if (!io_read_file(L.sh->roots_path, &b)) return;
     const char* p = (const char*)b.data;
     const char* end = p + b.size;
     while (p < end) {
@@ -1298,7 +1301,7 @@ bool library_startup(Engine& e, ModuleInstance& self) {
     self.set_state(L);
     if (g_config.data_dir && g_config.data_dir[0]) format(L->data_dir, sizeof L->data_dir, "%s", g_config.data_dir);
     else {
-        const char* pref = platform_pref_path(e, "blackwing", "blackwing");
+        const char* pref = platform_user_dir(e, UserDir::Data, "blackwing", "blackwing");
         if (!pref[0]) { KV_ERROR("library", "there is no per-user data directory to keep the index in"); return false; }
         format(L->data_dir, sizeof L->data_dir, "%slibrary", pref);
     }
@@ -1307,6 +1310,7 @@ bool library_startup(Engine& e, ModuleInstance& self) {
     L->sh = (Shared*)mem_alloc(sizeof(Shared));
     new (L->sh) Shared();
     Shared& sh = *L->sh;
+    sh.engine = &e;
     os_mutex_init(&sh.lock);
     os_cond_init(&sh.scan_wake); os_cond_init(&sh.write_wake); os_cond_init(&sh.read_wake); os_cond_init(&sh.tag_wake); os_cond_init(&sh.watch_wake);
     sh.quiet_seconds = g_config.quiet_seconds;
@@ -1339,14 +1343,8 @@ void library_shutdown(Engine& e, ModuleInstance&) {
     os_mutex_unlock(&sh.lock);
     if (L->watcher.handle) os_thread_join(&L->watcher);
     if (L->tagger.handle) os_thread_join(&L->tagger);
-    // Reads still in the queue: cancelled, and their bytes freed if they came anyway.
-    if (IoQueue* io = platform_io(e)) {
-        for (Reading& r : L->reading) {
-            io->cancel(r.request);
-            for (const IoCompletion& c : io->completions())
-                if (c.request == r.request) { if (c.data) free_in(mem_general(), c.data, c.size ? c.size : 1); io->reap(r.request); break; }
-        }
-    }
+    // Reads still in the queue: cancelled and waited for, and their bytes freed if they came anyway.
+    if (IoQueue* io = platform_io(e)) io->drain(L);
     L->reading.free();
     L->waiting.free();
     if (L->scan.handle) os_thread_join(&L->scan);

@@ -119,7 +119,7 @@ struct Rig {
     }
 };
 
-void write_file(const char* path, const char* text = "x") { io_write_now(path, text, strlen(text)); }
+void write_file(const char* path, const char* text = "x") { io_write_file(path, text, strlen(text)); }
 
 } // namespace
 
@@ -153,7 +153,7 @@ void test_library_walk(TestCtx& c) {
             kvtest::Tags t{titles[i], "Sorter", "Sorting", i + 1, 5, 1, "2001", i == 4 ? "Jazz" : "Electronic"};
             kvtest::flac_file(f, t);
             format(p, sizeof p, "%s/Sorts/%u.flac", music, i);
-            io_write_now(p, f.b, f.n);
+            io_write_file(p, f.b, f.n);
         }
     }
 
@@ -300,7 +300,7 @@ void test_library_walk(TestCtx& c) {
     // The index damaged: made again, with a message, from the roots.
     char ix[1200];
     format(ix, sizeof ix, "%s/index.sqlite", data);
-    io_write_now(ix, "this is not a database, whatever its name says", 47);
+    io_write_file(ix, "this is not a database, whatever its name says", 47);
     Rig d;
     KV_CHECK(c, d.start(data));
     KV_CHECK(c, d.until([] { return g_finished == 1; }));
@@ -441,9 +441,9 @@ void test_library_overrides(TestCtx& c) {
     LibraryRow track = hit[0];
     hit.free();
     IoStat before;
-    KV_CHECK(c, io_stat(track.path, &before));
+    KV_CHECK(c, io_stat_file(track.path, &before));
     IoBytes bytes_before;
-    io_read_now(track.path, &bytes_before);
+    io_read_file(track.path, &bytes_before);
     auto over = [&](const char* field, const char* value, bool clear = false) {
         LibraryOverride o;
         o.track = track.id;
@@ -478,12 +478,12 @@ void test_library_overrides(TestCtx& c) {
     *strrchr(dir, '/') = 0;
     format(ovr, sizeof ovr, "%s/overrides%s/%s/overrides.txt", data, music, dir);
     IoBytes text;
-    KV_CHECK(c, io_read_now(ovr, &text) && strstr((const char*)text.data, "title = Night Swim Zz") && strstr((const char*)text.data, "album =\n"));
+    KV_CHECK(c, io_read_file(ovr, &text) && strstr((const char*)text.data, "title = Night Swim Zz") && strstr((const char*)text.data, "album =\n"));
     text.free();
     IoStat after;
     IoBytes bytes_after;
-    KV_CHECK(c, io_stat(track.path, &after) && after.mtime_ns == before.mtime_ns && after.size == before.size);
-    KV_CHECK(c, io_read_now(track.path, &bytes_after) && bytes_after.size == bytes_before.size && memcmp(bytes_after.data, bytes_before.data, bytes_after.size) == 0);
+    KV_CHECK(c, io_stat_file(track.path, &after) && after.mtime_ns == before.mtime_ns && after.size == before.size);
+    KV_CHECK(c, io_read_file(track.path, &bytes_after) && bytes_after.size == bytes_before.size && memcmp(bytes_after.data, bytes_before.data, bytes_after.size) == 0);
     bytes_after.free();
     r.stop();
 
@@ -500,10 +500,10 @@ void test_library_overrides(TestCtx& c) {
     // Edited by hand while stopped: taken in at the next start.
     {
         IoBytes b;
-        io_read_now(ovr, &b);
+        io_read_file(ovr, &b);
         char* at = strstr((char*)b.data, "Night Swim Zz");
         if (at) memcpy(at, "Night Walk Zz", 13);
-        io_write_now(ovr, b.data, b.size);
+        io_write_file(ovr, b.data, b.size);
         b.free();
     }
     Rig e;
@@ -529,7 +529,7 @@ void test_library_overrides(TestCtx& c) {
     e.stop();
 
     // A file that will not parse: set aside, its overrides not used.
-    io_write_now(ovr, "[05 - x.flac]\nthis line is not a field\n", 40);
+    io_write_file(ovr, "[05 - x.flac]\nthis line is not a field\n", 40);
     Rig b;
     KV_CHECK(c, b.start(data));
     KV_CHECK(c, b.until([] { return g_finished == 1; }));
@@ -556,7 +556,7 @@ void put_track_file(const char* path, const char* title, u32 n) {
     kvtest::Bytes f;
     kvtest::Tags t{title, "Watcher", "Changes", n, 9, 1, "2020", "Ambient"};
     kvtest::flac_file(f, t);
-    io_write_now(path, f.b, f.n);
+    io_write_file(path, f.b, f.n);
 }
 }
 
@@ -702,7 +702,7 @@ void grow(void* arg) {
 }
 void copy_file(const char* from, const char* to) {
     IoBytes b;
-    if (io_read_now(from, &b)) { io_write_now(to, b.data, b.size); b.free(); }
+    if (io_read_file(from, &b)) { io_write_file(to, b.data, b.size); b.free(); }
 }
 // An ID3v2.4 tag of `frames` text frames (all the same field) in front of `audio`.
 void tagged(const char* path, const char* id, u32 frames, const char* text, const IoBytes& audio) {
@@ -720,7 +720,7 @@ void tagged(const char* path, const char* id, u32 frames, const char* text, cons
     memcpy(all.push_n(10), head, 10);
     memcpy(all.push_n(t.len), t.data, t.len);
     memcpy(all.push_n((u32)audio.size), audio.data, audio.size);
-    io_write_now(path, all.data, all.len);
+    io_write_file(path, all.data, all.len);
     t.free(); all.free();
 }
 }
@@ -764,14 +764,14 @@ void test_library_corpus(TestCtx& c) {
     for (u32 k = 0; k < 2; ++k) {
         format(p, sizeof p, "%s/%s", codec, bases[k]);
         IoBytes b;
-        if (!io_read_now(p, &b)) continue;
+        if (!io_read_file(p, &b)) continue;
         for (u32 i = 0; i < 150; ++i) {
             usize len = i % 3 == 2 ? rng.next() % (b.size + 1) : b.size;
             Array<u8> w;
             memcpy(w.push_n((u32)len), b.data, len);
             if (i % 3 != 2) for (u32 f = 0, flips = 1 + rng.next() % 10; f < flips && len; ++f) w[rng.next() % (u32)len] ^= (u8)(1u << (rng.next() % 8));
             format(q, sizeof q, "%s/spoiled/%u_%s", root, i, k ? "x.mp3" : "x.flac");
-            io_write_now(q, w.data, w.len);
+            io_write_file(q, w.data, w.len);
             w.free();
             ++audio;
         }
@@ -781,7 +781,7 @@ void test_library_corpus(TestCtx& c) {
     {
         format(p, sizeof p, "%s/mp3/cbr128_44100_2ch.mp3", codec);
         IoBytes mp3;
-        io_read_now(p, &mp3);
+        io_read_file(p, &mp3);
         format(p, sizeof p, "%s/tags", root); io_make_dirs(p);
         format(q, sizeof q, "%s/tags/thousand artists.mp3", root); tagged(q, "TPE1", 1000, "Again and again", mp3); ++audio;
         format(q, sizeof q, "%s/tags/odd text.mp3", root); tagged(q, "TIT2", 3, "\xff\xfe broken \xc3", mp3); ++audio;
@@ -826,24 +826,24 @@ void test_library_corpus(TestCtx& c) {
         kvtest::Bytes f;
         kvtest::Tags t{"Deep Down", "Long Path", "Nesting", 1, 1, 1, "2000", "Ambient"};
         kvtest::flac_file(f, t);
-        io_write_now(q, f.b, f.n);
+        io_write_file(q, f.b, f.n);
         ++audio;
         format(p, sizeof p, "%s/tree/ten thousand", root); io_make_dirs(p);
         for (u32 i = 0; i < 10000; ++i) {
             format(q, sizeof q, "%s/tree/ten thousand/%05u.flac", root, i);
-            io_write_now(q, f.b, f.n);
+            io_write_file(q, f.b, f.n);
             ++audio;
         }
         format(p, sizeof p, "%s/tree/loop", root); KV_CHECK(c, symlink(root, p) == 0);
         format(p, sizeof p, "%s/tree/locked", root); io_make_dirs(p);
-        format(q, sizeof q, "%s/tree/locked/hidden away.flac", root); io_write_now(q, f.b, f.n);
+        format(q, sizeof q, "%s/tree/locked/hidden away.flac", root); io_write_file(q, f.b, f.n);
         chmod(p, 0);
         if (geteuid() == 0) ++audio;
-        format(q, sizeof q, "%s/tree/caf\xe9.flac", root); io_write_now(q, f.b, f.n); ++audio;
+        format(q, sizeof q, "%s/tree/caf\xe9.flac", root); io_write_file(q, f.b, f.n); ++audio;
     }
     Grower g;
     format(g.path, sizeof g.path, "%s/tree/growing.flac", root);
-    io_write_now(g.path, "", 0);
+    io_write_file(g.path, "", 0);
     ++audio;
     OsThread gt;
     os_thread_start(&gt, grow, &g);
@@ -878,7 +878,7 @@ void test_library_corpus(TestCtx& c) {
             ++rows;
             if (x.rate == 0) { ++no_audio; if (!x.reason[0]) ++unexplained; }
             if (!x.path[0] && strstr(x.reason, "longer than the player takes")) ++too_long;
-            if (strlen(x.path) > 511) { ++past_511; IoStat st; if (!io_stat(x.path, &st) || !st.is_file) KV_ERROR("test", "a long path that is not a file: %s", x.path); }
+            if (strlen(x.path) > 511) { ++past_511; IoStat st; if (!io_stat_file(x.path, &st) || !st.is_file()) KV_ERROR("test", "a long path that is not a file: %s", x.path); }
         }
         u32 n = w.len;
         w.free();
@@ -998,7 +998,7 @@ void test_library_paths(TestCtx& c) {
     KV_CHECK(c, top.len == 1 && top[0].kind == (u8)LibraryRowKind::Directory);
     KV_CHECK(c, collect(23, LibraryRowKind::Directory, top[0].id) && g_ngot == 60 && in_order(23));
     u32 real = 0;
-    for (u32 i = 0; i < g_ngot; ++i) { IoStat st; real += io_stat(g_got[i].path, &st) && st.is_file; }
+    for (u32 i = 0; i < g_ngot; ++i) { IoStat st; real += io_stat_file(g_got[i].path, &st) && st.is_file(); }
     KV_CHECK(c, real == 60);
     // One track; a search; a genre; and nothing, which says so once.
     KV_CHECK(c, collect(24, LibraryRowKind::Track, tracks[3].id) && g_ngot == 1 && strcmp(g_got[0].path, tracks[3].path) == 0 && g_got[0].total == 1);

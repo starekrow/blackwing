@@ -148,9 +148,6 @@ void mark_done(KTable* queue, Item& it, const char* reason) {
     if (it.state != PlayerItemState::Failed) set_state(queue, it, PlayerItemState::Idle, reason);
 }
 
-// The I/O queue's data is the general allocator's, freed with the size it was read at.
-void free_bytes(void* data, usize size) { if (data) free_in(mem_general(), data, size ? size : 1); }
-
 // The item at position k of the list.
 inline Item& at(Player& p, u32 k) { return p.items[p.order[k]]; }
 inline const Item& at(const Player& p, u32 k) { return p.items[p.order[k]]; }
@@ -787,44 +784,37 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
     for (u32 k = 0; k < kMaxItems; ++k) {
         Item& it = p.items[k];
         if (!it.alive || it.stat.is_null()) continue;
-        for (const IoCompletion& c : io->completions()) {
-            if (c.request != it.stat) continue;
-            IoCompletion done = c;
-            io->reap(it.stat);
-            it.stat = Handle{};
-            if (finished(it)) break;
-            if (done.status != IoStatus::Done) {
-                char why[96];
-                format(why, sizeof why, "the file could not be looked at: %s", done.error ? strerror(done.error) : "the stat was cancelled");
-                fail(ctx, p, queue, it, why);
-            } else if (!done.stat.is_file) {
-                fail(ctx, p, queue, it, "there is no such file");
-            } else if (done.stat.size == 0) {
-                fail(ctx, p, queue, it, "not a kind of audio file this build plays");
-            } else {
-                it.size = done.stat.size;
-                it.sized = true;
-                row_of(queue, it).size = it.size;
-                if (!make_span(p, it)) fail(ctx, p, queue, it, "there is no address space for the file");
-            }
-            break;
+        IoCompletion done;
+        if (!io->take(it.stat, &done)) continue; // still on its way
+        it.stat = Handle{};
+        if (finished(it)) continue;
+        if (done.status != IoStatus::Done) {
+            char why[96];
+            format(why, sizeof why, "the file could not be looked at: %s", done.error ? os_error_text(done.error) : "the stat was cancelled");
+            fail(ctx, p, queue, it, why);
+        } else if (!done.stat.is_file()) {
+            fail(ctx, p, queue, it, "there is no such file");
+        } else if (done.stat.size == 0) {
+            fail(ctx, p, queue, it, "not a kind of audio file this build plays");
+        } else {
+            it.size = done.stat.size;
+            it.sized = true;
+            row_of(queue, it).size = it.size;
+            if (!make_span(p, it)) fail(ctx, p, queue, it, "there is no address space for the file");
         }
     }
     // Pieces.
     for (u32 k = 0; k < p.nreads;) {
         PieceRead r = p.reads[k];
-        const IoCompletion* got = nullptr;
-        for (const IoCompletion& c : io->completions()) if (c.request == r.request) { got = &c; break; }
-        if (!got) { ++k; continue; }
-        IoCompletion done = *got;
-        io->reap(r.request);
+        IoCompletion done;
+        if (!io->take(r.request, &done)) { ++k; continue; } // still on its way
         p.reads[k] = p.reads[--p.nreads];
-        if (r.item == kNone) { free_bytes(done.data, done.size); continue; } // let go of meanwhile
+        if (r.item == kNone) { done.bytes.free(); continue; } // let go of meanwhile
         Item& it = p.items[r.item];
-        if (!it.base || it.piece[r.piece] != Piece::Reading) { free_bytes(done.data, done.size); continue; }
+        if (!it.base || it.piece[r.piece] != Piece::Reading) { done.bytes.free(); continue; }
         u64 len = piece_len(p, it, r.piece);
-        if (done.status == IoStatus::Done && done.size == len) {
-            memcpy(it.base + ((usize)r.piece << p.shift), done.data, (usize)len);
+        if (done.status == IoStatus::Done && done.bytes.size == len) {
+            memcpy(it.base + ((usize)r.piece << p.shift), done.bytes.data, (usize)len);
             atomic_store(&it.have[r.piece], (u8)1, MO_RELEASE);
             it.piece[r.piece] = Piece::There;
             it.touched[r.piece] = p.tick;
@@ -841,11 +831,11 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
             p.committed -= piece_commit(p, it, r.piece);
             os_decommit(it.base + ((usize)r.piece << p.shift), piece_commit(p, it, r.piece));
             if (done.status == IoStatus::Done) format(it.broken, sizeof it.broken, "the file was cut short while it was read");
-            else format(it.broken, sizeof it.broken, "the file could not be read: %s", done.error ? strerror(done.error) : "unknown error");
+            else format(it.broken, sizeof it.broken, "the file could not be read: %s", done.error ? os_error_text(done.error) : "unknown error");
             if (it.lends && it.want_lo != kNone && r.piece >= it.want_lo && r.piece <= it.want_hi) hifi_starve(p.hifi, it.id, it.broken);
             if (!it.lends && !it.in_play && !finished(it)) fail(ctx, p, queue, it, it.broken);
         }
-        free_bytes(done.data, done.size);
+        done.bytes.free();
     }
 }
 
@@ -912,6 +902,7 @@ bool start_read(Player& p, IoQueue* io, KTable* queue, Item& it, u32 i, IoPriori
     rq.priority = prio;
     rq.offset = (u64)i << p.shift;
     rq.length = (usize)piece_len(p, it, i);
+    rq.owner = &p; // the player's own list: drained at shutdown
     Handle h = io->read_file(rq);
     if (h.is_null()) { os_decommit(it.base + ((usize)i << p.shift), commit); return false; }
     p.committed += commit;
@@ -974,6 +965,7 @@ void advance(TickContext& ctx, Player& p, KTable* queue) {
             IoRequest rq;
             rq.path = row_of(queue, it).path;
             rq.priority = IoPriority::High;
+            rq.owner = &p;
             it.stat = io->stat_file(rq);
             if (it.stat.is_null()) { fail(ctx, p, queue, it, "the I/O queue is full"); continue; }
             set_state(queue, it, PlayerItemState::Reading);
@@ -1171,20 +1163,12 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
     for (u32 k = 0; k < kMaxItems; ++k) {
         Item& it = p->items[k];
         if (!it.alive) continue;
-        if (!it.stat.is_null() && io) {
-            io->cancel(it.stat);
-            for (const IoCompletion& c : io->completions()) if (c.request == it.stat) { io->reap(it.stat); break; }
-        }
+        it.stat = Handle{}; // drained below
         it.lends = 0;
         drop_span(*p, io, it);
     }
-    // Reads still out: cancelled above; take their bytes if they landed anyway.
-    for (u32 k = 0; k < p->nreads; ++k) {
-        if (!io) break;
-        io->cancel(p->reads[k].request);
-        for (const IoCompletion& c : io->completions())
-            if (c.request == p->reads[k].request) { free_bytes(c.data, c.size); io->reap(p->reads[k].request); break; }
-    }
+    // Stats and reads still out: cancelled and waited for, and their bytes freed if they landed anyway.
+    if (io) io->drain(p);
     p->nreads = 0;
     mem_free(p->items);
     mem_free(p->order);

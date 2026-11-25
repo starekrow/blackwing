@@ -198,7 +198,7 @@ struct Pcm16 { i16* s = nullptr; u64 frames = 0; };
 Pcm16 decode16(const char* path) {
     Pcm16 p;
     IoBytes b;
-    if (!io_read_now(path, &b)) return p;
+    if (!io_read_file(path, &b)) return p;
     const DecoderDesc& d = k_flac_decoder;
     u8* mem = (u8*)mem_alloc(d.memory_bytes);
     DecoderOpen o = d.open(sparse_whole(Span<const u8>(b.data, (u32)b.size)), Span<u8>(mem, d.memory_bytes));
@@ -884,7 +884,7 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, io_make_temp_dir("blackwing-cut", dir, sizeof dir));
         format(path, sizeof path, "%s/cut.flac", dir);
         IoBytes b;
-        KV_CHECK(c, io_read_now(data(A), &b) && io_write_now(path, b.data, b.size));
+        KV_CHECK(c, io_read_file(data(A), &b) && io_write_file(path, b.data, b.size));
         b.free();
         Rig r;
         KV_CHECK(c, r.start(0, 4096, 32u << 10, 0.05));

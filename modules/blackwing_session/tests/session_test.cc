@@ -122,7 +122,7 @@ void path_of(char* out, usize cap, const char* tone, u32 k) {
 // How many paths a session file's queue has; ~0 when it does not parse.
 u32 file_rows(const char* path) {
     IoBytes file;
-    if (!io_read_now(path, &file)) return ~0u;
+    if (!io_read_file(path, &file)) return ~0u;
     u32 n = ~0u;
     {
         MemScope scope;
@@ -170,7 +170,7 @@ void test_session(kv::TestCtx& c) {
         a.stop(); // quit: saved at exit
     }
     KV_CHECK(c, file_rows(file) == 1000);
-    { IoStat st; if (io_stat(file, &st)) KV_INFO("test", "session: the file for a thousand rows is %llu bytes", (unsigned long long)st.size); }
+    { IoStat st; if (io_stat_file(file, &st)) KV_INFO("test", "session: the file for a thousand rows is %llu bytes", (unsigned long long)st.size); }
     {
         Run b;
         KV_CHECK(c, b.start(dir));
@@ -216,11 +216,11 @@ void test_session(kv::TestCtx& c) {
         u64 killed_at = a.t().position;
         u64 killed_item = a.t().item;
         IoBytes as_killed;
-        KV_CHECK(c, io_read_now(file, &as_killed) && a.state().saves <= saves + 1);
+        KV_CHECK(c, io_read_file(file, &as_killed) && a.state().saves <= saves + 1);
         KV_INFO("test", "session: while playing, %u saves; the last %llu bytes, in place %.1f ms after it was asked for", a.state().saves,
                 (unsigned long long)a.state().save_bytes, a.state().save_seconds * 1e3);
         a.stop();
-        io_write_now(file, as_killed.data, as_killed.size); // the clean exit's save undone: what a kill left
+        io_write_file(file, as_killed.data, as_killed.size); // the clean exit's save undone: what a kill left
         as_killed.free();
         Run b;
         KV_CHECK(c, b.start(dir));
@@ -240,7 +240,7 @@ void test_session(kv::TestCtx& c) {
     io_make_dirs(dir);
     {
         static const char k_junk[] = "{ \"blackwing_session\": 1, \"queue\": [ \"/a.flac\", ";
-        KV_CHECK(c, io_write_now(file, k_junk, sizeof k_junk - 1));
+        KV_CHECK(c, io_write_file(file, k_junk, sizeof k_junk - 1));
         Run a;
         KV_CHECK(c, a.start(dir));
         KV_CHECK(c, a.until([&] { return a.state().phase == (u8)SessionPhase::Ready; }));
@@ -254,7 +254,7 @@ void test_session(kv::TestCtx& c) {
         static const char k_old[] = "{ \"blackwing_session\": 0, \"queue\": [ \"/music/a.flac\", \"/music/b.flac\" ], \"place\": 2,\n"
                                     "  \"someday\": { \"shuffle\": true }, \"params\": [ { \"stage\": \"gain\", \"name\": \"gain_db\", \"value\": -3.0 },\n"
                                     "  { \"stage\": \"reverb\", \"name\": \"room\", \"value\": 0.4 }, { \"stage\": \"gain\" } ] }";
-        KV_CHECK(c, io_write_now(file, k_old, sizeof k_old - 1));
+        KV_CHECK(c, io_write_file(file, k_old, sizeof k_old - 1));
         Run a;
         KV_CHECK(c, a.start(dir));
         KV_CHECK(c, a.until([&] { return a.state().phase == (u8)SessionPhase::Ready; }));

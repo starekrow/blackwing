@@ -29,7 +29,8 @@
 //
 // Two loops, one rule: the player ticks at the clock's rate while it or the library asks
 // (engine_want_ticks), and four times a second when nothing does, so a player left paused
-// costs nothing. With a face the loop is Korvid's frame loop, paced Decoupled: those
+// costs nothing: between ticks both wait in the platform, which a command, a socket or a
+// library thread with news ends at once. With a face the loop is Korvid's frame loop, paced Decoupled: those
 // ticks, and a frame only when a screen changed, none while the window is hidden. With
 // none it is this file's own, over an engine that holds no window module at all, so it
 // runs on a machine with no display.
@@ -49,6 +50,7 @@
 #include "korvid/core/time.h"
 #include "korvid/frameloop/frameloop.h"
 #include "korvid/hifi_platform/capture.h"
+#include "korvid/platform/io.h"
 #include "korvid/platform/module.h"
 #include "korvid/ui_dev/ui_dev.h"
 #include <signal.h>
@@ -311,14 +313,14 @@ Span<const ModuleDesc* const> headless_modules() {
 bool write_capture(HifiCapture* cap, const char* path) {
     HifiCaptureSegment seg[64];
     u32 n = hifi_capture_segments(cap, seg, 64);
-    FILE* f = fopen(path, "wb");
-    if (!f) { fprintf(stderr, "blackwing: cannot write %s\n", path); return false; }
+    IoFileWriter f;
+    if (!f.open(path)) { fprintf(stderr, "blackwing: cannot write %s: %s\n", path, os_error_text(f.error)); return false; }
     for (u32 i = 0; i < n && i < 64; ++i) {
-        fwrite(hifi_capture_data(cap) + seg[i].offset, 1, seg[i].bytes, f);
+        f.write(hifi_capture_data(cap) + seg[i].offset, seg[i].bytes);
         printf("captured: %zu bytes of %u Hz, %u ch, %s\n", seg[i].bytes, seg[i].format.rate, seg[i].format.channels,
                hifi_sample_format_name(seg[i].format.sample));
     }
-    fclose(f);
+    if (!f.close()) { fprintf(stderr, "blackwing: %s was not written whole: %s\n", path, os_error_text(f.error)); return false; }
     if (u64 dropped = hifi_capture_dropped(cap)) printf("captured: %llu frames did not fit and were dropped\n", (unsigned long long)dropped);
     return true;
 }
@@ -488,17 +490,33 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         if (help) {
             cli_run(e, "help", print_line, nullptr);
         } else {
+            // The next tick at the clock's rate while a module asked for it (the player
+            // while it plays, the library while it scans), and four times a second
+            // otherwise. Between ticks the loop waits in the platform (Korvid's KR26), not
+            // a sleep: a command on stdin or the CLI's port, or a library thread with
+            // something for the main thread (platform_wake), ends the wait at once and the
+            // pass after it ticks; a read on its way shortens it (platform_idle_time).
+            constexpr f64 k_heartbeat = 0.25;
             f64 limit = run_seconds ? atof(run_seconds) : -1.0;
             f64 start = time_now(), last = start;
+            IoQueue* io = platform_io(e);
+            bool woke = true; // the first pass ticks: the command line's files are its commands
             while (!e.quit_requested) {
+                platform_pump(e);
                 f64 now = time_now();
                 if (limit >= 0.0 && now - start >= limit) break;
-                platform_pump(e);
+                f64 next = last + (e.ticks_wanted ? e.clock.tick_dt : k_heartbeat);
+                bool tick = woke || now >= next || (io && io->completed_count());
+                if (engine_wake(e)) tick = true; // the CLI's wakers state what they watch here
+                if (!tick) {
+                    f64 wait = next - now;
+                    if (limit >= 0.0 && start + limit - now < wait) wait = start + limit - now;
+                    woke = platform_wait(e, platform_idle_time(e, wait)) == PlatformWoken::Wake;
+                    continue;
+                }
+                woke = false;
                 engine_frame(e, now - last);
                 last = now;
-                // The next tick at the clock's rate while a module asked for it (the player
-                // while it plays, the library while it scans), and four times a second otherwise.
-                time_sleep(e.ticks_wanted ? e.clock.tick_dt : 0.25);
             }
             code = g_code ? g_code : script_host_exit_code();
             const PlayerOutput* o = player_output(e);

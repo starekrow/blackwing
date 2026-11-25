@@ -81,16 +81,18 @@ asks, and four times a second when no one does.
   (`blackwing.tick`), which also ends the run on Ctrl-C; closing the window ends it too
   ([blackwing_window](../blackwing_window/README.md)). The frame loop shuts everything
   down, memory included, so nothing of this file's runs after it.
-- **With none** the loop is this file's own, forty lines over `engine_frame` and
-  `platform_pump`, and the engine is started from eight modules by name (`platform`,
+- **With none** the loop is this file's own, forty lines over `engine_frame`,
+  `platform_pump` and `platform_wait`, and the engine is started from eight modules by name (`platform`,
   `cli`, `player`, `library`, `glue`, `session`, `script`, `blackwing`): the frame loop, the window, Krome and the
   face are linked and left out, so nothing asks for a display.
 
 With `hifi` holding the device, a player left paused with no face wakes four times a
 second and does nothing else: 0.03% of a core on the Linux laptop. With the face up it
-draws nothing and ticks as rarely, but the frame loop polls the window every 4 ms:
-about 230 wakeups a second, 2.5% of a core
-([the notes](../../docs/design/slice-4-notes.md), KR26).
+draws nothing and ticks as rarely, and between ticks the frame loop waits on the window
+(Korvid's slice 12, KR26): about 7 to 11 wakeups a second and 0.6% of a core, where slice 4
+measured 230 and 2.5% ([the notes](../../docs/design/slice-4-notes.md)). Either way the
+wait ends at once for a command on stdin or the CLI's port, or a library thread with
+something for the main thread.
 
 ## Platform notes
 

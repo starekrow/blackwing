@@ -53,10 +53,10 @@ struct Active {
 
 const char* read_words(i32 err) {
     switch (err) {
-    case 2:  return "the file is gone";              // ENOENT
-    case 13: return "the file may not be read (no permission)"; // EACCES
-    case 5:  return "the disk could not read the file (an I/O error)";
-    default: return "the file could not be read";
+    case Err::NotFound: return "the file is gone";
+    case Err::Denied:   return "the file may not be read (no permission)";
+    case Err::Io:       return "the disk could not read the file (an I/O error)";
+    default:            return "the file could not be read";
     }
 }
 
@@ -355,23 +355,23 @@ void tag_thread(void* arg) {
         os_mutex_unlock(&sh.lock);
 
         // Reads that came: their bytes into their tracks' spans.
-        for (const ReadDone& d : dones) {
+        for (ReadDone& d : dones) {
             Active& a = t.act[d.job];
             if (a.used && a.gen == d.gen) {
                 if (a.out) --a.out;
                 if (!d.ok) { a.failed = true; a.err = d.err; }
-                else if (d.size) {
-                    u64 end = d.at + d.size < a.span.size ? d.at + d.size : a.span.size;
+                else if (d.bytes.size) {
+                    u64 end = d.at + d.bytes.size < a.span.size ? d.at + d.bytes.size : a.span.size;
                     usize from = (usize)(d.at & ~(u64)(os_page_size() - 1));
                     os_commit(a.base + from, os_page_align((usize)(end - from)));
-                    memcpy(a.base + d.at, d.data, (usize)(end - d.at));
+                    memcpy(a.base + d.at, d.bytes.data, (usize)(end - d.at));
                     for (u64 p = d.at >> kShift; p <= (end - 1) >> kShift; ++p) {
                         u64 pe = ((p + 1) << kShift) < a.span.size ? (p + 1) << kShift : a.span.size;
                         if (end >= pe || end == a.span.size) atomic_store(&a.have[p], (u8)1, MO_RELEASE);
                     }
                 }
             }
-            if (d.data) free_in(mem_general(), d.data, d.size ? d.size : 1);
+            d.bytes.free();
         }
         dones.clear();
 
@@ -398,6 +398,7 @@ void tag_thread(void* arg) {
             os_mutex_lock(&sh.lock);
             for (const ReadAsk& a : t.asks) sh.read_asks.push(a);
             os_mutex_unlock(&sh.lock);
+            tell_main(sh); // the main thread hands them to the I/O queue
             t.asks.clear();
         }
     }
@@ -406,10 +407,10 @@ void tag_thread(void* arg) {
     for (TagJobs* b : t.queue) { b->free(); mem_free(b); }
     if (t.slot) { t.slot->free(); mem_free(t.slot); }
     os_mutex_lock(&sh.lock);
-    for (ReadDone& d : sh.read_dones) if (d.data) free_in(mem_general(), d.data, d.size ? d.size : 1);
+    for (ReadDone& d : sh.read_dones) d.bytes.free();
     sh.read_dones.clear();
     os_mutex_unlock(&sh.lock);
-    for (ReadDone& d : dones) if (d.data) free_in(mem_general(), d.data, d.size ? d.size : 1);
+    for (ReadDone& d : dones) d.bytes.free();
     dones.free();
     t.queue.free(); t.roots.free(); t.asks.free();
     if (t.out) { t.out->free(); mem_free(t.out); }

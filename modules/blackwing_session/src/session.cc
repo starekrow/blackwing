@@ -33,6 +33,7 @@
 #include "korvid/core/time.h"
 #include "korvid/platform/io.h"
 #include "korvid/platform/module.h"
+#include <new>
 #include <string.h>
 
 namespace kv {
@@ -65,7 +66,8 @@ struct Session {
     f64     changed_at = 0.0;  // when it was last seen to change
     f64     looked_at = 0.0;
     f64     position_at = 0.0; // when the position was last saved
-    Handle  write;             // a save in the I/O queue
+    Handle  write;             // a save on the I/O queue's task workers
+    struct SaveJob* job = nullptr; // its file and bytes, the task's until the completion is taken
     f64     write_asked = 0.0;
     u64     write_sig = 0;
     usize   write_bytes = 0;
@@ -142,7 +144,7 @@ bool parse(Session& s, const char* text, usize size) {
 // name, not overwritten, and said; the start is then an empty one.
 void read_file(Session& s) {
     IoBytes file;
-    if (!io_read_now(s.path, &file)) return; // none: a first run
+    if (!io_read_file(s.path, &file)) return; // none: a first run
     bool ok = parse(s, (const char*)file.data, file.size);
     file.free();
     if (ok) return;
@@ -248,53 +250,73 @@ void write_text(Session& s, Span<const PlayerItem* const> rows, u32 place, u64 f
 
 void temp_path(const Session& s, char* out, usize cap) { format(out, cap, "%s.new", s.path); }
 
-// A save, asked of the I/O queue: the whole file beside the old one, below the player's reads.
+// A save, off the main thread: the whole file beside the old one, then renamed over it, so a
+// kill leaves the old file or the new. Both calls block, which is a task's to do and a tick's
+// not to (a dev build says so of a tick that does).
+struct SaveJob {
+    char     tmp[4300] = "";
+    char     to[4200] = "";
+    Array<u8> text;
+};
+i32 save_task(void* arg, const IoTaskCtl&) {
+    SaveJob& j = *(SaveJob*)arg;
+    i32 err = 0;
+    if (!io_write_file(j.tmp, j.text.data, j.text.len, &err)) return err ? err : (i32)Err::Io;
+    if (!io_rename(j.tmp, j.to, &err)) return err ? err : (i32)Err::Io;
+    return 0;
+}
+void free_job(Session& s) {
+    if (!s.job) return;
+    s.job->text.free();
+    s.job->~SaveJob();
+    mem_free(s.job);
+    s.job = nullptr;
+}
+
+// A save, asked of the I/O queue's task workers, below the player's reads.
 void save(TickContext& ctx, Session& s, const Snapshot& snap) {
     IoQueue* io = platform_io(*ctx.engine);
     if (!io || !s.write.is_null()) return;
-    Array<u8> text{};
+    SaveJob* j = new (mem_alloc(sizeof(SaveJob))) SaveJob();
     write_text(s, Span<const PlayerItem* const>(snap.rows.data, snap.rows.len), snap.place, snap.frame, snap.frames, snap.rate, ctx.read_ktable("player.chain"),
-               ctx.read_ktable("player.params"), text);
-    if (!text.len) { text.free(); return; }
-    char tmp[4300];
-    temp_path(s, tmp, sizeof tmp);
-    IoWriteRequest w;
-    w.path = tmp;
-    w.data = text.data;
-    w.size = text.len;
-    w.priority = IoPriority::Low;
-    s.write = io->write_file(w); // the bytes are copied at submission
+               ctx.read_ktable("player.params"), j->text);
+    s.job = j;
+    if (!j->text.len) { free_job(s); return; }
+    temp_path(s, j->tmp, sizeof j->tmp);
+    format(j->to, sizeof j->to, "%s", s.path);
+    IoTaskRequest t;
+    t.fn = save_task;
+    t.arg = j;
+    t.name = "session save";
+    t.priority = IoPriority::Low;
+    t.owner = &s;
+    s.write = io->run_task(t);
     s.write_asked = time_now();
     s.write_sig = snap.sig;
-    s.write_bytes = text.len;
+    s.write_bytes = j->text.len;
     s.state.writing = s.write.is_null() ? 0 : 1;
     s.position_at = s.write_asked;
-    text.free();
-    if (s.write.is_null()) KV_WARN("session", "the session could not be handed to the I/O queue");
+    if (s.write.is_null()) { free_job(s); KV_WARN("session", "the session could not be handed to the I/O queue"); }
 }
 
 // The save that was asked for, when it is whole: put in the old one's place.
 void finish_write(TickContext& ctx, Session& s) {
     IoQueue* io = platform_io(*ctx.engine);
     if (!io || s.write.is_null()) return;
-    for (const IoCompletion& c : io->completions()) {
-        if (c.request != s.write) continue;
-        char tmp[4300];
-        temp_path(s, tmp, sizeof tmp);
-        if (c.status == IoStatus::Done && io_rename(tmp, s.path)) {
-            s.saved_sig = s.write_sig;
-            ++s.state.saves;
-            s.state.save_bytes = s.write_bytes;
-            s.state.save_seconds = time_now() - s.write_asked;
-        } else {
-            KV_WARN("session", "the session was not saved to %s: the old one stands", s.path);
-        }
-        io->reap(s.write);
-        s.write = Handle{};
-        s.state.writing = 0;
-        return;
+    IoCompletion c;
+    if (!io->take(s.write, &c)) { engine_want_ticks(*ctx.engine); return; } // on its way: looked for again next tick
+    if (c.status == IoStatus::Done) {
+        s.saved_sig = s.write_sig;
+        ++s.state.saves;
+        s.state.save_bytes = s.write_bytes;
+        s.state.save_seconds = time_now() - s.write_asked;
+    } else {
+        KV_WARN("session", "the session was not saved to %s: %s; the old one stands", s.path,
+                c.status == IoStatus::Cancelled ? "cancelled" : os_error_text(c.error));
     }
-    engine_want_ticks(*ctx.engine); // it is on its way: looked for again next tick
+    s.write = Handle{};
+    s.state.writing = 0;
+    free_job(s);
 }
 
 // ---- the units --------------------------------------------------------------------------------
@@ -410,6 +432,8 @@ bool session_startup(Engine& e, ModuleInstance& self) {
     if (!dir[0]) { KV_WARN("session", "there is no settings directory to keep the session in: it is not kept"); return true; }
     io_make_dirs(dir);
     session_file_in(dir, s->path, sizeof s->path);
+    // Saves run on the queue's task workers; one is enough, and another module may have started them.
+    if (IoQueue* io = platform_io(e)) if (!io->tasks) io->start_tasks(1);
     read_file(*s);
     s->state.queue_total = s->queue.len;
     s->state.phase = (u8)SessionPhase::Restoring;
@@ -422,10 +446,11 @@ bool session_startup(Engine& e, ModuleInstance& self) {
 void session_shutdown(Engine& e, ModuleInstance& self) {
     Session* s = self.state_as<Session>();
     if (!s) return;
+    // A save still on its way is cancelled (or, under way, waited for) for the one made here.
+    if (IoQueue* io = platform_io(e)) { if (!s->write.is_null()) io->cancel(s->write); io->drain(s); }
+    s->write = Handle{};
+    free_job(*s);
     if (s->state.phase == (u8)SessionPhase::Ready) {
-        // A write still in the queue is abandoned for the one made here.
-        IoQueue* io = platform_io(e);
-        if (io && !s->write.is_null()) io->cancel(s->write);
         const PlayerTransport* t = player_transport(e);
         KTable* q = engine_ktable(e, "player.queue");
         if (t && q) {
@@ -440,7 +465,7 @@ void session_shutdown(Engine& e, ModuleInstance& self) {
             rows.free();
             char tmp[4300];
             temp_path(*s, tmp, sizeof tmp);
-            if (text.len && io_write_now(tmp, text.data, text.len) && io_rename(tmp, s->path)) ++s->state.saves;
+            if (text.len && io_write_file(tmp, text.data, text.len) && io_rename(tmp, s->path)) ++s->state.saves;
             else KV_WARN("session", "the session was not saved to %s at exit", s->path);
             text.free();
         }
@@ -476,7 +501,7 @@ f64 session_peek(const char* dir, const char* owner, const char* key, f64 fallba
     char path[4200];
     session_file_in(dir, path, sizeof path);
     IoBytes file;
-    if (!io_read_now(path, &file)) return fallback;
+    if (!io_read_file(path, &file)) return fallback;
     f64 out = fallback;
     {
         MemScope scope;

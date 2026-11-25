@@ -24,9 +24,10 @@ rows added one by one, is one write. While something plays the position is saved
 `position_seconds` (10) besides, which is what a kill can lose. Paused or stopped with
 nothing changing, nothing is written and no tick is asked for.
 
-**A write is whole or not at all.** The text goes to `session.json.new` through the I/O
-queue at `Low` priority, below the player's reads, and is renamed over the old file when
-the queue says it is written. A crash or a full disk leaves the old session. At
+**A write is whole or not at all.** The text goes to `session.json.new` and is renamed
+over the old file, both in one task on the I/O queue's workers (`run_task`, at `Low`
+priority, below the player's reads), so no tick blocks on the disk. The module starts one
+worker if no other module has. A crash or a full disk leaves the old session. At
 shutdown a session that has changed is written before the module goes, the same way but
 at once.
 
