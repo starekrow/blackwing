@@ -815,13 +815,12 @@ void test_library_corpus(TestCtx& c) {
     {
         char longp[4200];
         u32 n = (u32)format(longp, sizeof longp, "%s/tree", root);
-        io_make_dirs(longp);
         for (u32 d = 0; d < 5; ++d) {
             longp[n++] = '/';
             for (u32 k = 0; k < 220; ++k) longp[n++] = (char)('a' + (k + d) % 26);
             longp[n] = 0;
-            mkdir(longp, 0755); // a level at a time: io_make_dirs stops at 1023 bytes (KR15)
         }
+        KV_CHECK(c, io_make_dirs(longp)); // past a thousand bytes, in one call (KR15)
         format(q, sizeof q, "%s/deep.flac", longp);
         kvtest::Bytes f;
         kvtest::Tags t{"Deep Down", "Long Path", "Nesting", 1, 1, 1, "2000", "Ambient"};

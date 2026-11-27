@@ -279,9 +279,9 @@ its place.
 - **A root is watched, then walked**, so a file made between the walk's listing of its
   directory and that directory's watch is not missed. Watching a large root costs its first
   walk that time (fifty thousand files: found by name at 2.5 s instead of 1.6).
-- **The watcher's reports through a link to a directory are dropped**: the engine's watcher
-  follows such links (KR16), and the walk does not, so a file seen through one is not the
-  root's.
+- **A link to a directory is neither walked nor watched**: the walk does not follow it,
+  and the engine's watcher neither goes down it nor reports through it (KR16), so a file
+  seen only through one is not the root's.
 - **What is kept goes with the generation**: while a scan commits, an open grouping or
   search is made again with each refill.
 - **A root is walking, then reading, then idle**, and `LibraryScanFinished` comes when it is
