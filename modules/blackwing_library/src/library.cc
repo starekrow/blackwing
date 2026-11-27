@@ -1296,16 +1296,49 @@ void load_roots(Library& L, KTable* table) {
     b.free();
 }
 
+// Before slice 5 the index was in the data directory, beside the roots. It is moved to
+// the cache once, with its WAL; if it cannot be, it is left and a new one is built from
+// the roots, which costs a scan and nothing else.
+void move_old_index(const char* data_dir, const char* index_path) {
+    char from[kPathMax], to[kPathMax];
+    format(from, sizeof from, "%s/index.sqlite", data_dir);
+    if (strcmp(from, index_path) == 0) return;
+    IoStat st;
+    if (!io_stat_file(from, &st) || io_stat_file(index_path, &st)) return;
+    static const char* const kParts[] = {"", "-wal", "-shm"};
+    for (const char* part : kParts) {
+        format(from, sizeof from, "%s/index.sqlite%s", data_dir, part);
+        format(to, sizeof to, "%s%s", index_path, part);
+        if (!io_stat_file(from, &st)) continue;
+        i32 err = 0;
+        if (!io_rename(from, to, &err)) {
+            KV_WARN("library", "the index at %s could not be moved to %s (%s): it is built again", from, to, os_error_text(err));
+            return;
+        }
+    }
+    KV_INFO("library", "the index moved to %s", index_path);
+}
+
 bool library_startup(Engine& e, ModuleInstance& self) {
     Library* L = arena_push<Library>(self.arena);
     self.set_state(L);
-    if (g_config.data_dir && g_config.data_dir[0]) format(L->data_dir, sizeof L->data_dir, "%s", g_config.data_dir);
-    else {
+    // The roots and the overrides are the user's, in the data directory; the index can be
+    // made again from them, so it is a cache. A data directory named in the config holds
+    // both (the tests, `--data`).
+    char cache_dir[kPathMax];
+    if (g_config.data_dir && g_config.data_dir[0]) {
+        format(L->data_dir, sizeof L->data_dir, "%s", g_config.data_dir);
+        format(cache_dir, sizeof cache_dir, "%s", g_config.data_dir);
+    } else {
         const char* pref = platform_user_dir(e, UserDir::Data, "blackwing", "blackwing");
-        if (!pref[0]) { KV_ERROR("library", "there is no per-user data directory to keep the index in"); return false; }
+        if (!pref[0]) { KV_ERROR("library", "there is no per-user data directory to keep the roots in"); return false; }
         format(L->data_dir, sizeof L->data_dir, "%slibrary", pref);
+        const char* cache = platform_user_dir(e, UserDir::Cache, "blackwing", "blackwing");
+        if (cache[0]) format(cache_dir, sizeof cache_dir, "%slibrary", cache);
+        else format(cache_dir, sizeof cache_dir, "%s", L->data_dir);
     }
     if (!io_make_dirs(L->data_dir)) { KV_ERROR("library", "%s cannot be made", L->data_dir); return false; }
+    if (!io_make_dirs(cache_dir)) { KV_ERROR("library", "%s cannot be made", cache_dir); return false; }
     if (sqlite3_initialize() != SQLITE_OK) { KV_ERROR("library", "sqlite will not start"); return false; }
     L->sh = (Shared*)mem_alloc(sizeof(Shared));
     new (L->sh) Shared();
@@ -1317,7 +1350,8 @@ bool library_startup(Engine& e, ModuleInstance& self) {
     sh.offline_seconds = g_config.offline_seconds;
     sh.poll_seconds = g_config.poll_seconds;
     sh.poll_roots = g_config.poll_roots;
-    format(sh.index_path, sizeof sh.index_path, "%s/index.sqlite", L->data_dir);
+    format(sh.index_path, sizeof sh.index_path, "%s/index.sqlite", cache_dir);
+    move_old_index(L->data_dir, sh.index_path);
     format(sh.data_dir, sizeof sh.data_dir, "%s", L->data_dir);
     format(sh.roots_path, sizeof sh.roots_path, "%s/roots.txt", L->data_dir);
     if (!os_thread_start(&L->writer, write_thread, &sh) || !os_thread_start(&L->reader, read_thread, &sh) ||

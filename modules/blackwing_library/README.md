@@ -131,7 +131,9 @@ running, and a walk marks what it did not see.
   walked, and the walk says offline. Removals the watcher reports from a root that is now
   empty are not believed file by file for the same reason.
 
-**The index** is sqlite (vendored, built as C), in WAL mode, at `<data>/index.sqlite`,
+**The index** is sqlite (vendored, built as C), in WAL mode, at `<cache>/library/index.sqlite`
+(the per-user cache directory: it can be made again from the roots and the overrides, which
+stay in `<data>/library/`; an index left in the data directory by an older build is moved once),
 with tables for the roots, the directories, the tracks (with the merge of their tags and
 their audio), every source's values (`tagvals`), and an FTS5 table over the tracks' title,
 artist, album and path. Paths are kept as bytes (a name that is not UTF-8
@@ -201,7 +203,7 @@ queues each.
 
 ```cpp
 LibraryConfig lc;
-lc.data_dir = "/where/the/index/goes";   // or null: the per-user data directory, library/
+lc.data_dir = "/where/the/index/goes";   // or null: the roots in the per-user data directory, the index in the cache, each under library/
 library_configure(lc);                   // before engine_init
 
 e.events.emit(LibraryAddRoot{"/music"});
