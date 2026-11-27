@@ -25,11 +25,12 @@ putting it in order. Three phases:
 - **P2, the infill.** The rest of the library formats, the optional DSPs, the headphone
   profile picker, the cooker.
 
-Slice 1 has built the audio path's spine: `hifi_codec` with FLAC, `hifi_platform` with
-PipeWire and a capture device, `hifi`, `blackwing_player`, and a headless `blackwing`
-that plays files named on its command line. The other modules are scaffolds:
-[the module directories](../../modules/README.md), each with a `module.lua` and a page
-saying what it will hold.
+Slices 1 to 4 have built the audio path (`hifi`, `hifi_codec` with FLAC and MP3,
+`hifi_eq`, `hifi_platform` with PipeWire and a capture device), the player, the tags and
+the library, the development face `ui_dev`, the session, the script host, and
+`blackwing` around them, headless or with a window, on Linux. `media_platform` and the
+other three faces are scaffolds: [the module directories](../../modules/README.md), each
+with a `module.lua` and a page saying what it will hold.
 
 ## Goals
 
@@ -112,12 +113,16 @@ Decided in the design discussion, and the tie-break for everything below:
       \      |       |        /                         |
        events and tables on Korvid's busses ------------+
           /                        \
-  blackwing_player            blackwing_library
-          |                          |
-        hifi --- hifi_eq        blackwing_tags
+  blackwing_player --- blackwing_glue --- blackwing_library
+          |                                     |
+        hifi --- hifi_eq                  blackwing_tags
         /   \
   hifi_codec  hifi_platform
   ```
+
+  Beside them, in `blackwing`'s link: `blackwing_window` (what every face shares of the
+  window), `blackwing_session` and `blackwing_script`, each a customer of the busses like
+  a face.
 
 - **Third-party code in P0**, all permissive: dr_flac, dr_mp3 and sqlite. Licences are checked when each is vendored, and each
   ships its licence file through its module's `licenses`.
@@ -449,7 +454,7 @@ Slices, as a proposal; each gets its own PRD when it starts.
    describe themselves, `PlayerCue`).
    *Done when* everything in slices 1 to 3 can be driven and watched from it, and from a
    Lua script with no face at all, and it starts as it was left.
-5. **The system.** `media_platform`; the Windows and macOS backends of both platform
+5. **The system** ([Blackwing-Slice-5-PRD.md](Blackwing-Slice-5-PRD.md), a draft). `media_platform`; the Windows and macOS backends of both platform
    modules; hot-plug.
    *Done when* the media keys and the OS's now-playing surface work on all three, and
    pulling the DAC pauses.

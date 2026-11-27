@@ -10,6 +10,7 @@ plans in `PRDs/`, dated design records in `design/`, a page per module beside it
 | [PRDs/Blackwing-Slice-2-PRD.md](PRDs/Blackwing-Slice-2-PRD.md) | slice 2, "The recut": seek, skip, the queue, volume and the equalizer, over a lead of seconds |
 | [PRDs/Blackwing-Slice-3-PRD.md](PRDs/Blackwing-Slice-3-PRD.md) | slice 3, "The library": tags, roots, the scan, the index, queries, and MP3 |
 | [PRDs/Blackwing-Slice-4-PRD.md](PRDs/Blackwing-Slice-4-PRD.md) | slice 4, "The development face": `ui_dev`, the window and its loop, the session, and the API from a Lua script |
+| [PRDs/Blackwing-Slice-5-PRD.md](PRDs/Blackwing-Slice-5-PRD.md) | slice 5, "The system", a draft: the devices as data, hot-plug, the OS's media surface, keep-awake, and the Windows and macOS backends |
 | [PRDs/Korvid-Changes-For-Blackwing.md](PRDs/Korvid-Changes-For-Blackwing.md) | what each slice, and skin import, found it needs from the engine, as quick requirements (KR1 to KR45) |
 | [design/design-notes-2026-11-22.md](design/design-notes-2026-11-22.md) | the design discussion the plan was drawn from, as it stood that day |
 | [design/slice-1-notes.md](design/slice-1-notes.md) | what building slice 1 found, with the numbers |

@@ -1,7 +1,7 @@
 # Korvid changes for Blackwing — quick requirements
 
 Nov 22, 2026 · updated Nov 23 with what Korvid took, with what slice 4 found, and with
-what skin import needs
+what skin import needs; Nov 27 with Korvid's slice 13 and Krome's 7 and 8
 
 ## What this is
 
@@ -13,7 +13,7 @@ asked, and how to tell it is done. The findings themselves are in
 Each was written before Korvid took it, with Blackwing's workaround named so the cost of
 waiting was clear. Korvid's slices 10 and 11 took the first twenty-five: Status has where
 each landed and what Blackwing does with it now. KR26 and KR27, from building slice 4,
-landed in Korvid's slice 12. KR28 to KR42 are new, from the skin import note, and are for work in no phase yet.
+landed in Korvid's slice 12. KR28 to KR42, from the skin import note, landed in Krome's slices 7 and 8 (KR28 to KR37) and the engine's slice 13 (KR39 to KR42); KR38 is not yet taken.
 
 One of these blocked the next milestone: **KR1**. Slice 1's milestone 4 is the PipeWire
 backend, and a project cannot link PipeWire today without editing the engine.
@@ -23,7 +23,7 @@ backend, and a project cannot link PipeWire today without editing the engine.
 Nov 23, 2026. Korvid took all twenty-five, with these IDs: KR1 to KR17 and KR23 in its
 slice 10 (`docs/PRDs/Engine-Slice-10-PRD.md` in the engine's checkout, branch
 `slice-10`), the rest in its slice 11 (`Engine-Slice-11-PRD.md`, branch `slice-11`,
-which starts from `slice-10`). Both are pushed; neither is merged to the engine's `main`.
+which starts from `slice-10`). Both are merged to the engine's `main`, with slices 12 and 13 after them (as of Nov 27).
 Each PRD's status has what was built and checked; Windows, the Apple family and the
 phones are written there and only partly checked (macOS and the iOS Simulator for some).
 
@@ -35,7 +35,7 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR4 | any path the OS takes | used: the player's path limit is gone |
 | KR5 | `IoQueue::stat_file` | used: the player stats a track through the queue |
 | KR6 | `IoRequest::offset` and `length` | used: the player's pieces, the library's tag reads |
-| KR7 | `os_thread_enter_audio_class` | not needed so far: PipeWire's data thread arrives in the realtime class on its own |
+| KR7 | `os_thread_enter_audio_class` | not needed on Linux: PipeWire's data thread arrives in the realtime class on its own. Wanted by slice 5's WASAPI thread |
 | KR8 | `codegen_sources` and the `wrapv` profile | used: `hifi_codec`'s `flac.cc` |
 | KR9 | documented: order is per type | the player's `seq` stays |
 | KR10 | `os_cond_timed_wait` | used by the library; `hifi`'s render thread still naps (`hifi.cc`) |
@@ -58,9 +58,11 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR26 | slice 12: `platform_wait`, `platform_wake`, watched wakers, standing watches | used: the face's loop waits (paused, about 7 to 11 wakeups a second and 0.6% of a core, from 230 and 2.5%); the headless loop waits in `platform_wait` where it slept, so a CLI command is answered in 0.2 ms, not at the next heartbeat; the library's threads `platform_wake` the loop when they have something for it |
 | KR27 | slice 12: `kimb_check` knows a sparse `each`'s `placeholder` | used: `widgets.kim`'s stand-in definition is gone |
 | KR43 | not asked of Korvid before: found in slice 4, milestone 4 | a path typed into the face is refused past 510 bytes, with a line beside the edit |
-| KR44 | not asked of Korvid before: found in slice 4, milestone 6 | the window comes back at its size and not its place; a list comes back at its top |
-| KR45 | not asked of Korvid before: found at slice 4's close | nothing: a present that blocks holds the player's ticks |
-| KR28 to KR42 | not asked of Korvid before: from the skin import note | nothing built: skin import is in no phase |
+| KR44 | in part, by KR42 (engine slice 13): `HostWindow::position`, `move_to`, `display_bounds` | the window's place is slice 5's milestone 0; a place given at open, a scroll box's place and a user directory before the engine are still asked |
+| KR45 | not taken | nothing: a present that blocks holds the player's ticks. Asked again by slice 5 |
+| KR28 to KR37 | Krome's slices 7 and 8: regions, strips, edges, fits, bitmap fonts, masks, computed looks, easing and timers, `dial`, `marquee` (KR36a to KR36c opened) | nothing yet: skin import is in no phase |
+| KR38 | not taken | nothing |
+| KR39 to KR42 | engine slice 13: shaped windows, several at once, placed and moved together | nothing yet, but KR42's place (above, KR44) |
 
 Where Korvid's answer differs from what was asked:
 
