@@ -76,6 +76,8 @@ return kv.steps(function(s)
   local emitted = {}
   local function emit(type_name, fields) s:emit(type_name, fields); emitted[type_name] = true end
   emit("LibraryAddRoot", { path = dir })
+  local aside = hear("LibraryOverridesSetAside", nil, 10) -- the test left a file there that will not parse
+  s:check(aside.root == 1 and #aside.aside > 0 and #aside.reason > 0, "the override file set aside")
   hear("LibraryChanged")
   local finished = hear("LibraryScanFinished", nil, 30)
   s:check(finished.root == 1 and finished.tracks == 24, "the root's scan")

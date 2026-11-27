@@ -17,5 +17,6 @@ def scan-panel {
         dev-field "the slot" "{s_slot}"
         dev-field "index" "{s_index}"
         dev-field "queries" "{s_queries}"
+        dev-field "overrides" "{s_overrides}"
     }
 }

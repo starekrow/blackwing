@@ -163,6 +163,14 @@ void test_script_host(kv::TestCtx& c) {
         KV_CHECK(c, r.dirs());
         io_make_dirs(r.music);
         kvtest::make_library(r.music, 24, 12);
+        // An override file for the root that will not parse, so the walk hears it set aside.
+        {
+            char ovr[2300], d[2300];
+            format(d, sizeof d, "%s/overrides/%s", r.data, r.music[0] == '/' ? r.music + 1 : r.music);
+            io_make_dirs(d);
+            format(ovr, sizeof ovr, "%s/overrides.txt", d);
+            io_write_file(ovr, "this line is not a field\n", 25);
+        }
         char tone[1100], missing[1100], n_events[16], n_tables[16], n_commands[16];
         const char* here = __FILE__;
         const char* slash = strrchr(here, '/');

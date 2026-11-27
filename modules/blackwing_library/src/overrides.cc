@@ -111,10 +111,9 @@ bool override_save(const char* path, const OverrideFile& f) {
     return ok;
 }
 
-void override_set_aside(const char* path, const char* problem) {
-    char aside[kPathMax + 64];
-    format(aside, sizeof aside, "%s.broken-%llu", path, (unsigned long long)(time_now() * 1000.0));
-    io_rename(path, aside);
+void override_set_aside(const char* path, const char* problem, char* aside, usize cap) {
+    format(aside, cap, "%s.broken-%llu", path, (unsigned long long)(time_now() * 1000.0));
+    if (!io_rename(path, aside)) { KV_WARN("library", "%s will not parse (%s), and cannot be set aside: the overrides in it are not used", path, problem); aside[0] = 0; return; }
     KV_WARN("library", "%s will not parse (%s); it is set aside as %s, and the overrides in it are not used", path, problem, aside);
 }
 

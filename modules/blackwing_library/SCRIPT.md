@@ -78,6 +78,7 @@ An empty `value` hides the field; `clear = 1` takes the override away.
 | `LibraryResult` | `id`, `total`, `first`, `count`, `generation` integers, `seconds` number | window `id`'s rows are in `library.rows`: `count` from `first`, of `total` |
 | `LibraryChanged` | `generation` integer | something a query might show has changed. A few times a second at most while a scan runs |
 | `LibraryScanFinished` | `root`, `tracks` integers, `seconds` number | a root's scan is over |
+| `LibraryOverridesSetAside` | `root` integer, `path`, `aside`, `reason` strings | an override file would not parse: renamed to `aside` beside it, and its overrides not used |
 | `LibraryCollected` | `id`, `index`, `total` integers, `path` string | one path of a `LibraryCollect`'s answer: track `index` of `total`, in order, sixty-four a tick at most. Nothing found is one event with a `total` of 0 and no path |
 
 A script receives `LibraryResult` and `LibraryCollected` for its own windows and asks only.
@@ -144,6 +145,7 @@ that shows them treats them as data.
 | `names_per_second`, `tags_per_second` | numbers | over the last second |
 | `slot` | integer, 0 or 1 | something is in the priority slot |
 | `dir` | string | the directory being listed, cut to fit |
+| `set_aside` | integer | override files set aside since start-up |
 
 ## Enums and constants
 

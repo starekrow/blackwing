@@ -25,6 +25,9 @@ void scan_sync(TickContext& ctx, Face& f) {
     face_set(f, "s_index", text);
     format(text, sizeof text, "%llu stopped by a newer one", (unsigned long long)s->cancelled);
     face_set(f, "s_queries", text);
+    if (s->set_aside) format(text, sizeof text, "%u override file%s would not parse and %s set aside: the Events panel has where", s->set_aside, s->set_aside == 1 ? "" : "s", s->set_aside == 1 ? "was" : "were");
+    else              format(text, sizeof text, "none set aside");
+    face_set(f, "s_overrides", text);
 }
 
 } // namespace kv

@@ -24,6 +24,7 @@ inline constexpr FieldDesc k_f_LibraryCollected[] = {KV_FIELDS(LibraryCollected,
 inline constexpr FieldDesc k_f_LibraryResult[] = {KV_FIELDS(LibraryResult, id, total, first, count, generation, seconds)};
 inline constexpr FieldDesc k_f_LibraryChanged[] = {KV_FIELDS(LibraryChanged, generation)};
 inline constexpr FieldDesc k_f_LibraryScanFinished[] = {KV_FIELDS(LibraryScanFinished, root, tracks, seconds)};
+inline constexpr FieldDesc k_f_LibraryOverridesSetAside[] = {KV_FIELDS(LibraryOverridesSetAside, root, path, aside, reason)};
 inline constexpr EventTypeDesc k_library_events[] = {
     KV_EVENT_EX(LibraryAddRoot, k_f_LibraryAddRoot, 0),
     KV_EVENT_EX(LibraryRemoveRoot, k_f_LibraryRemoveRoot, 0),
@@ -37,8 +38,9 @@ inline constexpr EventTypeDesc k_library_events[] = {
     KV_EVENT_EX(LibraryResult, k_f_LibraryResult, 0),
     KV_EVENT_EX(LibraryChanged, k_f_LibraryChanged, 0),
     KV_EVENT_EX(LibraryScanFinished, k_f_LibraryScanFinished, 0),
+    KV_EVENT_EX(LibraryOverridesSetAside, k_f_LibraryOverridesSetAside, 0),
 };
-inline constexpr FieldDesc k_library_scan_fields[] = {KV_FIELDS(LibraryScan, active, rebuilt, walking, generation, tracks, dirs_listed, cancelled, files_found, tags_read, bytes_read, unread, names_per_second, tags_per_second, slot, dir)};
+inline constexpr FieldDesc k_library_scan_fields[] = {KV_FIELDS(LibraryScan, active, rebuilt, walking, generation, tracks, dirs_listed, cancelled, files_found, tags_read, bytes_read, unread, names_per_second, tags_per_second, slot, dir, set_aside)};
 // The resource: described by its fields, never hashed (it follows a disk).
 inline constexpr ResourceDesc k_library_resources[] = {{.name = ".scan", .fields = k_library_scan_fields, .cosmetic = true}};
 

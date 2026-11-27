@@ -151,6 +151,8 @@ struct Shared {
     Array<LibraryCollect> collects;
     // reader -> main: what was collected
     Array<Collected*> collected;
+    // writer -> main: override files set aside
+    Array<LibraryOverridesSetAside*> set_asides;
     // writer -> tagger: tracks to read; the slot's, which goes first, replaced whole
     Array<TagJobs*> jobs;
     TagJobs*        slot_jobs = nullptr;

@@ -158,12 +158,27 @@ const char* root_path_locked(Shared& sh, u32 id, char* out, u32 cap) {
     return out[0] ? out : nullptr;
 }
 
+// An override file that will not parse: set aside, and the main thread told, which says
+// so in LibraryOverridesSetAside and library.scan.
+void set_aside(Shared& sh, u32 root, const char* path, const char* problem) {
+    LibraryOverridesSetAside* m = (LibraryOverridesSetAside*)mem_alloc(sizeof(LibraryOverridesSetAside));
+    new (m) LibraryOverridesSetAside{};
+    m->root = root;
+    format(m->path, sizeof m->path, "%s", path);
+    format(m->reason, sizeof m->reason, "%s", problem);
+    override_set_aside(path, problem, m->aside, sizeof m->aside);
+    os_mutex_lock(&sh.lock);
+    sh.set_asides.push(m);
+    os_mutex_unlock(&sh.lock);
+    tell_main(sh);
+}
+
 // A directory's overrides taken in: its tracks merged again with them, and the file's time
 // noted, so it is not taken in again until it changes. One that will not parse is set aside.
 void take_in_overrides(Shared& sh, Index& ix, u32 root, const char* rel_dir, const char* path, i64 mtime) {
     OverrideFile f;
     char problem[160];
-    if (!override_load(path, &f, problem, sizeof problem)) { override_set_aside(path, problem); f.clear(); }
+    if (!override_load(path, &f, problem, sizeof problem)) { set_aside(sh, root, path, problem); f.clear(); }
     Array<u64> ids;
     ix.tracks_in_dir(root, rel_dir, &ids);
     for (u64 id : ids) {
@@ -219,7 +234,7 @@ void move_overrides(Shared& sh, u32 root, const char* from, const char* to) {
     u32 n = override_values(a, fname, v, 64);
     if (!n) { a.free(); return; }
     OverrideFile b;
-    if (strcmp(fp, tp) != 0 && !override_load(tp, &b, problem, sizeof problem)) { override_set_aside(tp, problem); b.clear(); }
+    if (strcmp(fp, tp) != 0 && !override_load(tp, &b, problem, sizeof problem)) { set_aside(sh, root, tp, problem); b.clear(); }
     OverrideFile& dst = strcmp(fp, tp) == 0 ? a : b;
     // Copied before the source's lines go (they point into it).
     Strings keep;
@@ -315,7 +330,7 @@ void write_thread(void* arg) {
                 override_path(path, sizeof path, sh.data_dir, rp, dir);
                 OverrideFile f;
                 char problem[160];
-                if (!override_load(path, &f, problem, sizeof problem)) { override_set_aside(path, problem); f.clear(); }
+                if (!override_load(path, &f, problem, sizeof problem)) { set_aside(sh, at.root, path, problem); f.clear(); }
                 const char* name = slash ? slash + 1 : at.rel;
                 override_set(f, name, (TagField)m->field, m->value, m->clear);
                 if (!override_save(path, f)) KV_ERROR("library", "the override could not be saved to %s", path);
@@ -1074,9 +1089,19 @@ void from_threads(TickContext& ctx, Library& L, KTable* roots, KTable* rows) {
     L.sh->results.clear();
     for (Collected* c : L.sh->collected) { L.sending.push(c); if (L.collects_out) --L.collects_out; }
     L.sh->collected.clear();
+    Array<LibraryOverridesSetAside*> asides;
+    for (LibraryOverridesSetAside* m : L.sh->set_asides) asides.push(m);
+    L.sh->set_asides.clear();
     L.scan_res.rebuilt = L.sh->rebuilt;
     format(L.scan_res.dir, sizeof L.scan_res.dir, "%s", L.sh->walking_dir);
     os_mutex_unlock(&L.sh->lock);
+
+    for (LibraryOverridesSetAside* m : asides) {
+        ctx.emit(*m);
+        ++L.scan_res.set_aside;
+        mem_free(m);
+    }
+    asides.free();
 
     for (const Note& n : notes) {
         RootInfo* r = nullptr;
@@ -1390,6 +1415,8 @@ void library_shutdown(Engine& e, ModuleInstance&) {
     for (Collected* c : sh.collected) free_collected(c);
     for (Collected* c : L->sending) free_collected(c);
     sh.collects.free(); sh.collected.free(); L->sending.free();
+    for (LibraryOverridesSetAside* m : sh.set_asides) mem_free(m);
+    sh.set_asides.free();
     for (Window& w : L->windows) free_paths(w);
     for (WriteMsg* m : sh.writes) { if (m->tags) { m->tags->free(); mem_free(m->tags); } if (m->slot) { m->slot->tracks.free(); mem_free(m->slot); } }
     for (TagJobs* b : sh.jobs) { b->free(); mem_free(b); }
@@ -1454,7 +1481,7 @@ constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = library_pump,
      .reads = "LibraryAddRoot, LibraryRemoveRoot, LibraryQuery, LibraryClose, LibraryPrioritize, LibraryOverride, LibraryPath, LibraryCollect",
      .writes = ".roots, .rows, .scan",
-     .emits = "LibraryResult, LibraryChanged, LibraryScanFinished, LibraryCollected",
+     .emits = "LibraryResult, LibraryChanged, LibraryScanFinished, LibraryCollected, LibraryOverridesSetAside",
      .main_thread = true, .runs = RunWhen::Always},
 };
 

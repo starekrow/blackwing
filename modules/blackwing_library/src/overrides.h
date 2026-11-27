@@ -35,7 +35,9 @@ bool override_load(const char* path, OverrideFile* out, char* problem, u32 cap);
 // Writes one whole, under a temporary name and renamed, making its directories.
 bool override_save(const char* path, const OverrideFile& f);
 // Puts a file that will not parse aside, under a new name that nothing will write over.
-void override_set_aside(const char* path, const char* problem);
+// Renames a file that will not parse beside itself, with the time in its name; `aside`
+// (cap bytes) is where it went, empty if the rename failed.
+void override_set_aside(const char* path, const char* problem, char* aside, usize cap);
 
 // `field` of `file` is `value` (one value, in place of any it had); or, with `clear`, it
 // has no override at all.

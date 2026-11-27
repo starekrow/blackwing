@@ -37,6 +37,12 @@ constinit LibraryResult g_result[16] = {};
 constinit u32 g_results = 0;            // LibraryResult seen
 void on_finished(TickContext&, Span<const LibraryScanFinished> ev) { for (auto& e : ev) { ++g_finished; g_finished_tracks = e.tracks; } }
 void on_changed(TickContext&, Span<const LibraryChanged> ev) { g_changed += ev.len; }
+constinit u32 g_set_aside = 0;          // LibraryOverridesSetAside seen
+constinit char g_aside[2048] = "";      // the last one's aside, and its reason
+constinit char g_aside_reason[160] = "";
+void on_set_aside(TickContext&, Span<const LibraryOverridesSetAside> ev) {
+    for (auto& e : ev) { ++g_set_aside; format(g_aside, sizeof g_aside, "%s", e.aside); format(g_aside_reason, sizeof g_aside_reason, "%s", e.reason); }
+}
 void on_result(TickContext&, Span<const LibraryResult> ev) { for (auto& e : ev) { if (e.id < 16) g_result[e.id] = e; ++g_results; } }
 // What a LibraryCollect answered with, by the asker's id: the paths in the order they came.
 struct Got { u32 id; u32 index; u32 total; char path[600]; };
@@ -54,6 +60,7 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".collected", KV_ON(LibraryCollected, on_collected), .phase = Phase::PostSim},
     {.name = ".finished", KV_ON(LibraryScanFinished, on_finished), .phase = Phase::PostSim},
     {.name = ".changed",  KV_ON(LibraryChanged, on_changed),       .phase = Phase::PostSim},
+    {.name = ".aside",    KV_ON(LibraryOverridesSetAside, on_set_aside), .phase = Phase::PostSim},
     {.name = ".result",   KV_ON(LibraryResult, on_result),         .phase = Phase::PostSim},
 };
 KV_MODULE_DEFINE(k_listener) = {.name = "listener", .handlers = k_handlers};
@@ -541,6 +548,11 @@ void test_library_overrides(TestCtx& c) {
         io_list_files(d, [](void* u, const char* rel) { if (strstr(rel, "overrides.txt.broken-")) *(bool*)u = true; return true; }, &aside);
     }
     KV_CHECK(c, aside);
+    // And said: an event with where it went and why, and a count in library.scan.
+    KV_CHECK(c, b.until([] { return g_set_aside > 0; }));
+    KV_CHECK(c, strstr(g_aside, "overrides.txt.broken-") && io_is_file(g_aside));
+    KV_CHECK(c, g_aside_reason[0] != 0);
+    KV_CHECK(c, b.scan().set_aside >= 1);
     b.stop();
     bytes_before.free();
     io_remove_tree(tmp);

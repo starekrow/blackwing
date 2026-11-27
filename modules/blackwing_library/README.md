@@ -235,12 +235,13 @@ Header `korvid/blackwing_library/library.h`:
 | `LibraryResult { id, total, first, count, generation, seconds }` | event out | the window's rows are in `library.rows`; how long the index took |
 | `LibraryChanged { generation }` | event out | the index has moved on |
 | `LibraryScanFinished { root, tracks, seconds }` | event out | a root's scan is over: walked (in `seconds`) and every track read |
+| `LibraryOverridesSetAside { root, path, aside, reason }` | event out | an override file would not parse: renamed to `aside`, its overrides not used |
 | `LibraryView` | enum | `Folders`, `Tracks`, `Search`, `Artists`, `Albums`, `AlbumTracks`, `Genres`, `Paths` |
 | `LibrarySort` | enum | `Default`, `Title`, `Artist`, `Album`, `Date`, `Path` |
 | `LibraryRoot` | component | a row of `library.roots`: `id`, `state`, `dirs`, `tracks`, `failed`, `unread`, `path`, `reason` |
 | `LibraryRootState` | enum | `Walking`, `Reading`, `Idle`, `Offline` |
 | `LibraryRow` | component | a row of `library.rows`: `query`, `index`, `id`, `kind` (directory, track, artist, album, genre), names, numbers, `count`, `albums`, `date`, `path`, `reason` |
-| `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `cancelled`, `names_per_second`, `tags_per_second`, `slot`, `dir` |
+| `LibraryScan` | resource | `library.scan`: `active`, `rebuilt`, `walking`, `generation`, `tracks`, counts, `tags_read`, `unread`, `cancelled`, `names_per_second`, `tags_per_second`, `slot`, `dir`, `set_aside` |
 | `kLibraryMaxWindow`, `kLibraryMaxRows`, `kLibraryMaxCollect`, `kLibraryPathMax` | constants | 512 rows a window, 4096 in all; 65536 paths a collect; a path's 4096 bytes |
 | `LibraryConfig`, `library_configure` | record, function | `data_dir`, `quiet_seconds` (1), `offline_seconds` (60), `poll_seconds` (60), `poll_roots`; before `engine_init` |
 | `library_scan(e)` | function | the resource, for code outside the schedule |

@@ -126,6 +126,10 @@ struct LibraryScanFinished { u32 root; u32 tracks; f64 seconds; };
 // takes. They come in order, and the last has index total - 1. Nothing found is one event
 // with a total of 0 and no path.
 struct LibraryCollected { u32 id; u32 index; u32 total; char path[kLibraryPathMax]; };
+// An override file would not parse, so it was set aside (renamed to `aside`, beside it)
+// and the overrides in it are not used. The user's corrections are not lost: they are in
+// `aside`, for a person to mend. `reason` says what was wrong, in words.
+struct LibraryOverridesSetAside { u32 root; char path[kLibraryPathMax]; char aside[kLibraryPathMax]; char reason[160]; };
 
 // ---- state: what anyone may read ---------------------------------------------------------------
 
@@ -199,7 +203,8 @@ struct LibraryScan {
     f64  names_per_second = 0.0; // files the walk found, a second, over the last second
     f64  tags_per_second  = 0.0; // tracks read, a second, over the last second
     u8   slot        = 0;  // something is in the priority slot
-    u8   pad2[7]     = {};
+    u8   pad2[3]     = {};
+    u32  set_aside   = 0;  // override files that would not parse, set aside since start-up (LibraryOverridesSetAside)
     char dir[256]    = ""; // the directory being listed (within its root), cut to fit
 };
 
