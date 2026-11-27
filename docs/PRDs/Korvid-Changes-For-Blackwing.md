@@ -38,7 +38,7 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR7 | `os_thread_enter_audio_class` | not needed on Linux: PipeWire's data thread arrives in the realtime class on its own. Wanted by slice 5's WASAPI thread |
 | KR8 | `codegen_sources` and the `wrapv` profile | used: `hifi_codec`'s `flac.cc` |
 | KR9 | documented: order is per type | the player's `seq` stays |
-| KR10 | `os_cond_timed_wait` | used by the library; `hifi`'s render thread still naps (`hifi.cc`) |
+| KR10 | `os_cond_timed_wait` | used by the library, and by `hifi`'s render thread (slice 5, milestone 0): its waits end at once for a command, a play or `hifi_wake` |
 | KR11 | `io_list_dir` | used: the library's walk and its watcher |
 | KR12 | `io_path_is_remote`; a watcher made with `Auto` polls a share's root, and `add_root(dir, Poll)` | used: the library's watcher polls by root |
 | KR13 | `IoStat::volume` | used: the library's walk |

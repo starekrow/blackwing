@@ -804,6 +804,7 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
         }
     }
     // Pieces.
+    bool arrived = false; // a piece of a file hifi has came in: a decoder may be waiting for it
     for (u32 k = 0; k < p.nreads;) {
         PieceRead r = p.reads[k];
         IoCompletion done;
@@ -819,6 +820,7 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
             it.piece[r.piece] = Piece::There;
             it.touched[r.piece] = p.tick;
             it.bytes_there += len;
+            if (it.lends) arrived = true;
         } else if (done.status == IoStatus::Cancelled) {
             it.piece[r.piece] = Piece::Absent;
             p.committed -= piece_commit(p, it, r.piece);
@@ -837,6 +839,7 @@ void from_io(TickContext& ctx, Player& p, KTable* queue) {
         }
         done.bytes.free();
     }
+    if (arrived) hifi_wake(p.hifi);
 }
 
 // The piece below which the item playing has been heard, less a margin: what is behind

@@ -147,6 +147,7 @@ struct Hifi {
     // ---- caller <-> render, under `lock` ----
     OsMutex lock;
     OsCond  wake;
+    bool    woken = false; // hifi_play or hifi_wake since the render thread last napped (under lock)
     Fifo<Cmd, kMaxPending>  cmds;
     Fifo<Note, kMaxPending> notes;
     HifiDevice*      device = nullptr; // opened and closed by the render thread, under the lock
@@ -1086,11 +1087,14 @@ bool take_commands(Hifi& h) {
     }
 }
 
-bool has_commands(Hifi& h) {
+// Waits up to `seconds`, or until a command comes or the caller wakes the thread
+// (hifi_play, hifi_wake): whichever is first. A wake sent before this took the lock is
+// seen in `woken`, so none is lost.
+void nap(Hifi& h, f64 seconds) {
     os_mutex_lock(&h.lock);
-    bool any = h.cmds.count != 0;
+    if (h.cmds.count == 0 && !h.woken) os_cond_timed_wait(&h.wake, &h.lock, seconds);
+    h.woken = false;
     os_mutex_unlock(&h.lock);
-    return any;
 }
 
 // Lets a held device go on, unless it is held for a pause.
@@ -1261,16 +1265,14 @@ void render_thread(void* arg) {
         atomic_add_fetch(&h.readers, (u64)1, MO_SEQ_CST);
         if (wait < -1.5) break;
         if (wait >= 0.0) h.playout_waits = 0;
-        if (wait > 0.0) { time_sleep(wait); continue; }
+        if (wait > 0.0) { nap(h, wait); continue; }
         if (wait < 0.0) {
             // Nothing to do until the caller says something, once the device is held.
             if (!try_hold(h)) {
-                // Still playing out: look again shortly, sooner if a command comes. Korvid
-                // has no timed wait on a condition, so this is short sleeps for as long
-                // as the play-out lasts (at most the lead). Past six seconds the device
-                // has stopped calling back on its own (a daemon gone), and the naps grow.
-                f64 nap = ++h.playout_waits < 300 ? 0.002 : 0.05;
-                for (u32 i = 0; i < 10 && !has_commands(h); ++i) time_sleep(nap);
+                // Still playing out: look again shortly, at once if a command comes. Past
+                // six seconds the device has stopped calling back on its own (a daemon
+                // gone), and the looks grow apart.
+                nap(h, ++h.playout_waits < 300 ? 0.02 : 0.5);
                 continue;
             }
             os_mutex_lock(&h.lock);
@@ -1341,7 +1343,15 @@ void hifi_play(Hifi* h) {
     os_mutex_lock(&h->lock);
     atomic_store(&h->want_pause, 0u, MO_RELEASE);
     if (h->held) { hifi_device_hold(h->device, false); h->held = false; } // at once, not when the render thread wakes
+    h->woken = true;
     os_cond_signal(&h->wake); // the render thread may be waiting on a full lead
+    os_mutex_unlock(&h->lock);
+}
+
+void hifi_wake(Hifi* h) {
+    os_mutex_lock(&h->lock);
+    h->woken = true;
+    os_cond_signal(&h->wake);
     os_mutex_unlock(&h->lock);
 }
 

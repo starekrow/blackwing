@@ -23,7 +23,8 @@
 // reports where the decoder is. modules/hifi/README.md has the whole model.
 //
 // hifi does no I/O. A source is a sparse span its caller fills; when a decoder needs bytes
-// that are not there yet, hifi says so with a Want, and looks again shortly.
+// that are not there yet, hifi says so with a Want, and looks again when told
+// (hifi_wake) or shortly.
 #pragma once
 #include "korvid/hifi/stage.h"
 #include "korvid/hifi_codec/decoder.h"
@@ -138,6 +139,10 @@ void hifi_replace_after(Hifi* h, u64 id, const HifiSource* sources, u32 n);
 // decode ends there, Damaged with `reason`, or it Fails if it had not opened yet. What
 // was decoded before plays.
 void hifi_starve(Hifi* h, u64 id, const char* reason);
+// Bytes a source may have been waiting for have arrived: the render thread looks again
+// now rather than at its next nap. Cheap, and harmless when nothing was waiting. Not for
+// a realtime thread.
+void hifi_wake(Hifi* h);
 
 // Sets a parameter of the chain's stage `stage`, by index. What is heard changes by a
 // recut: a new render of the same music from the next frame the callback takes, run

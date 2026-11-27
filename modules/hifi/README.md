@@ -112,7 +112,7 @@ it was given: everything up to the pause, or all of the lead, followed by the de
 delay's worth of silence. A held device stops calling back, so a paused player wakes no
 thread of its own. `hifi_play` lets it go at once, on the caller's thread; something to
 play lets it go on the render thread. Until it can hold, the render thread looks every
-2 ms (Korvid has no timed wait on a condition), and every 50 ms after six seconds, for a
+20 ms, at once when a command comes, and every half second after six seconds, for a
 device that has stopped calling back on its own.
 
 **The callback** copies frames from the ring to the device. That is all it does in normal
@@ -220,6 +220,7 @@ Header `korvid/hifi/stage.h`: `StageDesc` (`name`, `memory_bytes`, `params`, `pr
 `StagePreset` (`name`, a value for every parameter), `kHifiMaxStages` (4),
 `kHifiMaxParams` (48).
 | `hifi_starve(h, id, reason)` | function | a source's bytes will not come |
+| `hifi_wake(h)` | function | bytes a source may wait for have come: look again now |
 | `hifi_read_fence(h)`, `hifi_read_passed(h, fence)` | functions | when a piece given back is no longer read |
 | `hifi_poll(h, out, cap)`, `hifi_status(h, out)` | functions | events since last time; where things stand |
 
@@ -237,8 +238,9 @@ and publish what it says.
   frames.
 - **A want is said once per range.** The caller keeps it until the range is there; the
   same range is not asked for again.
-- **A waiting decoder is looked at every 2 ms**, for want of a timed wait on a condition
-  (KR10): a source whose bytes are slow costs wakeups while it waits.
+- **A waiting decoder is looked at when its bytes may have come**: the caller says so
+  with `hifi_wake`, and otherwise the render thread looks every 2 ms. A command, a play
+  or a wake ends any of the render thread's waits at once.
 - **`Started` and `Ended` are only as timely as `hifi_poll` is called.** `heard`,
   `source` and `position` in the status are as of the last poll.
 - **Exact means untouched.** With no pause, flush or underrun, every frame that reaches
@@ -250,8 +252,8 @@ and publish what it says.
   lead). It is always kept.
 - **A recut changes what is heard within a callback or two**: through PipeWire at 44.1
   kHz, 2 to 13 ms from the change reaching the path to the join's first frame leaving
-  the callback. What is left is the render thread's nap when the lead is full (5 ms at
-  most) and the callback's period. The tick before the change reaches the path, and the
+  the callback. What is left is the callback's period: a full lead's wait ends when the
+  change arrives (KR10). The numbers are slice 2's, from before that. The tick before the change reaches the path, and the
   device after the callback, are not in it.
 - **A recut is exact when the chain has no history.** A gain has none. An IIR stage
   (the equalizer, milestone 5) is settled by its run-in but never forgets entirely, so a
