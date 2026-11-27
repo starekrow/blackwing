@@ -454,7 +454,7 @@ Slices, as a proposal; each gets its own PRD when it starts.
    describe themselves, `PlayerCue`).
    *Done when* everything in slices 1 to 3 can be driven and watched from it, and from a
    Lua script with no face at all, and it starts as it was left.
-5. **The system** ([Blackwing-Slice-5-PRD.md](Blackwing-Slice-5-PRD.md), a draft). `media_platform`; the Windows and macOS backends of both platform
+5. **The system** ([Blackwing-Slice-5-PRD.md](Blackwing-Slice-5-PRD.md)). `media_platform`; the Windows and macOS backends of both platform
    modules; hot-plug.
    *Done when* the media keys and the OS's now-playing surface work on all three, and
    pulling the DAC pauses.
