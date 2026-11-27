@@ -92,8 +92,12 @@ both; seen again, it asks again.
 ([blackwing_session](../blackwing_session/README.md)); this face is `ui_dev` and asks for
 the window's size, the tab that is up, the library's sort and search, and the way to
 where its list is, each when it is not what it last asked. At the next start it takes
-them back from `SessionKept` before its screen is built. Where the window was and how
-far a list was scrolled are not kept: the engine cannot say or set either (KR44).
+them back from `SessionKept` before its screen is built. Where the window was is kept
+too, where the platform lets a program place a window (KR42: not on Wayland, where the
+place last kept is left as it was): it is put back once the window is up, and if it lands
+with less than 64 pixels each way of it in its display's work area, or its top above it,
+it is moved into the work area. How far a list was scrolled is not kept: the engine
+cannot set it (KR44).
 
 **The chain's controls are written from the tables.** `chain.cc` writes the definition
 `chain-stages` as markup from `player.params` and `player.presets`, compiles it

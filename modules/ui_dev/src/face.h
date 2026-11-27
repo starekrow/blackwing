@@ -106,6 +106,12 @@ struct Face {
     // each); and a tab to put up, from what was kept, once the screen is built.
     u64     kept_sent[8] = {};
     char    tab_restore[16] = "";
+    // The window's place, as the session said it (KR42): put back once the window is up,
+    // then looked at to see it landed where it can be seen.
+    enum class Place : u8 { None, Asked, Moved } place = Place::None;
+    u8      place_have = 0;    // 1: x said, 2: y said
+    f64     place_asked = 0.0; // when the move was asked for (time_now)
+    i32     place_x = 0, place_y = 0;
     // Chain: what its stages' definition was written from; the parameter being dragged.
     u64     chain_sig = 0;
     bool    chain_drag = false;
