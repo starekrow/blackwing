@@ -43,8 +43,8 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR12 | `io_path_is_remote`; a watcher made with `Auto` polls a share's root, and `add_root(dir, Poll)` | used: the library's watcher polls by root |
 | KR13 | `IoStat::volume` | used: the library's walk |
 | KR14 | `.c` sources, with a toolchain's `cc` | used: `blackwing_library/src/sqlite.c` |
-| KR15 | `io_make_dirs` and `io_remove_tree` take any length | nothing to change but the corpus test's `mkdir`, which may go |
-| KR16 | a recursive watch neither follows nor reports a link to a directory | the library's filter of paths through a link (`watch.cc`, `Links`) may go |
+| KR15 | `io_make_dirs` and `io_remove_tree` take any length | used: the corpus's long path is made in one call (slice 5, milestone 0). On Apple the OS's limit is 1,024 bytes, which the corpus's path passes |
+| KR16 | a recursive watch neither follows nor reports a link to a directory | used: the library's filter of paths through a link is gone (slice 5, milestone 0) |
 | KR17 | `ResourceDesc::cosmetic` | used: `player.transport`, `player.output` and `library.scan` have field tables (`schema.h`, slice 4 milestone 1) |
 | KR18 | `script_push_events`, `EventTypeDesc::defaults`, `script_push_resource` | used: `blackwing_script` is built on all three (slice 4, milestone 5) |
 | KR19 | `engine_add_event_type`, `engine_add_ktable`, their removal, `engine_listen` | `engine_listen` used by the script host's walk, to count every event type with no handler written; the rest not yet: B33 |
@@ -52,7 +52,7 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR21 | `WindowVisibility`, `HostWindow::visible()`; no frame drawn for a hidden window | used: `ui_dev` sleeps on it; minimized under X11, 599 ticks and no frame in ten seconds. A window minimized by hand on Wayland is not checked |
 | KR22 | `each row in rows height=24 count=@total from=@first -> view`, a `placeholder` block, `KromeView` | used: `ui_dev`'s Queue panel (slice 4, milestone 2). The check does not know `placeholder` (KR27) |
 | KR23 | `engine_set_event_hook`, dev builds | used: `ui_dev`'s Events panel keeps what the hook is handed (slice 4, milestone 4) |
-| KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | used in part: the session is a file of its own in the settings directory (slice 4, milestone 6). The store is not used yet: a session is not a setting. The index has not moved to the cache directory |
+| KR24 | `platform_user_dir` (settings, data, cache), and `platform_settings`, a store in `settings.json` | used in part: the session is a file of its own in the settings directory (slice 4, milestone 6). The store is not used yet: a session is not a setting; slice 5's two settings will be its first. The index is in the cache directory (slice 5, milestone 0) |
 | KR25 | `image/jpeg.h`: baseline, progressive, scaled, EXIF, fuzzed | not yet: BL25 and slice 6 |
 
 | KR26 | slice 12: `platform_wait`, `platform_wake`, watched wakers, standing watches | used: the face's loop waits (paused, about 7 to 11 wakeups a second and 0.6% of a core, from 230 and 2.5%); the headless loop waits in `platform_wait` where it slept, so a CLI command is answered in 0.2 ms, not at the next heartbeat; the library's threads `platform_wake` the loop when they have something for it |

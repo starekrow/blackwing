@@ -17,6 +17,7 @@ plans in `PRDs/`, dated design records in `design/`, a page per module beside it
 | [design/slice-2-notes.md](design/slice-2-notes.md) | what building slice 2 found, with the numbers |
 | [design/slice-3-notes.md](design/slice-3-notes.md) | what building slice 3 found, with the numbers |
 | [design/slice-4-notes.md](design/slice-4-notes.md) | what building slice 4 found, with the numbers, and what of its close is still owed |
+| [design/slice-5-notes.md](design/slice-5-notes.md) | what building slice 5 found, with the numbers |
 | [design/script-module-requirements-2026-11-23.md](design/script-module-requirements-2026-11-23.md) | what the script-module spec has to settle, and the decisions it starts from |
 | [design/skin-import-2026-11-23.md](design/skin-import-2026-11-23.md) | importing other players' skins (`.wal`, `.wmz`, `.vlt`, `.xmpskin`) by converting them, and what that asks of Krome |
 | [specs/script-modules.md](specs/script-modules.md) | draft: the script-module spec's spine, linking to a `SCRIPT.md` beside each module with a surface. Its bus surface is built (slice 4) |
