@@ -5,7 +5,7 @@ It is built first, and it is how the rest is developed. It reads their tables an
 their commands, and calls no function of either.
 
 **Status:** built in slice 4. Every panel is in: Transport, Library, Queue and Output,
-and in tabs under Output, Chain, Scan, Events and Tables; its part of the session; the
+and in tabs under Output, Chain, Scan, Events, Tables and (slice 5) Media; its part of the session; the
 keyboard. Owed: the queue reordered by dragging, and the
 [slice's](../../docs/PRDs/Blackwing-Slice-4-PRD.md) runs on real disks and a real
 device.
@@ -45,11 +45,12 @@ is where the user is: what a list has in view, which slider is held.
 | Transport | `transport.cc` | the state, the row and its file's name, position and length in the device's time, a seek on its way | play, pause, stop, next, previous, ten seconds back and on, and the bar: a press or a drag is a `PlayerSeek` each time it moves |
 | Library | `library.cc` | the roots with their states and counts, and why one is offline; the list of whichever view is open, each row with what is missing, offline or unreadable | add and remove a root; folders, artists, albums, genres, every track, a search; sort; open a row, queue it, play it; edit a track's field |
 | Queue | `queue.cc` | every row in the list's order: place, the library's title for it (else its file's name), state, format, bytes held, reason | play a row now, remove it, move it up or down, clear, add a path typed in |
-| Output | `output.cc` | the device, its format, the lead, underruns, the last recut and jump; exact, and why not | |
+| Output | `output.cc` | the device, its format, the lead, underruns, the last recut and jump; exact, and why not; what is chosen (the default followed, a device standing in, one lost, why none is open); every device in `player.devices` with its backend and whether it is playing, the default, chosen or gone | use a device (`PlayerSelectDevice` by its name), follow the default |
 | Chain | `chain.cc` | each stage and whether it is flat; every parameter with the value heard | a slider a parameter, a switch for one that is 0 or 1, a button a preset |
 | Scan | `scan.cc` | what is being walked and read, the rates, the slot, what is unread, the index and whether it was made again | |
 | Events | `events.cc` | every command and notification of the two modules as it is delivered, with its fields and who emitted it, newest last | hold, clear, a filter |
-| Tables | `tables.cc` | any table or resource of the two modules, by name: its rows and fields from its own description | pick one |
+| Tables | `tables.cc` | any table or resource of the two modules (and `media.status`), by name: its rows and fields from its own description | pick one |
+| Media | `media.cc` | `media.status`: the name owned, what the OS is shown and its art, keep-awake and how, whether sleep is heard, the commands and reads from the OS; why there is no surface | |
 
 **The position** is written every tick, as what would be shown: the readout's text
 changes once a second and the bar's value once a pixel of its width, and the writer

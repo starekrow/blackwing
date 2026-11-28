@@ -10,6 +10,7 @@
 #include "korvid/blackwing_library/module.h"
 #include "korvid/blackwing_player/module.h"
 #include "korvid/blackwing_session/module.h"
+#include "korvid/blackwing_media/module.h"
 #include "korvid/blackwing_session/session.h"
 #include "korvid/blackwing_library/schema.h"
 #include "korvid/blackwing_player/schema.h"
@@ -129,7 +130,7 @@ u32 player_commands(Engine& e) {
 
 // The same face over the player itself, playing into a capture device on the wall clock.
 const ModuleDesc* const k_real[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &blackwing_player_module,
-                                    &blackwing_library_module, &blackwing_glue_module, &blackwing_session_module, &ui_dev_module};
+                                    &blackwing_library_module, &blackwing_glue_module, &blackwing_session_module, &blackwing_media_module, &ui_dev_module};
 
 // Frames, a few milliseconds apart, until a model key shows `want` (or has it in it), or
 // `seconds` pass.
@@ -163,7 +164,7 @@ u64 asked_parent(const StandinCommand* q) { return q->d & 0x00FFFFFFFFFFFFFFull;
 LibrarySort asked_sort(const StandinCommand* q) { return (LibrarySort)(u8)(q->d >> 56); }
 
 const ModuleDesc* const k_list[] = {&platform_module, &platform_hid_module, &cli_module, &asset_module, &krome_module, &standin_player_module,
-                                    &standin_library_module, &blackwing_session_module, &ui_dev_module};
+                                    &standin_library_module, &blackwing_session_module, &blackwing_media_module, &ui_dev_module}; // media off: it says so
 
 // A chain of two stages for the stand-in: a gain with a level and a switch, an equalizer's
 // first band, and two presets.
@@ -843,6 +844,27 @@ void test_face(kv::TestCtx& c) {
         format(it->reason, sizeof it->reason, "its header says 9 channels");
         standin_item(e, 2, "/music/a/02 two.flac");
         p.transport.queued = 2;
+        // Output: the devices there are, and a choice of one, or of the default followed.
+        standin_device(e, "alsa_output.usb-dac", "USB DAC", true, true, true);
+        standin_device(e, "alsa_output.hdmi", "HDMI", false, true, false);
+        standin_device(e, "bluez_output.headset", "Headset", false, false, false);
+        format(p.output.chosen, sizeof p.output.chosen, "default");
+        p.output.following = 1;
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "o_ndev", "3") && on_screen(e, "USB DAC") == 1 && on_screen(e, "Headset") == 1 && on_screen(e, "following the default") == 1);
+        KV_CHECK(c, on_screen(e, "playing default ") == 1 && on_screen(e, "gone") == 1);
+        KV_CHECK(c, krome_press(e, scn, "od_1"));
+        frames(e, 3);
+        const StandinCommand* chose = standin_last(e, "PlayerSelectDevice");
+        KV_CHECK(c, chose && strcmp(chose->text, "alsa_output.hdmi") == 0);
+        KV_CHECK(c, krome_press(e, scn, "o_follow"));
+        frames(e, 3);
+        chose = standin_last(e, "PlayerSelectDevice");
+        KV_CHECK(c, chose && strcmp(chose->text, "default") == 0 && standin_count(e, "PlayerSelectDevice") == 2);
+        // Media: with the module off, the panel says why.
+        KV_CHECK(c, krome_press(e, scn, "tab_media"));
+        frames(e, 4);
+        KV_CHECK(c, shows(e, "m_summary", "no surface") && shows(e, "m_why", "not asked for in this run"));
         KV_CHECK(c, krome_press(e, scn, "tab_tables"));
         frames(e, 5);
         KV_CHECK(c, on_screen(e, "player.transport") >= 1 && on_screen(e, "library.rows") == 1 && strstr(krome_model_text(e, scn, "x_summary"), "player.transport: 11 fields"));

@@ -31,8 +31,8 @@ constexpr const char* kShellFile = "ui_dev/shell.kimb";
 constexpr const char* kShellScreen = "shell";
 constexpr const char* kFallback = "ui_dev/failed";
 // The panels, by the name of their files (ui_dev/<name>.kim, .lua) and of their
-// definition (<name>-panel). The shell names the same eight.
-constinit const char* const k_panels[] = {"transport", "library", "queue", "output", "chain", "scan", "events", "tables"};
+// definition (<name>-panel). The shell names the same nine.
+constinit const char* const k_panels[] = {"transport", "library", "queue", "output", "chain", "scan", "events", "tables", "media"};
 constexpr u32 kPanels = KV_COUNTOF(k_panels);
 // A command's answer is a tick or two away: the face asks for this many ticks after it
 // emits one, so the answer is not left waiting for the loop's next heartbeat.
@@ -148,7 +148,7 @@ void on_event(TickContext& ctx, Span<const KromeEvent> events) {
     if (f.screen.is_null()) return;
     for (const KromeEvent& ev : events) {
         if (ev.screen != f.screen.hash) continue;
-        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || chain_event(ctx, f, ev) || library_event(ctx, f, ev) || events_event(ctx, f, ev) ||
+        if (transport_event(ctx, f, ev) || queue_event(ctx, f, ev) || output_event(ctx, f, ev) || chain_event(ctx, f, ev) || library_event(ctx, f, ev) || events_event(ctx, f, ev) ||
             tables_event(ctx, f, ev)) {
             ++f.stats.commands;
             f.awake = kAwakeTicks;
@@ -250,12 +250,13 @@ void ui_dev_sync(TickContext& ctx) {
     }
     // Which inspector is up: the model's own, since the tabs write it themselves.
     const char* tab = krome_model_text(e, f.screen, "r_tab");
-    f.tab = !strcmp(tab, "scan") ? FaceTab::Scan : !strcmp(tab, "events") ? FaceTab::Events : !strcmp(tab, "tables") ? FaceTab::Tables : FaceTab::Chain;
+    f.tab = !strcmp(tab, "scan") ? FaceTab::Scan : !strcmp(tab, "events") ? FaceTab::Events : !strcmp(tab, "tables") ? FaceTab::Tables : !strcmp(tab, "media") ? FaceTab::Media : FaceTab::Chain;
     titles_sync(ctx, f);
     transport_sync(ctx, f);
     library_sync(ctx, f);
     queue_sync(ctx, f);
     output_sync(ctx, f);
+    media_sync(ctx, f);
     chain_sync(ctx, f);
     scan_sync(ctx, f);
     events_sync(ctx, f);
@@ -335,7 +336,7 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".events", KV_ON(KromeEvent, on_event), .phase = Phase::PreSim,
      .reads = "^player.queue, ^player.params, ^library.rows", // as the phase found them: what the screen was showing
      .emits = "PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit, PlayerEnqueue, "
-              "LibraryAddRoot, LibraryRemoveRoot, LibraryOverride, LibraryCollect"},
+              "PlayerSelectDevice, LibraryAddRoot, LibraryRemoveRoot, LibraryOverride, LibraryCollect"},
     {.name = ".view", KV_ON(KromeView, on_view), .phase = Phase::PreSim},
     {.name = ".visibility", KV_ON(WindowVisibility, on_visibility), .phase = Phase::PreSim, .emits = "LibraryClose"},
     {.name = ".result", KV_ON(LibraryResult, on_result), .phase = Phase::PostSim, .before = ".sync"},
@@ -344,7 +345,7 @@ constinit const HandlerDesc k_handlers[] = {
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync,
-     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets, player.devices, library.roots, library.rows, library.scan",
+     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets, player.devices, library.roots, library.rows, library.scan, media.status",
      .emits = "LibraryQuery, LibraryPrioritize, LibraryPath, PlayerPlay, SessionKeep", .main_thread = true, .runs = RunWhen::Always},
     {.name = ".frame", .phase = Phase::Frame, .fn = ui_dev_frame, .main_thread = true},
 };

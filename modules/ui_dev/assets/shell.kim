@@ -12,6 +12,7 @@ use "ui_dev/chain"
 use "ui_dev/scan"
 use "ui_dev/events"
 use "ui_dev/tables"
+use "ui_dev/media"
 script "ui_dev/shell.lua"
 script "ui_dev/transport.lua"
 script "ui_dev/library.lua"
@@ -21,6 +22,7 @@ script "ui_dev/chain.lua"
 script "ui_dev/scan.lua"
 script "ui_dev/events.lua"
 script "ui_dev/tables.lua"
+script "ui_dev/media.lua"
 
 screen shell {
     col [page] w=fill h=fill pad=8 gap=8 {
@@ -39,6 +41,7 @@ screen shell {
                     tab "Scan" id=tab_scan @r_tab=scan
                     tab "Events" id=tab_events @r_tab=events
                     tab "Tables" id=tab_tables @r_tab=tables
+                    tab "Media" id=tab_media @r_tab=media
                 }
                 if r_tab=chain {
                     chain-panel
@@ -51,6 +54,9 @@ screen shell {
                 }
                 if r_tab=tables {
                     tables-panel
+                }
+                if r_tab=media {
+                    media-panel
                 }
             }
         }

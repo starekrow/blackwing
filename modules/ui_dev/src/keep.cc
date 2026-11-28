@@ -81,7 +81,7 @@ void place_window(Face& f, HostWindow* w) {
     w->move_to((i32)nx, (i32)ny);
 }
 
-const char* tab_name(FaceTab t) { return t == FaceTab::Scan ? "scan" : t == FaceTab::Events ? "events" : t == FaceTab::Tables ? "tables" : "chain"; }
+const char* tab_name(FaceTab t) { return t == FaceTab::Scan ? "scan" : t == FaceTab::Events ? "events" : t == FaceTab::Tables ? "tables" : t == FaceTab::Media ? "media" : "chain"; }
 
 } // namespace
 

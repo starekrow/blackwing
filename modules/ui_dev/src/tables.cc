@@ -23,6 +23,7 @@ struct TableName { const char* name; bool resource; };
 constinit const TableName k_tables[] = {
     {"player.transport", true}, {"player.output", true}, {"player.queue", false}, {"player.chain", false}, {"player.params", false},
     {"player.presets", false}, {"player.devices", false}, {"library.scan", true}, {"library.roots", false}, {"library.rows", false},
+    {"media.status", true},
 };
 constexpr u32 kTables = KV_COUNTOF(k_tables);
 constexpr u32 kTableLines = 256; // lines handed over at once, at most

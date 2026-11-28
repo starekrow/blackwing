@@ -37,6 +37,7 @@ void standin_take(TickContext& ctx) {
     for (const PlayerCue& e : ctx.received<PlayerCue>()) put(s, "PlayerCue", e.item, e.frame, (f64)e.rate);
     for (const PlayerSetParam& e : ctx.received<PlayerSetParam>()) put(s, "PlayerSetParam", e.stage, e.param, e.value);
     for (const PlayerApplyPreset& e : ctx.received<PlayerApplyPreset>()) put(s, "PlayerApplyPreset", e.stage, e.preset);
+    for (const PlayerSelectDevice& e : ctx.received<PlayerSelectDevice>()) put(s, "PlayerSelectDevice", 0, 0, 0.0, e.name);
 }
 
 bool standin_startup(Engine& e, ModuleInstance& self) {
@@ -56,7 +57,7 @@ constinit const KTableDesc k_standin_ktables[] = {
 };
 constinit const SystemDesc k_standin_systems[] = {
     {.name = ".take", .phase = Phase::PreSim, .fn = standin_take,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit, PlayerSelectDevice",
      .writes = ".queue, .chain, .params, .presets, .devices, .transport, .output", .main_thread = true, .runs = RunWhen::Always},
 };
 
@@ -184,6 +185,20 @@ void standin_remove(Engine& e, u64 id) {
     KTable* q = engine_ktable(e, g_standin_queue);
     Span<PlayerItem> rows = q->rows_of<PlayerItem>();
     for (u32 i = 0; i < rows.len; ++i) if (q->is_alive(i) && rows[i].id == id) { q->destroy(q->handle_at(i)); return; }
+}
+
+PlayerDevice* standin_device(Engine& e, const char* name, const char* label, bool is_default, bool present, bool open) {
+    KTable* t = engine_ktable(e, g_standin_devices);
+    PlayerDevice r{};
+    format(r.name, sizeof r.name, "%s", name);
+    format(r.label, sizeof r.label, "%s", label);
+    format(r.backend, sizeof r.backend, "pipewire");
+    r.is_default = is_default;
+    r.present = present;
+    r.open = open;
+    r.shared = 1;
+    Handle h = t->spawn(r);
+    return h.is_null() ? nullptr : &t->rows_of<PlayerDevice>()[h.index()];
 }
 
 PlayerStage* standin_stage(Engine& e, u32 index, const char* name) {

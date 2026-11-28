@@ -1,5 +1,6 @@
 // The Output panel: the device and the lead, as player.output has them, and why what
-// reaches the device is not the file's own samples when it is not.
+// reaches the device is not the file's own samples when it is not; the devices there are,
+// and a choice of one (player.devices, PlayerSelectDevice).
 
 use "krome/std"
 use "ui_dev/widgets"
@@ -17,5 +18,26 @@ def output-panel {
         dev-field "files held" "{o_held}"
         dev-field "last recut" "{o_recut}"
         dev-field "last jump" "{o_jump}"
+        row gap=8 middle w=fill {
+            text "Devices" [dev-head]
+            text "{o_chosen}" id=o_chosen [dev-value]
+            spacer
+            dev-btn "Follow the default" id=o_follow -> o_follow
+        }
+        col id=o_devlist w=fill h=110 scroll [list] {
+            each dev in o_devices height=22 count=@o_ndev from=0 -> o_dev_view {
+                row [dev-row] middle {
+                    dev-text "{dev.label}" w=fill color=@dev.ink
+                    dev-text "{dev.backend}" w=64
+                    dev-text "{dev.flags}" w=120
+                    hit [dev-btn] id="od_{dev.k}" -> o_use { text "use" size=11 }
+                }
+                placeholder {
+                    row [dev-row] middle {
+                        text "..." [dev-cell] color=muted
+                    }
+                }
+            }
+        }
     }
 }

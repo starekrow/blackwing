@@ -30,6 +30,8 @@ PlayerItem*  standin_item(Engine& e, u32 pos, const char* path, PlayerItemState 
 PlayerItem*  standin_find(Engine& e, u64 id);
 void         standin_remove(Engine& e, u64 id);
 PlayerStage* standin_stage(Engine& e, u32 index, const char* name);
+// A row of player.devices: a PipeWire sink, shared.
+PlayerDevice* standin_device(Engine& e, const char* name, const char* label, bool is_default, bool present, bool open);
 PlayerParam* standin_param(Engine& e, u32 stage, u32 index, const char* name, f64 lo, f64 hi, f64 step, const char* unit, f64 value);
 void         standin_preset(Engine& e, u32 stage, u32 index, const char* name);
 // The last command of a type that arrived; null when none has.

@@ -1,0 +1,22 @@
+// The Media panel: the OS's media surface as blackwing_media has it (media.status): the
+// name it owns, what the OS is shown, whether the machine is held awake and how, whether
+// its sleep is heard, and what the OS has asked.
+
+use "krome/std"
+use "ui_dev/widgets"
+
+def media-panel {
+    col [dev-panel] id=media w=fill {
+        row gap=8 middle w=fill {
+            text "Media" [dev-title]
+            text "{m_summary}" id=m_summary [dev-value]
+        }
+        dev-field "name" "{m_name}"
+        dev-field "shown" "{m_shown}"
+        dev-field "art" "{m_art}"
+        dev-field "awake" "{m_awake}"
+        dev-field "sleep" "{m_sleep}"
+        dev-field "from the OS" "{m_commands}"
+        dev-field "why not" "{m_why}"
+    }
+}

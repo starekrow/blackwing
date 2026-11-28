@@ -232,3 +232,22 @@ delay in `systemd-inhibit --list`; the name went with the run. Driven through `-
 | `media_platform` | 46 (new) |
 | `blackwing_media` | 32 (new) |
 | every other suite | as before; `dbus` 162 |
+
+## Milestone 4, the face
+
+Nov 27, 2026.
+
+**What was built.** The Output panel lists `player.devices` (backend; playing, default,
+chosen, gone) with a button to use each and one to follow the default, and says what is
+chosen and why nothing is open. A Media tab shows `media.status`. The Tables panel lists
+`media.status` too, last, so the others keep their places. Seen in a screenshot of the
+face on this machine: the capture device and the three PipeWire sinks, the USB DAC the
+default.
+
+**Found:** a face's dev run reads its markup from the executable's asset pack, which is
+made by building `blackwing`, not by `kormake test ui_dev`: a screenshot taken after only
+the tests showed the old Output panel.
+
+| suite | checks |
+|---|---|
+| `ui_dev` | 292 (284: the devices shown and chosen, the Media panel with no surface) |

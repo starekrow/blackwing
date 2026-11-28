@@ -39,7 +39,7 @@ struct FaceAsk {
 // A path the title window was given, at a queue row's index.
 struct FaceTitle { u32 index = 0; u64 hash = 0; };
 // Which of the inspectors' tabs is up, as the model has it: the others do no work.
-enum class FaceTab : u8 { Chain, Scan, Events, Tables };
+enum class FaceTab : u8 { Chain, Scan, Events, Tables, Media };
 // An event as the Events panel keeps it: the number it was seen at, and its line.
 struct FaceEvent { u64 n = 0; char text[244] = ""; };
 constexpr u32 kFaceEvents = 512; // events kept
@@ -118,6 +118,9 @@ struct Face {
     u32     chain_drag_stage = 0, chain_drag_param = 0;
     char    chain_keys[kFaceParams][2][16]; // "c_v_S_P", "c_k_S_P": the writer keeps the pointers
     char    stage_keys[8][16];              // "c_flat_S"
+    // Output: the devices listed, in the list's order, so a row's button names its device.
+    char    dev_names[16][192] = {};
+    u32     ndev = 0;
 };
 
 // ---- the model writer (model.cc) -----------------------------------------------------------
@@ -149,6 +152,8 @@ bool transport_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 void queue_sync(TickContext& ctx, Face& f);
 bool queue_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 void output_sync(TickContext& ctx, Face& f);
+bool output_event(TickContext& ctx, Face& f, const KromeEvent& ev);
+void media_sync(TickContext& ctx, Face& f);
 void chain_sync(TickContext& ctx, Face& f);
 bool chain_event(TickContext& ctx, Face& f, const KromeEvent& ev);
 void scan_sync(TickContext& ctx, Face& f);

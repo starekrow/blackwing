@@ -7,6 +7,8 @@
 #include "korvid/blackwing_player/player.h"
 #include "korvid/core/format.h"
 #include "korvid/core/ktable.h"
+#include "korvid/core/arena.h"
+#include <string.h>
 
 namespace kv {
 
@@ -63,6 +65,61 @@ void output_sync(TickContext& ctx, Face& f) {
     if (o->jump_seconds > 0.0) format(text, sizeof text, "%.1f ms", o->jump_seconds * 1e3);
     else                       format(text, sizeof text, "none yet");
     face_set(f, "o_jump", text);
+
+    // The devices, and which is chosen.
+    if (!strcmp(o->chosen, "default") || !o->chosen[0]) format(text, sizeof text, "following the default%s", o->lost ? "; the one playing went" : "");
+    else format(text, sizeof text, "%s%s%s", o->chosen, o->standing_in ? ", absent: the default stands in" : "", o->lost ? "; it went while playing" : "");
+    if (!o->open && o->none_why[0]) format(text + strlen(text), sizeof text - strlen(text), " (%s)", o->none_why);
+    face_set(f, "o_chosen", text);
+    const KTable* devs = ctx.read_ktable("player.devices");
+    MemScope scope;
+    JsonBuilder b(&scope.arena->a);
+    JsonRef list = b.array();
+    u32 k = 0;
+    if (devs) {
+        Span<const PlayerDevice> rows = devs->rows_of<PlayerDevice>();
+        for (u32 i = 0; i < rows.len && k < KV_COUNTOF(f.dev_names); ++i) {
+            if (!devs->is_alive(i)) continue;
+            const PlayerDevice& d = rows[i];
+            format(f.dev_names[k], sizeof f.dev_names[k], "%s", d.name);
+            JsonRef row = b.object();
+            char id[16];
+            format(id, sizeof id, "%u", k);
+            b.set(row, "k", b.string(id));
+            b.set(row, "label", b.string(d.label[0] ? d.label : d.name));
+            b.set(row, "backend", b.string(d.backend));
+            char flags[96];
+            format(flags, sizeof flags, "%s%s%s%s", d.open ? "playing " : "", d.is_default ? "default " : "", d.chosen ? "chosen " : "", d.present ? "" : "gone");
+            b.set(row, "flags", b.string(flags));
+            b.set(row, "ink", b.string(!d.present ? "#8b95a7" : d.open ? "#7aa7ff" : "#e6e9ef")); // std's dark theme, as the queue's
+            b.push(list, row);
+            ++k;
+        }
+    }
+    f.ndev = k;
+    face_set_doc(f, "o_devices", b, list);
+    b.free();
+    face_set(f, "o_ndev", (f64)k);
+}
+
+bool output_event(TickContext& ctx, Face& f, const KromeEvent& ev) {
+    static const Name use = name_intern("o_use"), follow = name_intern("o_follow");
+    Name event{ev.event}, node{ev.node};
+    u64 k = 0;
+    if (event == follow) {
+        PlayerSelectDevice s{};
+        format(s.name, sizeof s.name, "default");
+        ctx.emit(s);
+        return true;
+    }
+    if (event == use && face_id(node, "od_", &k)) {
+        if (k >= f.ndev) return true;
+        PlayerSelectDevice s{};
+        format(s.name, sizeof s.name, "%s", f.dev_names[k]);
+        ctx.emit(s);
+        return true;
+    }
+    return false;
 }
 
 } // namespace kv
