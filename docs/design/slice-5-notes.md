@@ -177,3 +177,58 @@ milestone 3's, when there is a player behind it.
 |---|---|
 | `dbus` | 162 (new) |
 | Korvid `platform` | 1,336 (KR49's sockets, on its branch) |
+
+## Milestone 3, the surface on Linux
+
+Nov 27, 2026.
+
+**What was built.** `media_platform` has its Linux backend: MPRIS, keep-awake and sleep,
+answered on a thread of the surface's own. `blackwing_media` joins it to the busses:
+commands in as the player's, the track heard (titled by the library, with its art) and
+the state out, keep-awake while playing, sleep as an interruption. `blackwing_window`
+hides a window closed while the music plays, and shows it again on MPRIS's `Raise`
+(BP29). `blackwing` asks for the surface in a sitting and in `play`; `--no-media` says no.
+
+**On this desktop** (GNOME on Wayland), playing the test tone into a null sink of its own:
+`busctl --user` read the name, `Identity`, `Playing` and a `Position` that moved between
+two reads; the portal's suspend inhibitor was in `gnome-session-inhibit --list` and the
+delay in `systemd-inhibit --list`; the name went with the run. Driven through `--cli-port`:
+`window close` while playing hid the window (0 frames drawn while hidden, the music on),
+`busctl --user call ... Raise` showed it, and closed again and stopped, the run ended with
+0. The default output was the USB DAC before and after.
+
+**Found:**
+
+- **A relative path is not a URL.** `blackwing play some/file.flac` showed
+  `file://some/file.flac`. The surface's path is made absolute from the current directory.
+- **The portal names the app by its process tree.** Run from inside the Claude app, the
+  portal's inhibitor said `com.anthropic.Claude: Playing music`. From a terminal of your
+  own it is Blackwing's; with a `.desktop` file installed it is Blackwing's name.
+- **Not logind's `sleep` for keep-awake.** The PRD said `idle:sleep`; `sleep` also holds
+  off a suspend the user asks for, which keep-awake must not do. `idle` only.
+- **Closed and paused waits.** The PRD has "closed while paused ends the run"; a window
+  closed while playing and then paused from the flyout stays, hidden, so it can be played
+  again from there. Stopped (the queue out, or a stop) ends it.
+- **Two engine calls a test must make** when its engine interns enough names:
+  `names_shutdown()` before `mem_shutdown()`, or the name table is counted as a leak.
+- **My mistake, harmless:** removing the manual null sink, the first `pw-cli destroy` was
+  given an id read off a `grep` with context lines, which was a QEMU stream's port and not
+  the sink. It was refused (this client may not destroy another's port) and the port is
+  there. Sinks made by hand are now removed by the id read from their own record.
+
+**Not done, and owed:**
+
+- **GNOME's controls and the keys by hand**: the flyout, the lock screen, the media keys,
+  a headset's buttons, by hand at the close.
+- **A real suspend**: tested against a stand-in logind, not by closing the lid.
+- **A `.desktop` file**, so the shell has Blackwing's icon and name, and the portal
+  attributes the inhibitor right; with the packaging.
+- **MPRIS's `LoopStatus` and `Shuffle`**, which the player does not have.
+- **The library's overrides in the title**: the title is the library's row, so a title
+  overridden by hand shows; the art is not an override yet.
+
+| suite | checks |
+|---|---|
+| `media_platform` | 46 (new) |
+| `blackwing_media` | 32 (new) |
+| every other suite | as before; `dbus` 162 |

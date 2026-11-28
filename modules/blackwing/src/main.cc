@@ -17,6 +17,7 @@
 //   --data DIR           where the library keeps its index and its roots (the per-user data directory),
 //                        and with it the session (the user's settings directory)
 //   --no-session         neither restores how it was left nor saves it
+//   --no-media           shows nothing to the OS's media surface (MPRIS): no keys, no flyout, no keep-awake
 //   --run-seconds N      ends the run after N seconds (tests, measurements)
 //   --cli-port N         the engine's command line on a loopback port
 //   --size WxH, --renderer auto|gpu|cpu, --screenshot FILE, --borderless, --hitch-ms N,
@@ -39,6 +40,7 @@
 #include "korvid/blackwing_player/player.h"
 #include "korvid/blackwing_script/host.h"
 #include "korvid/blackwing_session/session.h"
+#include "korvid/blackwing_media/media.h"
 #include "korvid/cli/module.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/cli.h"
@@ -299,7 +301,7 @@ bool session_dir(const char* data_dir, char* out, usize cap) {
 
 // The engine with no face: the modules a machine with no display can start. The frame
 // loop, the window, Krome and the faces are linked in and left out.
-constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "session", "script", "blackwing"};
+constinit const char* const k_headless[] = {"platform", "cli", "player", "library", "glue", "session", "media", "script", "blackwing"};
 constinit const ModuleDesc* g_headless[KV_COUNTOF(k_headless)] = {};
 Span<const ModuleDesc* const> headless_modules() {
     u32 n = 0;
@@ -352,7 +354,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     const char* run_seconds = nullptr;
     const char* cli_port = nullptr;
     f64 lead = 5.0;
-    bool verbose = false, trace = false, no_session = false, sized = false;
+    bool verbose = false, trace = false, no_session = false, sized = false, no_media = false;
     // What the frame loop is given, should there be a face: its own options, as they came.
     static char* loop_argv[48];
     int loop_argc = 0;
@@ -373,6 +375,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         else if (strcmp(argv[first], "--run-seconds") == 0 && first + 1 < argc) run_seconds = argv[++first];
         else if (strcmp(argv[first], "--cli-port") == 0 && first + 1 < argc) cli_port = argv[++first];
         else if (strcmp(argv[first], "--no-session") == 0) no_session = true;
+        else if (strcmp(argv[first], "--no-media") == 0) no_media = true;
         else if (strcmp(argv[first], "--verbose") == 0) verbose = true;
         else if (strcmp(argv[first], "--trace-events") == 0) trace = true;
         else { fprintf(stderr, "blackwing: unknown option %s\n", argv[first]); usage(); return 2; }
@@ -413,6 +416,12 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     session.dir = data_dir; // beside the library's, when a directory was named; else the user's settings directory
     session.restore_device = !device_named && !capture_to; // a device named on the command line is this run's
     session_configure(session);
+    // The OS's media surface, for a sitting and for `play`: never for a script, help, or the
+    // capture device, whose runs are tests and tools that own no name on the desktop's bus.
+    MediaConfig media;
+    media.enabled = !no_media && !script && !help && (window || library || play) && strcmp(device, "capture") != 0 && !capture_to;
+    media.can_raise = window;
+    media_configure(media);
     g_start_library = library;
     g_start_play = play;
     if (capture_to) device = "capture";

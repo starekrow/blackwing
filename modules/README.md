@@ -3,7 +3,7 @@
 Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 `hifi_platform`, `blackwing_player` and `blackwing` have code (slice 1), `hifi_eq`
 (slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev`,
-`blackwing_window`, `blackwing_glue`, `blackwing_session` and `blackwing_script` (slice 4), and `dbus` (slice 5); the rest are skeletons. The
+`blackwing_window`, `blackwing_glue`, `blackwing_session` and `blackwing_script` (slice 4), and `dbus`, `media_platform` and `blackwing_media` (slice 5); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
@@ -22,9 +22,10 @@ Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 | [ui_clean](ui_clean/README.md) | the clean face |
 | [ui_compact](ui_compact/README.md) | the clean face, compact |
 | [blackwing_glue](blackwing_glue/README.md) | where the player and the library hear each other: a file queued is scanned next, what the library collects is queued |
+| [blackwing_media](blackwing_media/README.md) | the OS's media surface on the busses: the track heard, titled and with its art, out; the OS's commands in as the player's; keep-awake; sleep as an interruption |
 | [blackwing_session](blackwing_session/README.md) | the session: the queue, the place, the chain and a face's part, saved when they change and restored paused |
 | [blackwing_script](blackwing_script/README.md) | the script host: Lua over the player's and the library's API; `blackwing run` |
-| [blackwing_window](blackwing_window/README.md) | what every face shares of the window: closing it ends the run |
+| [blackwing_window](blackwing_window/README.md) | what every face shares of the window: closed while playing it hides and the music goes on, closed otherwise the run ends |
 | [blackwing](blackwing/README.md) | the application: the executable around the player, the library and a face |
 
 ```
