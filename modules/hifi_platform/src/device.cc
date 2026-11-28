@@ -1,6 +1,8 @@
 // The device interface over the backends linked in: the capture device everywhere, and
 // each platform's own: PipeWire on Linux.
 #include "korvid/hifi_platform/device.h"
+#include "korvid/core/atomic.h"
+#include "korvid/core/format.h"
 #include "korvid/core/memory.h"
 #include "backend.h"
 
@@ -20,7 +22,43 @@ constinit const HifiBackend* const k_backends[] = {
 #endif
 };
 
+constinit u64   g_generation = 1;     // atomic
+constinit void (*g_watch)(void*) = nullptr;
+constinit void* g_watch_user = nullptr;
+constinit u32   g_watch_lock = 0;     // atomic: a spin lock around the watcher's two words
+
 } // namespace
+
+void hifi_devices_changed() {
+    atomic_add_fetch(&g_generation, (u64)1, MO_ACQ_REL);
+    u32 zero = 0;
+    while (!atomic_compare_exchange(&g_watch_lock, &zero, 1u, false, MO_ACQUIRE, MO_RELAXED)) zero = 0;
+    void (*fn)(void*) = g_watch;
+    void* user = g_watch_user;
+    if (fn) fn(user); // under the spin lock, so a watcher being taken away is not called after
+    atomic_store(&g_watch_lock, 0u, MO_RELEASE);
+}
+
+u64 hifi_devices_generation() { return atomic_load(&g_generation, MO_ACQUIRE); }
+
+void hifi_devices_watch(void (*fn)(void* user), void* user) {
+    u32 zero = 0;
+    while (!atomic_compare_exchange(&g_watch_lock, &zero, 1u, false, MO_ACQUIRE, MO_RELAXED)) zero = 0;
+    g_watch = fn;
+    g_watch_user = user;
+    atomic_store(&g_watch_lock, 0u, MO_RELEASE);
+}
+
+u32 hifi_devices(HifiDeviceInfo* out, u32 cap) {
+    u32 n = 0;
+    for (const HifiBackend* b : k_backends) {
+        if (!b->list) continue;
+        HifiDeviceInfo some[kHifiMaxDevices];
+        u32 got = b->list(some, kHifiMaxDevices);
+        for (u32 i = 0; i < got && i < kHifiMaxDevices; ++i, ++n) if (n < cap) out[n] = some[i];
+    }
+    return n;
+}
 
 const char* hifi_sample_format_name(HifiSampleFormat f) {
     switch (f) {
@@ -41,6 +79,7 @@ HifiDeviceOpened hifi_device_open(const HifiDeviceDesc& desc) {
         if (!b->has(desc.name ? desc.name : "default")) continue;
         void* impl = b->open(desc, out);
         if (!impl) { if (!out.reason[0]) out.reason = "the device could not be opened"; return out; }
+        if (!out.name[0]) format(out.name, sizeof out.name, "%s", desc.name ? desc.name : "default");
         HifiDevice* d = (HifiDevice*)mem_alloc(sizeof(HifiDevice));
         d->backend = b;
         d->impl    = impl;
@@ -54,6 +93,7 @@ HifiDeviceOpened hifi_device_open(const HifiDeviceDesc& desc) {
 void hifi_device_start(HifiDevice* d) { if (d) d->backend->start(d->impl); }
 u32  hifi_device_delay(HifiDevice* d) { return d ? d->backend->delay(d->impl) : 0; }
 void hifi_device_hold(HifiDevice* d, bool hold) { if (d && d->backend->hold) d->backend->hold(d->impl, hold); }
+const char* hifi_device_lost(HifiDevice* d) { return d && d->backend->lost ? d->backend->lost(d->impl) : nullptr; }
 void hifi_device_close(HifiDevice* d) {
     if (!d) return;
     d->backend->close(d->impl);

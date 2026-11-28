@@ -108,6 +108,18 @@ return kv.steps(function(s)
   emit("PlayerSeekBy", { seconds = 0.5 })
   local by = hear("PlayerSeeked").frame -- half a second on from the frame heard: 4000 frames at 8 kHz past where it was
   s:check(by >= 8000 and by < 12000, "the seek by seconds")
+  -- The devices: the capture device is a row, open; choosing it again moves the music to it.
+  local devices, capture = s:ktable("player.devices"), nil
+  for h in devices:each() do
+    local d = devices:row(h)
+    if d.name == "capture" then capture = d end
+  end
+  s:check(capture and capture.present == 1 and capture.open == 1, "the capture device's row")
+  emit("PlayerSelectDevice", { name = "capture" })
+  local moved = hear("PlayerDeviceChanged", function(ev) return ev.kind == E.PlayerDeviceChange.Moved end)
+  s:check(moved.name == "capture", "the music moved to the device chosen")
+  s:check(s:resource("player.output").chosen == "capture", "chosen")
+  hear("PlayerSeeked") -- on from where it was heard
   emit("PlayerSetParam", { stage = 0, param = 0, value = -3.0 })
   s:check(hear("PlayerParamChanged", function(ev) return ev.stage == 0 and ev.param == 0 end).value == -3.0, "the volume")
   emit("PlayerApplyPreset", { stage = 1, preset = 1 })

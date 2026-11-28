@@ -60,7 +60,7 @@ return {
     { name = ".every", fn = every, every = 0.05, reads = "PlayerSeeked", emits = "PlayerEnqueue, PlayerPlay" },
   },
   startup = function(ctx)
-    check(kv.version.script == "0.1.0" and kv.version.player == "0.1.0" and kv.version.library == "0.1.0", "kv.version")
+    check(kv.version.script == "0.1.0" and kv.version.player == "0.2.0" and kv.version.library == "0.1.0", "kv.version")
     check(type(kv.json) == "table" and type(kv.sha256) == "function" and io == nil and os == nil and dofile == nil and require == nil, "the libraries")
     held.startup = true
     return true

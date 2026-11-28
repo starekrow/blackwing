@@ -24,6 +24,7 @@ struct Engine;
 // A path, where the player takes or shows one: as long as the OS allows one to be (4095
 // bytes on Linux, which no other system's users are likely to pass).
 constexpr u32 kPlayerPathMax = 4096;
+constexpr u32 kPlayerDeviceNameMax = 192; // an output device's name: hifi_platform's kHifiDeviceNameMax
 
 // Adds a file to the queue: before row `before`, or at the end (0). The path is the OS's,
 // absolute or relative to the working directory.
@@ -72,6 +73,11 @@ struct PlayerSetParam { u32 stage; u32 param; f64 value; };
 // Sets every parameter of a stage to a preset's values (player.presets' rows, by their
 // `index` within the stage): one recut renders them all, and each is said as it is heard.
 struct PlayerApplyPreset { u32 stage; u32 preset; };
+// Plays through another output from now: `name` as player.devices has it, or "default" to
+// follow the OS's default wherever it goes. What is playing goes on there from the frame
+// heard, by a jump. A device named and not there now is waited for or stood in for by the
+// default, as PlayerConfig::wait_for_absent says; it is taken up when it comes.
+struct PlayerSelectDevice { char name[kPlayerDeviceNameMax]; };
 
 // ---- notifications: events the player emits --------------------------------------------
 // Each carries `seq`, which counts up by one across all of them. Events of different types
@@ -95,6 +101,17 @@ struct PlayerTrackFailed  { u64 item; u32 seq; char reason[96]; };
 struct PlayerQueueEnded   { u32 seq; };
 // The lead ran dry with more expected: `count` times since the last tick.
 struct HifiUnderrun       { u32 count; u32 seq; };
+// What became of an output device, by player.devices' name for it. `reason` in words.
+enum class PlayerDeviceChange : u8 {
+    Added,   // a device there was not before
+    Gone,    // a device went away (the one playing is also said as Lost)
+    Back,    // one that had gone came back
+    Default, // the OS's default is now this one
+    Lost,    // the one playing went: the transport is paused at what was heard, and nothing plays elsewhere until asked
+    Moved,   // the music is on this one now: chosen, the default followed, or stood in for one not there
+    Count
+};
+struct PlayerDeviceChanged { u8 kind; char name[kPlayerDeviceNameMax]; char reason[96]; u32 seq; };
 
 // ---- state: what anyone may read ---------------------------------------------------------
 
@@ -192,6 +209,22 @@ struct PlayerPreset {
     char name[32];
 };
 
+// A row of the ktable "player.devices": the component PlayerDevice, one per output the
+// OS offers, and the capture device where there is one. A device that goes stays, not
+// present, for the run's life.
+struct PlayerDevice {
+    char name[kPlayerDeviceNameMax];  // what PlayerSelectDevice takes: stable across runs where the OS has a name for it
+    char label[128];                  // what it is called, for a person
+    char backend[16];                 // "pipewire", "capture"
+    u8   is_default;                  // the OS's default now
+    u8   present;                     // 0: it has gone
+    u8   shared;                      // other programs' sound is mixed into it
+    u8   can_exclusive;               // it can be opened alone
+    u8   open;                        // the music is on it
+    u8   chosen;                      // it is the one chosen (or, choosing "default", the default)
+    u16  channels;                    // as the OS says; 0 when it does not
+};
+
 // The resource "player.output": the device and the lead, as hifi reports them.
 struct PlayerOutput {
     u8   open      = 0; // a device is open
@@ -212,6 +245,13 @@ struct PlayerOutput {
     u32  pad4      = 0;
     f64  recut_render_seconds = 0.0; // the last recut's rendering of the whole lead
     f64  jump_seconds = 0.0;         // the last seek or skip: from reaching hifi to its first frame leaving the callback  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
+    char device[kPlayerDeviceNameMax] = ""; // the device open, by player.devices' name; empty when none is
+    char chosen[kPlayerDeviceNameMax] = ""; // what was chosen: "default", or a name
+    u8   following  = 0;  // the default is chosen, and followed
+    u8   standing_in = 0; // the device chosen is not there: the default stands in for it
+    u8   lost       = 0;  // the device playing went: paused, until asked to play (anywhere)
+    u8   pad5       = 0;
+    char none_why[96] = ""; // no device open while one is wanted: why
 };
 
 // ---- setting up ----------------------------------------------------------------------------
@@ -220,6 +260,7 @@ struct PlayerConfig {
     const char* device         = "default";  // hifi_platform's device name
     void*       device_backend = nullptr;    // for "capture": the HifiCapture*; null: one of the player's own, on the wall clock, keeping nothing
     f64         lead_seconds   = 5.0;
+    bool        wait_for_absent = false;     // a device chosen and not there: true waits for it; false plays on the default meanwhile
     usize       memory_bytes   = 256u << 20; // the files' bytes held at once, across every item
     u32         piece_bytes    = 256u << 10; // what a file is read in: a power of two, a page or more
 };

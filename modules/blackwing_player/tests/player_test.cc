@@ -52,7 +52,23 @@ constinit f64 g_param_value = 0.0;
 constinit u32 g_nparam = 0; // PlayerParamChanged heard, ever: the log holds 256 of anything
 void on_param(TickContext&, Span<const PlayerParamChanged> ev)   { for (auto& e : ev) { put(e.seq, 'P', e.param); g_param_value = e.value; ++g_nparam; } }
 
+// The devices' events in a log of their own: other tests (and the machine) make and pull
+// devices while these run, and the track log's tests say nothing of them.
+struct DevHeard { u8 kind; char name[96]; };
+constinit DevHeard g_dev[64] = {};
+constinit u32 g_ndev = 0;
+void on_device(TickContext&, Span<const PlayerDeviceChanged> ev) {
+    for (auto& e : ev) { if (g_ndev == 64) return; g_dev[g_ndev].kind = e.kind; format(g_dev[g_ndev].name, sizeof g_dev[0].name, "%s", e.name); ++g_ndev; }
+}
+// How many of a kind about the capture device have been heard.
+u32 dev_heard(PlayerDeviceChange kind) {
+    u32 n = 0;
+    for (u32 i = 0; i < g_ndev; ++i) n += g_dev[i].kind == (u8)kind && strcmp(g_dev[i].name, "capture") == 0;
+    return n;
+}
+
 constinit const HandlerDesc k_handlers[] = {
+    {.name = ".device",  KV_ON(PlayerDeviceChanged, on_device),  .phase = Phase::PostSim},
     {.name = ".started", KV_ON(PlayerTrackStarted, on_started), .phase = Phase::PostSim},
     {.name = ".ended",   KV_ON(PlayerTrackEnded, on_ended),     .phase = Phase::PostSim},
     {.name = ".failed",  KV_ON(PlayerTrackFailed, on_failed),   .phase = Phase::PostSim},
@@ -103,9 +119,10 @@ struct Rig {
     HifiCapture* cap = nullptr;
     bool         up  = false;
 
-    bool start(u32 delay = 0, u32 piece = 256u << 10, usize memory = 256u << 20, f64 lead = 5.0) {
+    bool start(u32 delay = 0, u32 piece = 256u << 10, usize memory = 256u << 20, f64 lead = 5.0, bool wait_for_absent = false) {
         g_nlog = 0;
         g_nparam = 0;
+        g_ndev = 0;
         HifiCaptureDesc cd;
         cd.delay_frames = delay;
         cd.keep_bytes = 16u << 20;
@@ -116,6 +133,7 @@ struct Rig {
         pc.piece_bytes = piece;
         pc.memory_bytes = memory;
         pc.lead_seconds = lead;
+        pc.wait_for_absent = wait_for_absent;
         player_configure(pc);
         CliConfig cli; cli.no_stdin = true;
         cli_configure(cli);
@@ -902,6 +920,67 @@ void test_player(TestCtx& c) {
         KV_CHECK(c, r.item(1).damaged && strstr(r.item(1).reason, "cut short"));
         r.stop();
         io_remove_tree(dir);
+    }
+
+    // The device pulled while playing: paused at what was heard (its delay's frames were
+    // not), the row gone, nothing opened anywhere; play pressed with it still gone waits
+    // (the config says to), and it plugged back plays from where it was heard. Then the
+    // device chosen while playing: the music moves to it from what was heard.
+    c.begin("player device lost");
+    {
+        Rig r;
+        KV_CHECK(c, r.start(1000, 256u << 10, 256u << 20, 5.0, true));
+        auto row = [&](const char* name) {
+            KTable* d = engine_ktable(r.e, "player.devices");
+            Span<PlayerDevice> rows = d->rows_of<PlayerDevice>();
+            for (u32 i = 0; i < rows.len; ++i) if (d->is_alive(i) && strcmp(rows[i].name, name) == 0) return rows[i];
+            return PlayerDevice{};
+        };
+        r.step();
+        KV_CHECK(c, row("capture").present && strcmp(r.o().chosen, "capture") == 0 && !r.o().following);
+        r.add(data(A));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(kN));
+        r.pull(2000); r.pull(2000);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Playing && r.t().position == 3000 && row("capture").open);
+        hifi_capture_unplug(r.cap);
+        f64 until = time_now() + 2.0;
+        while (!r.o().lost && time_now() < until) { r.step(); time_sleep(0.001); }
+        KV_CHECK(c, r.o().lost && r.o().device[0] == 0 && r.o().none_why[0]);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Paused && r.t().item == 1 && r.t().position == 3000);
+        KV_CHECK(c, dev_heard(PlayerDeviceChange::Lost) == 1);
+        KV_CHECK(c, !row("capture").present && dev_heard(PlayerDeviceChange::Gone) == 1);
+        r.step(20);
+        KV_CHECK(c, hifi_capture_opens(r.cap) == 1);
+        // Play with it gone: waits.
+        r.say(PlayerPlay{});
+        r.step(20);
+        KV_CHECK(c, hifi_capture_opens(r.cap) == 1 && r.t().state == (u8)PlayerState::Starting && strstr(r.o().none_why, "not there"));
+        // Back: it plays from where it was heard.
+        hifi_capture_plug(r.cap);
+        until = time_now() + 2.0;
+        while (hifi_capture_opens(r.cap) < 2 && time_now() < until) { r.step(); time_sleep(0.001); }
+        KV_CHECK(c, hifi_capture_opens(r.cap) == 2 && !r.o().lost);
+        KV_CHECK(c, dev_heard(PlayerDeviceChange::Back) == 1 && dev_heard(PlayerDeviceChange::Moved) == 1);
+        KV_CHECK(c, r.wait_lead(12000));
+        r.pull(2000); r.pull(2000);
+        KV_CHECK(c, r.wait_log('K', 1) && ev('K', 1).frames == 3000);
+        KV_CHECK(c, r.t().state == (u8)PlayerState::Playing && r.t().position > 3000);
+        // Chosen while playing: moved, from what was heard.
+        u64 at = r.t().position;
+        u32 moved = dev_heard(PlayerDeviceChange::Moved);
+        PlayerSelectDevice sd{};
+        format(sd.name, sizeof sd.name, "capture");
+        r.say(sd);
+        until = time_now() + 2.0;
+        while (hifi_capture_opens(r.cap) < 3 && time_now() < until) { r.step(); time_sleep(0.001); }
+        KV_CHECK(c, hifi_capture_opens(r.cap) == 3);
+        KV_CHECK(c, dev_heard(PlayerDeviceChange::Moved) == moved + 1);
+        KV_CHECK(c, r.wait_lead(12000));
+        g_nlog = 0;
+        r.pull(2000); r.pull(2000);
+        KV_CHECK(c, r.wait_log('K', 1) && ev('K', 1).frames >= at && ev('K', 1).frames < at + 200);
+        r.stop();
     }
 
     // Shut down in the middle of everything: reading, decoding, playing. Nothing hangs

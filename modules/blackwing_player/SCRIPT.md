@@ -1,6 +1,6 @@
 # blackwing_player — the script surface
 
-Surface `player`, version 0.1.0 · with [the spec](../../docs/specs/script-modules.md)
+Surface `player`, version 0.2.0 (0.2: the devices) · with [the spec](../../docs/specs/script-modules.md)
 
 **Proven by slice 4** ([blackwing_script](../blackwing_script/README.md)'s walk): every name,
 field and enum value on this page is reached from Lua as written. **Still a draft:** the
@@ -48,6 +48,7 @@ acted on in the tick after the host applies the slice it was emitted in.
 | `PlayerQueueEdit` | `op` integer (a `PlayerEditOp`), `item`, `before` integers | `player.queue` | `Remove`, `Move` or `Clear` |
 | `PlayerSetParam` | `stage`, `param` integers, `value` number | `player.params` | sets a parameter of a stage of the chain, by index |
 | `PlayerApplyPreset` | `stage`, `preset` integers | `player.params` | sets every parameter of a stage to a preset's values: a `player.presets` row's `stage` and `index` |
+| `PlayerSelectDevice` | `name` string (191 bytes at most) | `player.output` | plays through that device from now (a `player.devices` row's `name`), or `"default"` to follow the system's; the music goes on from the frame heard |
 
 The fields `unused` of the six commands that carry nothing are not shown: emit them with
 `{}`.
@@ -76,8 +77,9 @@ names the type in `reads`. No capability.
 | `PlayerTrackFailed` | `item`, `seq` integers, `reason` string | it could not be played at all |
 | `PlayerQueueEnded` | `seq` integer | every item is done or failed and nothing is sounding |
 | `HifiUnderrun` | `count`, `seq` integers | the lead ran dry, `count` times since the last tick |
+| `PlayerDeviceChanged` | `kind` integer (a `PlayerDeviceChange`), `name`, `reason` strings, `seq` integer | an output device came, went, came back or became the default; the one playing was lost; or the music moved to one |
 
-`seq` counts up by one across all seven. A batch is in order within its type; across
+`seq` counts up by one across all eight. A batch is in order within its type; across
 types, `seq` is the order things happened in. For what is playing now, read
 `player.transport`.
 
@@ -146,6 +148,19 @@ Component `PlayerPreset`, a row per preset a stage carries, fixed at start-up.
 | `index` | integer | within the stage, from 0: what `PlayerApplyPreset.preset` takes |
 | `name` | string | `"flat"`, `"rock"` |
 
+### `player.devices`
+
+Component `PlayerDevice`, a row per output device the system offers (and the capture
+device, where there is one). A device that goes stays, not present, for the run.
+
+| field | Lua | what |
+|---|---|---|
+| `name` | string | what `PlayerSelectDevice` takes; stable across runs where the system has a name for it |
+| `label` | string | what it is called, for a person |
+| `backend` | string | `"pipewire"`, `"capture"` |
+| `is_default`, `present`, `shared`, `can_exclusive`, `open`, `chosen` | integers, 0 or 1 | the system's default now; there now; other programs' sound mixed in; it can be opened alone; the music is on it; it is the one chosen (choosing `"default"`, the default) |
+| `channels` | integer | as the system says; 0 when it does not |
+
 ## Resources
 
 ### `player.transport`
@@ -183,6 +198,10 @@ A script's snapshot of it is as of its slice: `position` is where the playhead w
 | `recut_seconds`, `recut_render_seconds` | numbers | the last recut: to its first frame; its rendering of the whole lead |
 | `recuts` | integer | ever |
 | `jump_seconds` | number | the last seek or skip, to its first frame |
+| `device` | string | the device open, by `player.devices`' name; `""` when none is |
+| `chosen` | string | what was chosen: `"default"`, or a name |
+| `following`, `standing_in`, `lost` | integers, 0 or 1 | the default is followed; the default stands in for a device chosen and not there; the device playing went, and the transport is paused until play is pressed |
+| `none_why` | string | why no device is open while one is wanted |
 
 A guest stage that is not flat makes `exact` 0, as a built-in one does.
 
@@ -195,6 +214,7 @@ In `kv.enum`, both ways:
 | `PlayerEditOp` | `Remove` 0, `Move` 1, `Clear` 2 |
 | `PlayerItemState` | `Idle` 0, `Reading` 1, `Ready` 2, `Playing` 3, `Failed` 4 |
 | `PlayerState` | `Stopped` 0, `Starting` 1, `Playing` 2, `Paused` 3 |
+| `PlayerDeviceChange` | `Added` 0, `Gone` 1, `Back` 2, `Default` 3, `Lost` 4, `Moved` 5 |
 | `HifiSampleFormat` | `S16` 0, `S24` 1, `S32` 2, `F32` 3 |
 
 `kv.enum.PlayerState.name(v)` is the lower-case name the player's own

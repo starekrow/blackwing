@@ -59,7 +59,9 @@ struct Session {
     Array<SavedParam> params;
     u32     place = 0;         // the saved place: a position in the queue from 1; 0 none
     u64     frame = 0, frames = 0, rate = 0;
-    bool    said_kept = false, set_params = false, cued = false;
+    bool    said_kept = false, set_params = false, cued = false, set_device = false;
+    char    device[kPlayerDeviceNameMax] = "";     // the output device chosen, as the file had it
+    char    chosen_now[kPlayerDeviceNameMax] = ""; // as player.output says it now: what is written
     // Saving.
     u64     saved_sig = 0;     // what was last written, as a hash of it
     u64     seen_sig = 0;      // what was last seen
@@ -115,6 +117,7 @@ bool parse(Session& s, const char* text, usize size) {
     s.frame = json_u64(json_get(doc, root, "frame"), 0);
     s.frames = json_u64(json_get(doc, root, "frames"), 0);
     s.rate = json_u64(json_get(doc, root, "rate"), 0);
+    format(s.device, sizeof s.device, "%s", json_string(json_get(doc, root, "device"), ""));
     if (s.place > s.queue.len) s.place = 0;
     if (const JsonValue* list = json_get(doc, root, "params"))
         if (list->is_array())
@@ -198,6 +201,8 @@ void look(TickContext& ctx, Session& s, Snapshot& snap) {
         for (u32 i = 0; i < rows.len; ++i)
             if (params->is_alive(i)) { sig = mix(sig, &rows[i].stage, sizeof(u32) * 2); sig = mix(sig, &rows[i].value, sizeof(f64)); }
     }
+    if (const PlayerOutput* o = ctx.resource<const PlayerOutput>("player.output")) format(s.chosen_now, sizeof s.chosen_now, "%s", o->chosen);
+    sig = mix(sig, s.chosen_now, strlen(s.chosen_now));
     for (const Kept& k : s.kept) sig = mix(sig, &k, sizeof k);
     snap.sig = sig ? sig : 1;
 }
@@ -217,6 +222,7 @@ void write_text(Session& s, Span<const PlayerItem* const> rows, u32 place, u64 f
     b.set(root, "frame", b.unsigned_integer(frame));
     b.set(root, "frames", b.unsigned_integer(frames));
     b.set(root, "rate", b.unsigned_integer(rate));
+    if (s.chosen_now[0]) b.set(root, "device", b.string(s.chosen_now));
     JsonRef params = b.array();
     if (chain && table) {
         Span<const PlayerStage> stages = chain->rows_of<PlayerStage>();
@@ -358,6 +364,16 @@ void session_tick(TickContext& ctx) {
                 ctx.emit(out);
             }
         }
+        // The output device chosen, once, before the queue: what is restored plays there.
+        if (!s.set_device) {
+            s.set_device = true;
+            const PlayerOutput* o = ctx.resource<const PlayerOutput>("player.output");
+            if (s.device[0] && g_session_config.restore_device && o && strcmp(o->chosen, s.device) != 0) {
+                PlayerSelectDevice d{};
+                format(d.name, sizeof d.name, "%s", s.device);
+                ctx.emit(d);
+            }
+        }
         const KTable* chain = ctx.read_ktable("player.chain");
         const KTable* table = ctx.read_ktable("player.params");
         if (!s.set_params && chain && table) {
@@ -478,8 +494,8 @@ constinit const HandlerDesc k_handlers[] = {
     {.name = ".keep", KV_ON(SessionKeep, on_keep), .phase = Phase::PreSim},
 };
 constinit const SystemDesc k_systems[] = {
-    {.name = ".tick", .phase = Phase::PostSim, .fn = session_tick, .reads = "player.transport, player.queue, player.params, player.chain",
-     .writes = ".status", .emits = "PlayerEnqueue, PlayerCue, PlayerSetParam, SessionKept", .main_thread = true, .runs = RunWhen::Always},
+    {.name = ".tick", .phase = Phase::PostSim, .fn = session_tick, .reads = "player.transport, player.output, player.queue, player.params, player.chain",
+     .writes = ".status", .emits = "PlayerEnqueue, PlayerCue, PlayerSetParam, PlayerSelectDevice, SessionKept", .main_thread = true, .runs = RunWhen::Always},
 };
 
 } // namespace

@@ -53,6 +53,11 @@ constinit u32 g_queue_ktable = 0;
 constinit u32 g_chain_ktable = 0;
 constinit u32 g_params_ktable = 0;
 constinit u32 g_presets_ktable = 0;
+constinit u32 g_devices_ktable = 0;
+constinit Engine* g_engine = nullptr; // for the device watcher, which runs on a backend's thread
+
+// A backend's list changed: the loop is woken so the next tick reads it.
+void on_devices_changed(void*) { if (Engine* e = atomic_load(&g_engine, MO_ACQUIRE)) platform_wake(*e); }
 
 // The chain, fixed in this slice: gain, then the equalizer.
 constinit const StageDesc* const k_chain[] = {&k_gain_stage, &k_eq_stage};
@@ -130,6 +135,24 @@ struct Player {
     f64    sent_value[kStages][kHifiMaxParams] = {};
     u32    sent_gen[kStages][kHifiMaxParams] = {};
     u8*    shadow[kStages] = {};   // a stage of each kind, to say whether the values heard are flat
+    // The devices. What was chosen ("default", or a name), and the backend pointer a
+    // capture device needs; the list as last read, with its rows.
+    char   chosen[kPlayerDeviceNameMax] = "default";
+    void*  backend = nullptr;
+    u64    devices_gen = 0;
+    HifiDeviceInfo devs[kHifiMaxDevices];
+    u32    ndevs = 0;
+    Handle dev_rows[kHifiMaxDevices];
+    // The music's place on them: lost (the one playing went; paused until asked to play),
+    // waiting (wanted to play with nothing to play on; plays on the first that comes),
+    // standing in (the default, for a device chosen and not there).
+    bool   lost = false;
+    bool   waiting = false;
+    bool   standing_in = false;
+    char   lost_why[96] = "";
+    char   lost_name[kPlayerDeviceNameMax] = "";
+    u64    lost_item = 0, lost_frame = 0; // what was heard when it went
+    char   default_now[kPlayerDeviceNameMax] = "";
 };
 
 Player* state(Engine& e) { return engine_module_state_as<Player>(e, "player"); }
@@ -382,6 +405,151 @@ void jump_to(Player& p, KTable* queue, u32 k, u64 frame, bool seek) {
 // Whether a move within the item is a seek: it is the one being heard, or a seek to it is
 // on its way (a second command in the same tick, before anything is heard).
 bool heard_now(const Player& p, const Item& it) { return p.transport.item == it.id || p.seek_item == it.id; }
+
+// ---- the devices --------------------------------------------------------------------------
+
+const HifiDeviceInfo* device_named(const Player& p, const char* name) {
+    for (u32 i = 0; i < p.ndevs; ++i) if (strcmp(p.devs[i].name, name) == 0) return &p.devs[i];
+    return nullptr;
+}
+bool device_present(const Player& p, const char* name) {
+    if (strcmp(name, "default") == 0) return p.default_now[0] != 0;
+    const HifiDeviceInfo* d = device_named(p, name);
+    return d && d->present;
+}
+
+void say_device(TickContext& ctx, Player& p, PlayerDeviceChange kind, const char* name, const char* reason) {
+    PlayerDeviceChanged x{};
+    x.kind = (u8)kind;
+    format(x.name, sizeof x.name, "%s", name);
+    format(x.reason, sizeof x.reason, "%s", reason);
+    x.seq = ++p.seq;
+    ctx.emit(x);
+}
+
+// What to play on, as things are: the default when it is chosen and there is one; the
+// device chosen when it is there; the default standing in for it, or nothing (waiting
+// for it), as the config says. Empty: nothing to play on.
+const char* target_of(const Player& p, bool* standing_in) {
+    *standing_in = false;
+    if (strcmp(p.chosen, "default") == 0) return p.default_now[0] ? "default" : "";
+    if (device_present(p, p.chosen)) return p.chosen;
+    if (g_config.wait_for_absent || !p.default_now[0]) return "";
+    *standing_in = true;
+    return "default";
+}
+
+// The frame heard of the place's row, to go on from on another device.
+u64 heard_frame(const Player& p, const Item& it) {
+    if (p.lost_item == it.id) return p.lost_frame; // the device it was heard on went: what it had heard
+    if (p.seek_item == it.id) return p.seek_frame;
+    if (p.transport.item == it.id) return p.transport.position;
+    return it.start;
+}
+
+// Plays on `target` from now: hifi closes what it has and opens this when there is
+// something to play, and, if the music is meant to be going, it jumps to what was heard
+// there, so it goes on (paused, if it was).
+void put_on(TickContext& ctx, Player& p, KTable* queue, const char* target, bool standing_in, const char* why) {
+    hifi_set_device(p.hifi, target, p.backend);
+    p.standing_in = standing_in;
+    if (!target[0]) return;
+    if (p.want_play && p.cursor < p.count) {
+        Item& it = at(p, p.cursor);
+        u64 frame = heard_frame(p, it);
+        bool seek = frame != 0 && (p.transport.item == it.id || p.lost_item == it.id || p.seek_item == it.id);
+        jump_to(p, queue, p.cursor, frame, seek);
+    }
+    say_device(ctx, p, PlayerDeviceChange::Moved, strcmp(target, "default") == 0 ? p.default_now : target, why);
+}
+
+// The list read again when a backend says it changed: rows kept up, what came and went
+// said, and the music moved where the rules say.
+void refresh_devices(TickContext* cx, Player& p, KTable* queue, KTable* table, bool startup) {
+    u64 gen = hifi_devices_generation();
+    if (gen == p.devices_gen && !startup) return;
+    p.devices_gen = gen;
+    HifiDeviceInfo now[kHifiMaxDevices];
+    u32 n = hifi_devices(now, kHifiMaxDevices);
+    if (n > kHifiMaxDevices) n = kHifiMaxDevices;
+    char was_default[kPlayerDeviceNameMax];
+    format(was_default, sizeof was_default, "%s", p.default_now);
+    p.default_now[0] = 0;
+    for (u32 i = 0; i < n; ++i) if (now[i].is_default && now[i].present) format(p.default_now, sizeof p.default_now, "%s", now[i].name);
+    // What came and went, against the list before (a device not in the new list has gone).
+    for (u32 i = 0; i < n && cx; ++i) {
+        TickContext& ctx = *cx;
+        const HifiDeviceInfo* before = device_named(p, now[i].name);
+        if (!before && now[i].present) say_device(ctx, p, PlayerDeviceChange::Added, now[i].name, now[i].label);
+        else if (before && before->present && !now[i].present) say_device(ctx, p, PlayerDeviceChange::Gone, now[i].name, "it went away");
+        else if (before && !before->present && now[i].present) say_device(ctx, p, PlayerDeviceChange::Back, now[i].name, "it came back");
+    }
+    if (cx && p.default_now[0] && strcmp(was_default, p.default_now) != 0)
+        say_device(*cx, p, PlayerDeviceChange::Default, p.default_now, "the system's default output");
+    // The list kept, and its rows: one per name, for the run.
+    HifiDeviceInfo keep[kHifiMaxDevices];
+    u32 nkeep = 0;
+    for (u32 i = 0; i < n; ++i) keep[nkeep++] = now[i];
+    for (u32 i = 0; i < p.ndevs && nkeep < kHifiMaxDevices; ++i) { // gone from the backend's list altogether: kept, not present
+        bool found = false;
+        for (u32 j = 0; j < n && !found; ++j) found = strcmp(now[j].name, p.devs[i].name) == 0;
+        if (!found) { keep[nkeep] = p.devs[i]; keep[nkeep].present = false; keep[nkeep].is_default = false; ++nkeep; }
+    }
+    Handle rows[kHifiMaxDevices];
+    for (u32 i = 0; i < nkeep; ++i) {
+        rows[i] = Handle{};
+        for (u32 j = 0; j < p.ndevs; ++j) if (strcmp(p.devs[j].name, keep[i].name) == 0) rows[i] = p.dev_rows[j];
+        if (rows[i].is_null() && table) {
+            PlayerDevice r{};
+            format(r.name, sizeof r.name, "%s", keep[i].name);
+            rows[i] = table->spawn(r);
+        }
+    }
+    for (u32 i = 0; i < nkeep; ++i) { p.devs[i] = keep[i]; p.dev_rows[i] = rows[i]; }
+    p.ndevs = nkeep;
+    if (startup || !cx || p.lost) return; // lost: paused where it was, until asked to play
+    TickContext& ctx = *cx;
+    // The music where the rules say.
+    HifiStatus s;
+    hifi_status(p.hifi, &s);
+    bool standing = false;
+    const char* target = target_of(p, &standing);
+    if (p.waiting) {
+        if (target[0]) { p.waiting = false; put_on(ctx, p, queue, target, standing, "an output device came"); }
+        return;
+    }
+    // The device open went: a pull. Nothing moves; hifi says Lost, and the transport
+    // pauses where it was. The rules for a device not there are for a start, a choice and
+    // a press of play, never for one pulled from under the music.
+    if (s.device[0] && !device_present(p, s.device)) return;
+    if (p.standing_in && !standing && target[0]) { put_on(ctx, p, queue, target, false, "the device chosen came back"); return; }
+    // Following the default: a new default (a DAC plugged in, a headset connected, the
+    // user's choice in the system's settings) is moved to.
+    if (strcmp(p.chosen, "default") == 0 && s.device[0] && p.default_now[0] && strcmp(s.device, p.default_now) != 0)
+        put_on(ctx, p, queue, "default", false, "the default moved");
+}
+
+// The devices' rows as they are now: which is open, which chosen.
+void publish_devices(TickContext& ctx, Player& p, const HifiStatus& s) {
+    KTable* table = ctx.write_ktable(g_devices_ktable);
+    if (!table) return;
+    Span<PlayerDevice> rows = table->rows_of<PlayerDevice>();
+    bool on_default = strcmp(p.chosen, "default") == 0;
+    for (u32 i = 0; i < p.ndevs; ++i) {
+        if (p.dev_rows[i].is_null() || !table->is_alive(p.dev_rows[i].index())) continue;
+        PlayerDevice& r = rows[p.dev_rows[i].index()];
+        const HifiDeviceInfo& d = p.devs[i];
+        format(r.label, sizeof r.label, "%s", d.label);
+        format(r.backend, sizeof r.backend, "%s", d.backend);
+        r.is_default = d.is_default && d.present;
+        r.present = d.present;
+        r.shared = d.shared;
+        r.can_exclusive = d.can_exclusive;
+        r.channels = d.channels;
+        r.open = s.device[0] && strcmp(s.device, d.name) == 0;
+        r.chosen = on_default ? r.is_default : strcmp(p.chosen, d.name) == 0;
+    }
+}
 
 // The index of the first item at or after k that is not Failed; count when there is none.
 u32 playable_from(const Player& p, u32 k) {
@@ -643,11 +811,41 @@ void commands(TickContext& ctx, Player& p, KTable* queue) {
         if (p.want_play) { p.paused = true; hifi_pause(p.hifi); }
     }
     if (edited) resync(p, queue, place_id, fallback);
+    for (const PlayerSelectDevice& x : ctx.received<PlayerSelectDevice>()) {
+        char name[kPlayerDeviceNameMax];
+        format(name, sizeof name, "%s", x.name[0] ? x.name : "default");
+        format(p.chosen, sizeof p.chosen, "%s", name);
+        bool standing = false;
+        const char* target = target_of(p, &standing);
+        if (p.lost) continue; // chosen; taken up at the next play
+        if (!target[0]) {
+            hifi_set_device(p.hifi, "", p.backend);
+            p.waiting = p.want_play;
+            say_device(ctx, p, PlayerDeviceChange::Moved, name, "chosen, and not there: waited for");
+            continue;
+        }
+        p.waiting = false;
+        put_on(ctx, p, queue, target, standing, standing ? "chosen, and not there: the default stands in" : "chosen");
+    }
     for (const PlayerPlay& x : ctx.received<PlayerPlay>()) {
         (void)x;
+        bool resume = p.lost || (p.waiting && !p.want_play);
         p.want_play = true;
         if (p.paused) { p.paused = false; hifi_play(p.hifi); }
         if (p.cursor < p.count) p.ended_said = false;
+        if (resume || p.lost) {
+            // The device it was on went, or there was none: on whatever the rules say now.
+            bool standing = false;
+            const char* target = target_of(p, &standing);
+            if (!target[0]) { p.waiting = true; p.lost = false; continue; } // asked to play: plays on the first that comes
+            p.waiting = false;
+            put_on(ctx, p, queue, target, standing, p.lost ? "played again after the device went" : "an output device to play on");
+            p.lost = false;
+            p.lost_item = 0;
+        } else if (!p.waiting) {
+            bool standing = false;
+            if (!target_of(p, &standing)[0]) { p.waiting = true; hifi_set_device(p.hifi, "", p.backend); }
+        }
     }
     // A cue lasts while its row is the place and nothing plays. A seek while cued moved the
     // row's start: the cue follows it, and is no seek on its way to anyone's ear.
@@ -725,6 +923,17 @@ void from_hifi(TickContext& ctx, Player& p, KTable* queue) {
             const HifiEvent& e = ev[i];
             if (e.kind == HifiEventKind::Underrun) { ctx.emit(HifiUnderrun{(u32)e.frames, ++p.seq}); continue; }
             if (e.kind == HifiEventKind::ParamsHeard) { heard_params(ctx, p, (u32)e.frames); continue; }
+            if (e.kind == HifiEventKind::Lost) {
+                // Paused at what was heard; nothing plays anywhere else until asked.
+                p.lost = true;
+                format(p.lost_why, sizeof p.lost_why, "%s", e.reason);
+                p.lost_item = p.transport.item;
+                p.lost_frame = p.transport.position;
+                if (p.cue_item) { p.lost_item = p.cue_item; p.lost_frame = p.cue_frame; }
+                if (p.want_play) { p.paused = true; hifi_pause(p.hifi); }
+                say_device(ctx, p, PlayerDeviceChange::Lost, p.lost_name[0] ? p.lost_name : "default", e.reason);
+                continue;
+            }
             Item* it = find(p, e.source);
             if (!it) continue;
             switch (e.kind) {
@@ -1044,7 +1253,30 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
         }
     }
 
+    // While lost, what was heard stands: the device's clock stopped with it.
+    if ((p.lost || p.waiting) && p.lost_item) {
+        if (Item* l = find(p, p.lost_item)) {
+            t.item = l->id;
+            t.position = p.lost_frame;
+            t.frames = row_of(queue, *l).frames;
+            t.rate = row_of(queue, *l).rate;
+            t.state = (u8)(p.want_play ? PlayerState::Paused : PlayerState::Stopped);
+        }
+    }
+    if (p.waiting && p.want_play) t.state = (u8)PlayerState::Starting;
+    if (!p.lost && !p.waiting && t.item == p.lost_item && t.state == (u8)PlayerState::Playing) p.lost_item = 0; // heard again: done with
+
     PlayerOutput& o = p.output;
+    if (s.device[0]) format(p.lost_name, sizeof p.lost_name, "%s", s.device); // the name a loss is said under
+    format(o.device, sizeof o.device, "%s", s.device);
+    format(o.chosen, sizeof o.chosen, "%s", p.chosen);
+    o.following = strcmp(p.chosen, "default") == 0;
+    o.standing_in = p.standing_in;
+    o.lost = p.lost;
+    if (p.lost) format(o.none_why, sizeof o.none_why, "%s: paused until played again", p.lost_why);
+    else if (p.waiting) format(o.none_why, sizeof o.none_why, "%s", strcmp(p.chosen, "default") == 0 || !p.default_now[0] ? "there is no output device" : "the device chosen is not there");
+    else o.none_why[0] = 0;
+    publish_devices(ctx, p, s);
     o.open = s.device_open; o.shared = s.shared; o.exact = s.exact;
     o.sample = (u8)s.format.sample; o.channels = s.format.channels; o.rate = s.format.rate;
     o.bits = s.device_open ? (u8)hifi_sample_bits(s.format.sample) : 0;
@@ -1077,6 +1309,7 @@ void player_pump(TickContext& ctx) {
     Player& p = ctx.state_as<Player>();
     KTable* queue = ctx.write_ktable(g_queue_ktable);
     ++p.tick;
+    refresh_devices(&ctx, p, queue, ctx.write_ktable(g_devices_ktable), false);
     commands(ctx, p, queue);
     from_io(ctx, p, queue);
     from_hifi(ctx, p, queue);
@@ -1115,8 +1348,27 @@ bool player_startup(Engine& e, ModuleInstance& self) {
         hc.device_backend = p->capture;
     }
     hc.lead_seconds = g_config.lead_seconds;
+    p->backend = hc.device_backend;
+    format(p->chosen, sizeof p->chosen, "%s", hc.device);
+    if (strcmp(p->chosen, "pipewire") == 0) format(p->chosen, sizeof p->chosen, "default");
     p->hifi = hifi_create(hc);
     if (!p->hifi) { KV_ERROR("player", "the audio path's thread could not start"); return false; }
+    // The devices there are, and where the music will go: the one chosen, the default
+    // standing in for it, or none yet.
+    for (Handle& h : p->dev_rows) h = Handle{};
+    {
+        refresh_devices(nullptr, *p, engine_ktable(e, g_queue_ktable), engine_ktable(e, g_devices_ktable), true);
+        bool standing = false;
+        const char* target = target_of(*p, &standing);
+        if (strcmp(target, p->chosen) != 0) {
+            hifi_set_device(p->hifi, target, p->backend);
+            p->standing_in = standing;
+            if (standing) KV_INFO("player", "%s is not there: the default stands in for it until it comes", p->chosen);
+            else if (!target[0]) KV_INFO("player", "%s: nothing is played until it comes", strcmp(p->chosen, "default") == 0 ? "there is no output device" : "the device chosen is not there");
+        }
+    }
+    atomic_store(&g_engine, &e, MO_RELEASE);
+    hifi_devices_watch(on_devices_changed, nullptr);
     // The chain's rows, one per stage, at the stages' initial values.
     KTable* chain = engine_ktable(e, g_chain_ktable);
     KTable* params = engine_ktable(e, g_params_ktable);
@@ -1158,6 +1410,8 @@ void player_shutdown(Engine& e, ModuleInstance& self) {
     (void)self;
     Player* p = state(e);
     if (!p) return;
+    hifi_devices_watch(nullptr, nullptr);
+    atomic_store(&g_engine, (Engine*)nullptr, MO_RELEASE);
     hifi_destroy(p->hifi); // first: after this nobody reads the items' spans
     p->hifi = nullptr;
     if (p->capture) hifi_capture_destroy(p->capture);
@@ -1293,6 +1547,25 @@ void cmd_seekby(CliContext& ctx, Span<const char* const> args) {
     ctx.engine->events.emit(PlayerSeekBy{by});
 }
 
+void cmd_devices(CliContext& ctx, Span<const char* const> args) {
+    if (args.len) { ctx.fail("player devices"); return; }
+    Player* p = state(*ctx.engine);
+    if (!p) { ctx.fail("the player is not running"); return; }
+    ctx.print("chosen: %s%s", p->output.chosen, p->output.standing_in ? ", not there: the default stands in" : "");
+    for (u32 i = 0; i < p->ndevs; ++i) {
+        const HifiDeviceInfo& d = p->devs[i];
+        bool open = p->output.device[0] && strcmp(p->output.device, d.name) == 0;
+        ctx.print("%s %-9s %s  \"%s\"%s%s", open ? "*" : " ", d.backend, d.name, d.label, d.is_default && d.present ? ", the default" : "", d.present ? "" : ", gone");
+    }
+}
+
+void cmd_device(CliContext& ctx, Span<const char* const> args) {
+    if (args.len != 1) { ctx.fail("player device <name>|default"); return; }
+    PlayerSelectDevice x{};
+    format(x.name, sizeof x.name, "%s", args[0]);
+    ctx.engine->events.emit(x);
+}
+
 void cmd_status(CliContext& ctx, Span<const char* const> args) {
     if (args.len) { ctx.fail("player status"); return; }
     Player* p = state(*ctx.engine);
@@ -1302,10 +1575,10 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
     f64 secs = t.rate ? (f64)t.position / t.rate : 0.0, of = t.rate ? (f64)t.frames / t.rate : 0.0;
     ctx.print("%s; item %llu at %.1f of %.1f s; %u queued, %u left", player_state_name((PlayerState)t.state),
               (unsigned long long)t.item, secs, of, t.queued, t.left);
-    if (o.open) ctx.print("device: %u Hz, %u ch, %s, %s%s; lead %.2f s; %u underruns", o.rate, o.channels,
+    if (o.open) ctx.print("device: %s%s, %u Hz, %u ch, %s, %s%s; lead %.2f s; %u underruns", o.device, o.following ? " (the default)" : o.standing_in ? " (standing in)" : "", o.rate, o.channels,
                           hifi_sample_format_name((HifiSampleFormat)o.sample), o.shared ? "shared" : "unshared", o.exact ? ", exact" : "",
                           o.rate ? (f64)o.lead_frames / o.rate : 0.0, o.underruns);
-    else        ctx.print("device: none open");
+    else        ctx.print("device: none open%s%s", o.none_why[0] ? ": " : "", o.none_why);
     ctx.print("files: %.1f MB held of %.1f", (f64)o.bytes_held / (1 << 20), (f64)g_config.memory_bytes / (1 << 20));
     if (o.recuts) ctx.print("recuts: %u; the last %.1f ms from the change reaching the path to the join, the lead rendered again in %.1f ms", o.recuts, o.recut_seconds * 1e3, o.recut_render_seconds * 1e3);
     if (o.jump_seconds > 0.0) ctx.print("jumps: the last %.1f ms from reaching the path to its first frame out", o.jump_seconds * 1e3);
@@ -1347,6 +1620,8 @@ constinit const CliCommandDesc k_commands[] = {
     {.name = "player remove", .help = "<row> takes a row out of the queue", .fn = cmd_remove},
     {.name = "player move",   .help = "<row> [<before row>] moves a row: before another, or to the end", .fn = cmd_move},
     {.name = "player insert", .help = "<before row> <file>... adds files before a row", .fn = cmd_insert},
+    {.name = "player devices", .help = "the output devices there are; * is the one playing", .fn = cmd_devices},
+    {.name = "player device", .help = "<name>|default plays through that device from now (default: the system's, followed)", .fn = cmd_device},
     {.name = "player clear",  .help = "empties the queue, and stops", .fn = cmd_clear},
     {.name = "player status", .help = "the transport, the device and the queue", .fn = cmd_status},
 };
@@ -1356,12 +1631,13 @@ constinit const KTableDesc k_ktables[] = {
     {.name = ".chain", .components = "PlayerStage", .capacity = kHifiMaxStages, .id = &g_chain_ktable, .cosmetic = true},
     {.name = ".params", .components = "PlayerParam", .capacity = kHifiMaxStages * kHifiMaxParams, .id = &g_params_ktable, .cosmetic = true},
     {.name = ".presets", .components = "PlayerPreset", .capacity = 64, .id = &g_presets_ktable, .cosmetic = true},
+    {.name = ".devices", .components = "PlayerDevice", .capacity = kHifiMaxDevices * 2, .id = &g_devices_ktable, .cosmetic = true},
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".pump", .phase = Phase::PreSim, .fn = player_pump,
-     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
-     .writes = ".queue, .chain, .params, .presets, .transport, .output",
-     .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, PlayerSeeked, PlayerParamChanged, HifiUnderrun",
+     .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit, PlayerSelectDevice",
+     .writes = ".queue, .chain, .params, .presets, .devices, .transport, .output",
+     .emits = "PlayerTrackStarted, PlayerTrackEnded, PlayerTrackFailed, PlayerQueueEnded, PlayerSeeked, PlayerParamChanged, HifiUnderrun, PlayerDeviceChanged",
      .main_thread = true, .runs = RunWhen::Always},
 };
 

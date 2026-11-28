@@ -36,9 +36,18 @@ struct HifiCapture {
     void*              user     = nullptr;
     OsThread           thread;
     u32                quit = 0; // atomic
+    bool               unplugged = false; // under the lock
+    bool               lost      = false; // the device open on it was, by an unplug (under the lock)
 };
 
 namespace {
+
+// The captures there are, for hifi_devices: the first one made stands for "capture".
+constinit HifiCapture* g_captures[8] = {};
+constinit u32 g_captures_lock = 0; // atomic: a spin lock
+
+void captures_lock()   { u32 z = 0; while (!atomic_compare_exchange(&g_captures_lock, &z, 1u, false, MO_ACQUIRE, MO_RELAXED)) z = 0; }
+void captures_unlock() { atomic_store(&g_captures_lock, 0u, MO_RELEASE); }
 
 // Under the lock: the callback for `frames` frames, into the store or the spill.
 void capture_run(HifiCapture& c, u32 frames) {
@@ -68,7 +77,7 @@ void capture_thread(void* arg) {
     f64 next = time_now();
     while (!atomic_load(&c.quit, MO_ACQUIRE)) {
         os_mutex_lock(&c.lock);
-        capture_run(c, c.desc.period_frames);
+        if (!c.lost) capture_run(c, c.desc.period_frames);
         os_mutex_unlock(&c.lock);
         next += period;
         f64 wait = next - time_now();
@@ -85,6 +94,8 @@ void* capture_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
     if (!c) { out.reason = "the capture device was given nowhere to capture to"; return nullptr; }
     os_mutex_lock(&c->lock);
     if (c->open) { os_mutex_unlock(&c->lock); out.reason = "the capture device is already open"; return nullptr; }
+    if (c->unplugged) { os_mutex_unlock(&c->lock); out.reason = "the capture device is unplugged"; return nullptr; }
+    c->lost     = false;
     c->open     = true;
     c->started  = false;
     c->format   = desc.want;
@@ -114,6 +125,33 @@ void capture_start(void* impl) {
 
 u32 capture_delay(void* impl) { return ((HifiCapture*)impl)->desc.delay_frames; }
 
+const char* capture_lost(void* impl) {
+    HifiCapture& c = *(HifiCapture*)impl;
+    os_mutex_lock(&c.lock);
+    bool lost = c.lost;
+    os_mutex_unlock(&c.lock);
+    return lost ? "the capture device was unplugged" : nullptr;
+}
+
+u32 capture_list(HifiDeviceInfo* out, u32 cap) {
+    captures_lock();
+    HifiCapture* c = nullptr;
+    for (HifiCapture* x : g_captures) if (x) { c = x; break; }
+    captures_unlock();
+    if (!c || !cap) return c ? 1 : 0;
+    HifiDeviceInfo& d = out[0];
+    d = HifiDeviceInfo{};
+    memcpy(d.name, "capture", 8);
+    memcpy(d.label, "the capture device", 19);
+    memcpy(d.backend, "capture", 8);
+    os_mutex_lock(&c->lock);
+    d.present = !c->unplugged;
+    os_mutex_unlock(&c->lock);
+    d.shared = false;
+    d.can_exclusive = true;
+    return 1;
+}
+
 void capture_hold(void* impl, bool hold) {
     HifiCapture& c = *(HifiCapture*)impl;
     os_mutex_lock(&c.lock);
@@ -139,7 +177,7 @@ void capture_close(void* impl) {
 
 constinit const HifiBackend k_capture_backend = {
     .name = "capture", .has = capture_has, .open = capture_open, .start = capture_start, .delay = capture_delay,
-    .hold = capture_hold, .close = capture_close,
+    .hold = capture_hold, .close = capture_close, .lost = capture_lost, .list = capture_list,
 };
 
 HifiCapture* hifi_capture_create(const HifiCaptureDesc& desc) {
@@ -150,11 +188,19 @@ HifiCapture* hifi_capture_create(const HifiCaptureDesc& desc) {
     c->data        = (u8*)mem_alloc(desc.keep_bytes ? desc.keep_bytes : 1);
     c->spill_bytes = 4096 * 8 * 4;
     c->spill       = (u8*)mem_alloc(c->spill_bytes);
+    captures_lock();
+    for (HifiCapture*& x : g_captures) if (!x) { x = c; break; }
+    captures_unlock();
+    hifi_devices_changed();
     return c;
 }
 
 void hifi_capture_destroy(HifiCapture* c) {
     if (!c) return;
+    captures_lock();
+    for (HifiCapture*& x : g_captures) if (x == c) x = nullptr;
+    captures_unlock();
+    hifi_devices_changed();
     os_mutex_destroy(&c->lock);
     mem_free(c->data);
     mem_free(c->spill);
@@ -165,7 +211,7 @@ u32 hifi_capture_pull(HifiCapture* c, u32 frames) {
     if (c->desc.wall_clock) return 0;
     os_mutex_lock(&c->lock);
     u32 pulled = 0;
-    if (c->open && c->started) {
+    if (c->open && c->started && !c->lost) {
         thread_set_realtime(true);
         capture_run(*c, frames);
         thread_set_realtime(false);
@@ -204,6 +250,21 @@ u32 hifi_capture_holds(HifiCapture* c) {
     u32 n = c->holds;
     os_mutex_unlock(&c->lock);
     return n;
+}
+
+void hifi_capture_unplug(HifiCapture* c) {
+    os_mutex_lock(&c->lock);
+    c->unplugged = true;
+    if (c->open) c->lost = true;
+    os_mutex_unlock(&c->lock);
+    hifi_devices_changed();
+}
+
+void hifi_capture_plug(HifiCapture* c) {
+    os_mutex_lock(&c->lock);
+    c->unplugged = false;
+    os_mutex_unlock(&c->lock);
+    hifi_devices_changed();
 }
 
 u32 hifi_capture_opens(HifiCapture* c) {

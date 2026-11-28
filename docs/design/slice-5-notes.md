@@ -58,3 +58,75 @@ seen to work. Under Wayland nothing is placed and the place last kept is left al
 | `blackwing_script` | 41 |
 | `ui_dev` | 284 |
 | the rest | as before |
+
+## Milestone 1, devices on Linux
+
+Nov 27, 2026.
+
+**What was built.** `hifi_platform` lists the sinks from PipeWire's registry and the
+default from its metadata, watches both, opens a sink by its `node.name` and says when an
+open one has gone. `hifi` takes `hifi_set_device` and says `Lost`. The player publishes
+`player.devices`, takes `PlayerSelectDevice`, says `PlayerDeviceChanged`, and holds the
+rules; the session keeps the device chosen; `blackwing` reads its first setting,
+`absent_device`. The capture device can be pulled and plugged on cue.
+
+**No reconnecting.** WirePlumber moves a stream whose sink went to another sink. A
+headphone DAC pulled would then become the laptop's speakers, which is the one thing a
+pull must not do. So every stream names its sink (`target.object`) and asks not to be
+moved (`node.dont-reconnect`), and a pull is a loss, which the player turns into a pause.
+Following the default is the player's: on a new default it opens the new one and jumps
+there from the frame heard.
+
+**Found: a pull taken for an absence.** The first build moved the music to the default
+when the sink chosen went, because "the chosen device is not there: the default stands
+in" was applied to a device pulled from under the music. Through a real PipeWire it put
+about three seconds of an 8 kHz test tone on this machine's USB DAC. Now a device that
+goes while open is left to the loss, and the stand-in rule is applied only at a start, a
+choice and a press of play. **Also made sound:** testing the stand-in at start (a sink
+chosen that did not exist yet), WirePlumber had set the default back to the USB DAC, and
+about 1.5 s of the tone played there as designed. Checks through real PipeWire since name
+a null sink of their own, which cannot be rerouted.
+
+**Found: a loss leaves `hifi` clean.** A device reopened for a source the lost one had
+left half played was a state no test had seen, and a jump after it was sometimes never
+joined. A loss now drops what `hifi` held, as a flush does; the player keeps the frame
+heard and jumps there. Also found under the thread sanitizer: the stall check (two
+seconds with no callback) read the callback's own `running`; it now goes by the callback
+count and whether the device was held at the last look.
+
+**Measured, through PipeWire into null sinks** (their graph period is 1024 frames, about
+21 ms at 48 kHz):
+
+| what | |
+|---|---|
+| a sink made, to listed | 10 ms |
+| a sink destroyed under a stream, to lost | 2.1 ms |
+| the default moved, to the music on the new one | the tick after the metadata changed; it went on from the frame heard (7,180 of 8 kHz) |
+| the sink chosen made after start, to moved back from the stand-in | the tick after it was listed; from the frame heard (7,181) |
+| a volume change, to heard (20, a real album) | 0.4 to 21.5 ms, median 15: within one period of the null sink |
+| a seek, to heard (20) | 3.9 to 25 ms, median 16 |
+
+The last two are not slice 2's 2 to 13 ms through the USB DAC, whose period is 128 frames:
+a null sink's period is eight times longer, and bounds them. Through a real device they
+are owed (milestone 8), as is KR10's effect on them.
+
+**Not done, and owed:**
+
+- **Headphones out on the same card**: a jack is a route of the device, not a sink of
+  its own, and a route changing (headphones to speakers) is not seen yet. It wants the
+  device's `Route` parameter watched, and a hand to pull a plug: by hand, at the close.
+- **A sink's channels and whether it can be opened alone**: not in the registry's
+  properties, so `0` and false for now; milestone 7 reads the node's own.
+- **The USB DAC pulled by hand**, and a Bluetooth headset: the null sinks stand in for
+  them in the tests; the real ones are for the close.
+- **`play FILE` with its device pulled** waits, paused, for a press (`player play` on the
+  command line); a command that cannot finish is a question for the faces' slice.
+
+| suite | checks |
+|---|---|
+| `hifi_platform` | 44 (24 before: the capture device pulled; a null sink made, opened, destroyed) |
+| `hifi` | 356 (342: the loss) |
+| `blackwing_player` | 214 (195: pulled, waited, plugged back, chosen) |
+| `blackwing_session` | 56 (47: the device kept and put back) |
+| `blackwing_script` | 42 (41: the walk chooses a device and hears it move) |
+| `ui_dev` | 284 (the Tables panel lists `player.devices`) |

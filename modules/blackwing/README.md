@@ -18,7 +18,7 @@ blackwing help                       the commands the engine knows
 | option | what |
 |---|---|
 | `--face NAME` | which face is up: `dev`, or `none` (no window). Without a command it is `dev`; with one, `none` unless said |
-| `--device NAME` | the output device: `default` (PipeWire on Linux), or `capture` (no hardware) |
+| `--device NAME` | the output device: `default` (the system's, followed: PipeWire's default sink on Linux), a name `player devices` lists (a PipeWire sink's `node.name`), or `capture` (no hardware). Named here, the session's device is not put back |
 | `--capture-to FILE` | play into the capture device and write what reached it, as raw PCM, at exit (with no face) |
 | `--lead SECONDS` | how far ahead of the playhead audio is kept (5) |
 | `--data DIR` | where the library keeps its index and its list of roots (the per-user data directory's `library/`), and with it the session (the user's settings directory) |
@@ -39,6 +39,12 @@ It is saved a few seconds after anything changes, every ten seconds while playin
 at exit, so a kill loses seconds. `play` and `run` are commands, not sittings: they
 neither restore nor save.
 
+**The settings** are the engine's store (`settings.json` in the user's settings directory,
+or in `--data`'s directory). One is read so far: `absent_device`, `"default"` (a device
+chosen and not there: the system's default plays meanwhile, and the music moves back
+when it comes) or `"wait"` (nothing plays until it comes). A device pulled while
+playing pauses whichever is set.
+
 `run` loads one Lua script ([blackwing_script](../blackwing_script/README.md)): every
 command, notification, table and resource of the player and the library by the name
 native code uses. The script ends the run: with the code it gives `kv.quit`, or 1 if it
@@ -49,7 +55,7 @@ pause`, `player play`, `player next`, `player previous`, `player jump ROW`, `pla
 SECONDS`, `player seekby SECONDS`, `player volume DB`, `player mute on|off`, `player set
 STAGE PARAM VALUE`, `player eq BAND DB`, `player eq preset NAME`, `player eq presets`,
 `player remove ROW`, `player move ROW [BEFORE]`, `player insert BEFORE FILE...`, `player
-clear`, `player stop`, `player status`, `library add DIR`, `library remove ROOT`, `library
+devices`, `player device NAME|default`, `player clear`, `player stop`, `player status`, `library add DIR`, `library remove ROOT`, `library
 status`, `library find WORDS`, `library play N` (the N-th the last find listed), `library
 override N FIELD [VALUE...|--clear]` (no value hides the field), `quit`; and with a
 face, `window status [reset]`, `window minimize`, `window restore`, `window stall

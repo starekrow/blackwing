@@ -69,6 +69,7 @@ enum class HifiEventKind : u8 {
     Underrun, // the lead ran dry while more was expected: `frames` is how many times since the last poll
     Want,     // the source's decoder is waiting for `need`, a range of its file. Said once per wait
     ParamsHeard, // the chain's parameters as of generation `frames` (hifi_set_param's) are what is heard now
+    Lost,     // the device went (unplugged, its server gone, or it stopped calling back): `reason`; `source` 0. It is closed, what was given it and not heard is not counted heard, and no device is opened again until hifi_set_device. What it held goes as at a flush (the sources are Released): a jump takes up from what was heard
     Count
 };
 
@@ -104,6 +105,8 @@ struct HifiStatus {
     u32              underruns   = 0; // ever
     u64              source      = 0; // the source being heard; 0 between sources
     u64              position    = 0; // the frame of it being heard: its start, and the frames heard since
+    bool             lost        = false; // the device went, and none has been named since (hifi_set_device)
+    char             device[kHifiDeviceNameMax] = ""; // the device open, by its name in hifi_devices; empty when none is
 };
 
 // Starts the render thread. Not paused. Null only if the thread cannot start.
@@ -139,6 +142,13 @@ void hifi_replace_after(Hifi* h, u64 id, const HifiSource* sources, u32 n);
 // decode ends there, Damaged with `reason`, or it Fails if it had not opened yet. What
 // was decoded before plays.
 void hifi_starve(Hifi* h, u64 id, const char* reason);
+// Plays on another device from now: the one open is closed (what it had not played is not
+// heard), and the next is opened by `name` (as HifiConfig::device; `backend` as its
+// device_backend) when there is something to play. What was in the lead is not carried
+// over, so a caller that wants the music to go on follows this with a jump to what was
+// heard. Also how a device is named again after a Lost. An empty name is none: nothing is
+// opened (and no source fails for want of a device) until one is named.
+void hifi_set_device(Hifi* h, const char* name, void* backend);
 // Bytes a source may have been waiting for have arrived: the render thread looks again
 // now rather than at its next nap. Cheap, and harmless when nothing was waiting. Not for
 // a realtime thread.

@@ -1287,3 +1287,49 @@ void test_hifi_gapless(TestCtx& c) {
     r.free();
     drop(a); drop(b); drop(fa); drop(fb);
 }
+
+// The device pulled out mid-stream: Lost, with what it had and never played not counted
+// heard; closed, and not opened again by itself; then named again and jumped to what was
+// heard, the music goes on from there, exact, on a device opened anew.
+void test_hifi_lost(TestCtx& c) {
+    c.begin("hifi lost");
+    File fa = read_data("tone_16_2ch_44100.flac");
+    Pcm a = decode(fa);
+    Rig r; r.make(1000); // a delay of a thousand frames: what is in it when the device goes was never heard
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(fa.bytes())});
+    KV_CHECK(c, r.wait_written(a.frames));
+    for (u32 i = 0; i < 16; ++i) r.pull(500);
+    KV_CHECK(c, r.status().position == 7000);
+    hifi_capture_unplug(r.cap);
+    KV_CHECK(c, r.wait_event(HifiEventKind::Lost, 0));
+    const HifiEvent* lost = r.find(HifiEventKind::Lost, 0);
+    KV_CHECK(c, lost && strstr(lost->reason, "unplugged"));
+    HifiStatus s = r.status();
+    KV_CHECK(c, s.lost && !s.device_open && s.device[0] == 0);
+    KV_CHECK(c, r.status().heard <= 7000); // the delay's frames were never heard, and are not counted (the player keeps the frame)
+    time_sleep(0.05);
+    KV_CHECK(c, hifi_capture_opens(r.cap) == 1); // nothing opened again by itself
+    hifi_capture_plug(r.cap);
+    time_sleep(0.05);
+    KV_CHECK(c, hifi_capture_opens(r.cap) == 1); // not even when it comes back: that is the caller's to say
+    // Named again, and the music jumped to from what was heard.
+    hifi_set_device(r.h, "capture", r.cap);
+    File fb = read_data("tone_16_2ch_44100.flac");
+    HifiSource again{2, &k_flac_decoder, sparse_whole(fb.bytes())};
+    again.start = 7000;
+    again.seek  = true;
+    hifi_jump(r.h, &again, 1);
+    KV_CHECK(c, r.wait_flushed());
+    f64 until = time_now() + 2.0;
+    while (!r.status().device_open && time_now() < until) time_sleep(0.0005); // opened anew, when there is something to play
+    KV_CHECK(c, r.status().device_open && r.wait_lead(12000)); // a device opened anew starts once it has the start's quarter second
+    for (u32 i = 0; i < 16; ++i) r.pull(500);
+    KV_CHECK(c, hifi_capture_opens(r.cap) == 2 && !r.status().lost && strcmp(r.status().device, "capture") == 0);
+    KV_CHECK(c, r.has(HifiEventKind::Seeked, 2));
+    HifiCaptureSegment seg[2];
+    KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 2);
+    const u8* data = hifi_capture_data(r.cap) + seg[1].offset;
+    KV_CHECK(c, same(data, seg[1].format, 2000, a, 9000, 2000)); // past the fade in: the file's own, from where it was heard
+    r.free();
+    drop(a); drop(fa); drop(fb);
+}

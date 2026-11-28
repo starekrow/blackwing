@@ -51,6 +51,7 @@
 #include "korvid/frameloop/frameloop.h"
 #include "korvid/hifi_platform/capture.h"
 #include "korvid/platform/io.h"
+#include "korvid/platform/settings.h"
 #include "korvid/platform/module.h"
 #include "korvid/ui_dev/ui_dev.h"
 #include <signal.h>
@@ -344,6 +345,7 @@ constinit const FrameLoopConfig k_window = {
 
 int run(int argc, char** argv, bool* engine_owns_exit) {
     const char* device = "default";
+    bool device_named = false;
     const char* capture_to = nullptr;
     const char* data_dir = nullptr;
     const char* face = nullptr;
@@ -363,7 +365,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         if (pass && (!pass->value || first + 1 < argc)) {
             if (loop_argc + 2 < (int)KV_COUNTOF(loop_argv)) { loop_argv[loop_argc++] = argv[first]; if (pass->value) loop_argv[loop_argc++] = argv[++first]; }
         }
-        else if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) device = argv[++first];
+        else if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) { device = argv[++first]; device_named = true; }
         else if (strcmp(argv[first], "--capture-to") == 0 && first + 1 < argc) capture_to = argv[++first];
         else if (strcmp(argv[first], "--lead") == 0 && first + 1 < argc) lead = atof(argv[++first]);
         else if (strcmp(argv[first], "--data") == 0 && first + 1 < argc) data_dir = argv[++first];
@@ -409,6 +411,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     SessionConfig session;
     session.enabled = !no_session && !play && !script && !help && (window || library);
     session.dir = data_dir; // beside the library's, when a directory was named; else the user's settings directory
+    session.restore_device = !device_named && !capture_to; // a device named on the command line is this run's
     session_configure(session);
     g_start_library = library;
     g_start_play = play;
@@ -428,6 +431,21 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     pc.device = device;
     pc.device_backend = capture; // none: the capture device, asked for by name, is the player's own
     pc.lead_seconds = lead;
+    // The settings, read before the engine starts: `absent_device` is "default" (a device
+    // chosen and not there: the default plays meanwhile) or "wait" (nothing plays until it
+    // comes). The store's file is the engine's settings.json.
+    {
+        char settings_at[4200];
+        if (session_dir(data_dir, settings_at, sizeof settings_at)) {
+            if (SettingsStore* st = settings_open_dir(settings_at)) {
+                const char* absent = settings_string(st, "absent_device", "default");
+                pc.wait_for_absent = strcmp(absent, "wait") == 0;
+                if (strcmp(absent, "wait") != 0 && strcmp(absent, "default") != 0)
+                    fprintf(stderr, "blackwing: the setting absent_device is \"%s\", which is neither \"default\" nor \"wait\": the default is used\n", absent);
+                settings_close(st);
+            }
+        }
+    }
     player_configure(pc);
     LibraryConfig lc;
     lc.data_dir = data_dir;

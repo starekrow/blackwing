@@ -1,5 +1,17 @@
-// The PipeWire backend: the device named "default" (or "pipewire") on Linux, a playback
-// stream on the default sink, asking for the source's own rate, channels and samples.
+// The PipeWire backend on Linux: a playback stream on a sink, asking for the source's own
+// rate, channels and samples. "default" (or "pipewire") is the default sink as it is when
+// the device is opened; any sink's node.name names that one.
+//
+// The sinks. A registry on the connection lists every Audio/Sink node, and the "default"
+// metadata says which is the default (default.audio.sink). A sink that goes stays in the
+// list, not present, so what was pulled can be said; one that comes back under the same
+// node.name takes its row again.
+//
+// No reconnecting. A stream is linked to the sink it names (target.object) and told not to
+// be moved (node.dont-reconnect): when its sink goes, PipeWire's session manager would
+// otherwise move the music to another sink, and the speakers are the thing a pulled
+// headphone DAC must not become. So the device is lost instead, and what to do next is the
+// player's. A default that changes moves nothing either; the player opens the new one.
 //
 // One connection for the process. The first open makes a pw_thread_loop, a context and a
 // connection to the daemon, and they stay until the process ends; each device is a stream
@@ -34,6 +46,8 @@
 #include <sched.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -47,6 +61,7 @@
 #pragma GCC diagnostic ignored "-Wconversion"
 #endif
 #include <pipewire/pipewire.h>
+#include <pipewire/extensions/metadata.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
 #if defined(__GNUC__)
@@ -67,6 +82,14 @@ u64 mono_ns() {
 }
 
 // The process's connection. Static, so Korvid's leak count at exit does not see it.
+// A sink, as the registry says it (under the loop's lock).
+struct PwSink {
+    u32            id = 0;      // the registry's: 0 when it has gone
+    HifiDeviceInfo info;
+};
+
+struct PwDevice;
+
 struct PwSession {
     pw_thread_loop* loop    = nullptr;
     pw_context*     context = nullptr;
@@ -74,6 +97,20 @@ struct PwSession {
     spa_hook        core_listener{};
     pw_core_events  core_events{};
     bool            broken  = false; // the daemon went away: connect again at the next open (under the loop's lock)
+    // The registry, and the sinks it has said (under the loop's lock).
+    pw_registry*    registry = nullptr;
+    spa_hook        registry_listener{};
+    pw_registry_events registry_events{};
+    pw_metadata*    meta = nullptr;
+    u32             meta_id = 0;
+    spa_hook        meta_listener{};
+    pw_metadata_events meta_events{};
+    int             sync_seq = -1;
+    bool            synced   = false;
+    PwSink          sinks[kHifiMaxDevices];
+    u32             nsinks   = 0;
+    char            default_sink[kHifiDeviceNameMax] = "";
+    PwDevice*       open[16] = {};   // the streams open now, to be told when their sink goes
 };
 constinit PwSession g_pw{};
 constinit u32       g_pw_making = 0; // atomic: a spin lock around making the session
@@ -108,7 +145,20 @@ struct PwDevice {
     i32 policy      = -1; // the data thread's scheduling policy (as of its last look), and its priority or nice
     i32 priority    = 0;
     i32 nice        = 0;
+
+    // The sink it plays to, and whether it went (under the loop's lock; `lost` also read
+    // without it, as an atomic, and `lost_why` once `lost` is seen).
+    char target[kHifiDeviceNameMax] = "";
+    u32  lost = 0;
+    char lost_why[96] = "";
 };
+
+// Under the loop's lock: the device has gone. Its delay stops where it was.
+void mark_lost(PwDevice& d, const char* why) {
+    if (atomic_load(&d.lost, MO_RELAXED)) return;
+    snprintf(d.lost_why, sizeof d.lost_why, "%s", why);
+    atomic_store(&d.lost, 1u, MO_RELEASE);
+}
 
 spa_audio_format spa_format_of(HifiSampleFormat f) {
     switch (f) {
@@ -149,6 +199,7 @@ void on_state(void* data, pw_stream_state, pw_stream_state state, const char* er
             d.why = "PipeWire refused the playback stream";
         } else if (!atomic_load(&d.quit, MO_ACQUIRE)) {
             KV_WARN("hifi_platform", "pipewire: the stream stopped: %s", error ? error : "no reason given");
+            mark_lost(d, error && error[0] ? error : "PipeWire stopped the stream");
         }
     }
     if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) d.negotiated = true;
@@ -167,6 +218,136 @@ void on_param(void* data, u32 id, const spa_pod* param) {
         d.why = "PipeWire would not take the stream's format";
     }
     pw_thread_loop_signal(g_pw.loop, false);
+}
+
+// ---- the registry ----------------------------------------------------------------------
+
+// The name in a default.audio.sink value, `{"name":"..."}`, into out.
+void default_name_of(const char* value, char* out, usize cap) {
+    out[0] = 0;
+    const char* k = value ? strstr(value, "\"name\"") : nullptr;
+    if (!k) return;
+    const char* q = strchr(k + 6, '"');
+    if (!q) return;
+    const char* e = strchr(q + 1, '"');
+    if (!e) return;
+    snprintf(out, cap, "%.*s", (int)(e - q - 1), q + 1);
+}
+
+int on_meta_property(void*, u32 subject, const char* key, const char*, const char* value) {
+    if (subject != PW_ID_CORE) return 0;
+    if (!key || strcmp(key, "default.audio.sink") == 0) {
+        char was[kHifiDeviceNameMax];
+        snprintf(was, sizeof was, "%s", g_pw.default_sink);
+        default_name_of(key ? value : nullptr, g_pw.default_sink, sizeof g_pw.default_sink);
+        if (strcmp(was, g_pw.default_sink) != 0) hifi_devices_changed();
+    }
+    return 0;
+}
+
+void on_global(void*, u32 id, u32, const char* type, u32, const spa_dict* props) {
+    if (!props) return;
+    if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
+        const char* name = spa_dict_lookup(props, PW_KEY_METADATA_NAME);
+        if (!name || strcmp(name, "default") != 0 || g_pw.meta) return;
+        g_pw.meta = (pw_metadata*)pw_registry_bind(g_pw.registry, id, type, PW_VERSION_METADATA, 0);
+        if (!g_pw.meta) return;
+        g_pw.meta_id = id;
+        memset(&g_pw.meta_listener, 0, sizeof g_pw.meta_listener);
+        memset(&g_pw.meta_events, 0, sizeof g_pw.meta_events);
+        g_pw.meta_events.version  = PW_VERSION_METADATA_EVENTS;
+        g_pw.meta_events.property = on_meta_property;
+        pw_metadata_add_listener(g_pw.meta, &g_pw.meta_listener, &g_pw.meta_events, nullptr);
+        return;
+    }
+    if (strcmp(type, PW_TYPE_INTERFACE_Node) != 0) return;
+    const char* cls = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+    const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
+    if (!cls || strcmp(cls, "Audio/Sink") != 0 || !name || !name[0]) return;
+    PwSink* s = nullptr;
+    for (u32 i = 0; i < g_pw.nsinks; ++i) if (strcmp(g_pw.sinks[i].info.name, name) == 0) s = &g_pw.sinks[i];
+    if (!s) {
+        if (g_pw.nsinks == kHifiMaxDevices) { // full: a gone row makes room
+            for (u32 i = 0; i < g_pw.nsinks && !s; ++i) if (!g_pw.sinks[i].id) s = &g_pw.sinks[i];
+            if (!s) return;
+        } else {
+            s = &g_pw.sinks[g_pw.nsinks++];
+        }
+    }
+    *s = PwSink{};
+    s->id = id;
+    HifiDeviceInfo& d = s->info;
+    snprintf(d.name, sizeof d.name, "%s", name);
+    const char* label = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
+    if (!label) label = spa_dict_lookup(props, PW_KEY_NODE_NICK);
+    snprintf(d.label, sizeof d.label, "%s", label ? label : name);
+    snprintf(d.backend, sizeof d.backend, "pipewire");
+    d.present = true;
+    d.shared  = true;
+    const char* ch = spa_dict_lookup(props, "audio.channels");
+    d.channels = ch ? (u16)atoi(ch) : 0;
+    const char* api = spa_dict_lookup(props, PW_KEY_DEVICE_API);
+    d.can_exclusive = api && strcmp(api, "alsa") == 0 && spa_dict_lookup(props, "api.alsa.path");
+    hifi_devices_changed();
+}
+
+void on_global_remove(void*, u32 id) {
+    if (g_pw.meta && id == g_pw.meta_id) {
+        spa_hook_remove(&g_pw.meta_listener);
+        pw_proxy_destroy((pw_proxy*)g_pw.meta);
+        g_pw.meta = nullptr;
+        g_pw.meta_id = 0;
+        g_pw.default_sink[0] = 0;
+        hifi_devices_changed();
+        return;
+    }
+    for (u32 i = 0; i < g_pw.nsinks; ++i) {
+        PwSink& s = g_pw.sinks[i];
+        if (s.id != id) continue;
+        s.id = 0;
+        s.info.present = false;
+        for (PwDevice* d : g_pw.open) if (d && strcmp(d->target, s.info.name) == 0) mark_lost(*d, "the device went away");
+        hifi_devices_changed();
+        return;
+    }
+}
+
+void on_core_done(void*, u32 id, int seq) {
+    if (id == PW_ID_CORE && seq == g_pw.sync_seq) { g_pw.synced = true; pw_thread_loop_signal(g_pw.loop, false); }
+}
+
+// Under the loop's lock, the session usable: the registry made, if it is not, and waited
+// for (a second at most) so the list is whole the first time it is read.
+void ensure_registry() {
+    if (g_pw.registry) return;
+    g_pw.registry = pw_core_get_registry(g_pw.core, PW_VERSION_REGISTRY, 0);
+    if (!g_pw.registry) return;
+    memset(&g_pw.registry_listener, 0, sizeof g_pw.registry_listener);
+    memset(&g_pw.registry_events, 0, sizeof g_pw.registry_events);
+    g_pw.registry_events.version       = PW_VERSION_REGISTRY_EVENTS;
+    g_pw.registry_events.global        = on_global;
+    g_pw.registry_events.global_remove = on_global_remove;
+    pw_registry_add_listener(g_pw.registry, &g_pw.registry_listener, &g_pw.registry_events, nullptr);
+    g_pw.synced = false;
+    g_pw.sync_seq = pw_core_sync(g_pw.core, PW_ID_CORE, 0);
+    // Twice: the metadata's properties come after the bind, which the first round asked for.
+    for (int round = 0; round < 2; ++round) {
+        timespec until;
+        pw_thread_loop_get_time(g_pw.loop, &until, (i64)500000000);
+        while (!g_pw.synced && !g_pw.broken)
+            if (pw_thread_loop_timed_wait_full(g_pw.loop, &until) != 0) break;
+        if (round == 0) { g_pw.synced = false; g_pw.sync_seq = pw_core_sync(g_pw.core, PW_ID_CORE, 0); }
+    }
+}
+
+// Under the loop's lock: what the registry knew is gone with the connection.
+void forget_registry() {
+    if (g_pw.meta) { spa_hook_remove(&g_pw.meta_listener); g_pw.meta = nullptr; g_pw.meta_id = 0; }
+    if (g_pw.registry) { spa_hook_remove(&g_pw.registry_listener); g_pw.registry = nullptr; }
+    for (u32 i = 0; i < g_pw.nsinks; ++i) { g_pw.sinks[i].id = 0; g_pw.sinks[i].info.present = false; }
+    g_pw.default_sink[0] = 0;
+    for (PwDevice* d : g_pw.open) if (d) mark_lost(*d, "the connection to PipeWire was lost");
+    hifi_devices_changed();
 }
 
 // ---- the data thread -------------------------------------------------------------------
@@ -231,11 +412,23 @@ void on_process(void* data) {
 
 // ---- the backend -----------------------------------------------------------------------
 
-bool pw_has(const char* name) { return strcmp(name, "default") == 0 || strcmp(name, "pipewire") == 0; }
+bool session_lock(const char** why);
+
+// "default", "pipewire", or a sink the registry has said, there now or not.
+bool pw_has(const char* name) {
+    if (strcmp(name, "default") == 0 || strcmp(name, "pipewire") == 0) return true;
+    const char* why = "";
+    if (!session_lock(&why)) return false;
+    bool found = false;
+    for (u32 i = 0; i < g_pw.nsinks && !found; ++i) found = strcmp(g_pw.sinks[i].info.name, name) == 0;
+    pw_thread_loop_unlock(g_pw.loop);
+    return found;
+}
 
 void on_core_error(void*, u32 id, int, int res, const char* message) {
     if (id == PW_ID_CORE && res == -EPIPE) {
         g_pw.broken = true;
+        forget_registry();
         KV_WARN("hifi_platform", "pipewire: the connection to the daemon was lost: %s", message ? message : "no reason given");
     }
     pw_thread_loop_signal(g_pw.loop, false);
@@ -278,9 +471,11 @@ bool session_lock(const char** why) {
                 memset(&g_pw.core_events, 0, sizeof g_pw.core_events);
                 g_pw.core_events.version = PW_VERSION_CORE_EVENTS;
                 g_pw.core_events.error   = on_core_error;
+                g_pw.core_events.done    = on_core_done;
                 pw_core_add_listener(g_pw.core, &g_pw.core_listener, &g_pw.core_events, nullptr);
             }
         }
+        if (ok) ensure_registry();
         if (!ok) pw_thread_loop_unlock(g_pw.loop);
     }
     atomic_store(&g_pw_making, 0u, MO_RELEASE);
@@ -304,7 +499,24 @@ void* pw_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
     const char* why = "";
     if (!session_lock(&why)) { out.reason = why; return nullptr; }
     // The loop is locked from here.
+    const char* want = desc.name ? desc.name : "default";
+    char target[kHifiDeviceNameMax] = "";
+    if (strcmp(want, "default") == 0 || strcmp(want, "pipewire") == 0) {
+        snprintf(target, sizeof target, "%s", g_pw.default_sink);
+    } else {
+        for (u32 i = 0; i < g_pw.nsinks; ++i) if (g_pw.sinks[i].id && strcmp(g_pw.sinks[i].info.name, want) == 0) snprintf(target, sizeof target, "%s", want);
+        if (!target[0]) { pw_thread_loop_unlock(g_pw.loop); out.reason = "that output device is not there"; return nullptr; }
+    }
+    if (!target[0]) {
+        bool any = false;
+        for (u32 i = 0; i < g_pw.nsinks; ++i) any = any || g_pw.sinks[i].id;
+        if (!any) { pw_thread_loop_unlock(g_pw.loop); out.reason = "there is no output device"; return nullptr; }
+    }
+    u32 slot = 0;
+    while (slot < 16 && g_pw.open[slot]) ++slot;
+    if (slot == 16) { pw_thread_loop_unlock(g_pw.loop); out.reason = "too many PipeWire streams are open"; return nullptr; }
     PwDevice* d = new (mem_alloc(sizeof(PwDevice))) PwDevice();
+    snprintf(d->target, sizeof d->target, "%s", target);
     d->format      = desc.want;
     d->callback    = desc.callback;
     d->user        = desc.user;
@@ -315,6 +527,8 @@ void* pw_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
                                              PW_KEY_NODE_NAME, "blackwing", nullptr);
     pw_properties_setf(props, PW_KEY_NODE_RATE, "1/%u", desc.want.rate);
     pw_properties_setf(props, PW_KEY_NODE_LATENCY, "%u/%u", kPeriodFrames, desc.want.rate);
+    if (target[0]) pw_properties_set(props, PW_KEY_TARGET_OBJECT, target);
+    pw_properties_set(props, PW_KEY_NODE_DONT_RECONNECT, "true");
     d->stream = pw_stream_new(g_pw.core, "Blackwing", props);
     if (!d->stream) {
         pw_thread_loop_unlock(g_pw.loop);
@@ -352,11 +566,13 @@ void* pw_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
         why = d->failed ? d->why : g_pw.broken ? "the connection to PipeWire was lost" : "PipeWire did not answer within five seconds";
     }
     if (!ok) end_stream(d);
+    else g_pw.open[slot] = d;
     pw_thread_loop_unlock(g_pw.loop);
     if (!ok) { free_device(d); out.reason = why; return nullptr; }
 
     out.format = desc.want;
     out.shared = true;
+    snprintf(out.name, sizeof out.name, "%s", target[0] ? target : "default");
     return d;
 }
 
@@ -387,6 +603,7 @@ u32 pw_delay(void* impl) {
         atomic_fence(MO_ACQUIRE);
     } while ((s & 1u) || s != atomic_load(&d.seq, MO_RELAXED));
     if (s == 0) return 0; // nothing has been taken yet
+    if (atomic_load(&d.lost, MO_ACQUIRE)) return delay; // gone: what it had queued was not heard
     u64 played = (mono_ns() - at) * d.format.rate / 1000000000ull;
     return played >= delay ? 0 : delay - (u32)played;
 }
@@ -403,6 +620,7 @@ const char* policy_name(i32 p) {
 void pw_close(void* impl) {
     PwDevice* d = (PwDevice*)impl;
     pw_thread_loop_lock(g_pw.loop);
+    for (PwDevice*& x : g_pw.open) if (x == d) x = nullptr;
     end_stream(d); // the data thread is done with it, so what it counted can be read
     pw_thread_loop_unlock(g_pw.loop);
     u64 callbacks = atomic_load(&d->callbacks, MO_RELAXED), worst = atomic_load(&d->worst_ns, MO_RELAXED);
@@ -421,11 +639,29 @@ void pw_close(void* impl) {
                 (unsigned long long)callbacks, most, most * ms, worst / 1000.0, most_delay * ms, policy_name(policy), nice);
 }
 
+const char* pw_lost(void* impl) {
+    PwDevice& d = *(PwDevice*)impl;
+    return atomic_load(&d.lost, MO_ACQUIRE) ? d.lost_why : nullptr;
+}
+
+u32 pw_list(HifiDeviceInfo* out, u32 cap) {
+    const char* why = "";
+    if (!session_lock(&why)) return 0; // no PipeWire: no devices of its
+    u32 n = 0;
+    for (u32 i = 0; i < g_pw.nsinks && n < cap; ++i) {
+        out[n] = g_pw.sinks[i].info;
+        out[n].is_default = out[n].present && strcmp(out[n].name, g_pw.default_sink) == 0;
+        ++n;
+    }
+    pw_thread_loop_unlock(g_pw.loop);
+    return n;
+}
+
 } // namespace
 
 constinit const HifiBackend k_pipewire_backend = {
     .name = "pipewire", .has = pw_has, .open = pw_open, .start = pw_start, .delay = pw_delay, .hold = pw_hold,
-    .close = pw_close,
+    .close = pw_close, .lost = pw_lost, .list = pw_list,
 };
 
 } // namespace kv

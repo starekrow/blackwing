@@ -63,6 +63,7 @@ struct SessionConfig {
     f64  change_seconds   = 3.0;       // a change is saved once nothing more has changed for this long: a drag is one write
     f64  position_seconds = 10.0;      // while playing, the position is saved this often: what a kill can lose
     u32  rows_per_tick    = 64;        // the saved queue is enqueued this many rows a tick
+    bool restore_device   = true;      // false: the output device chosen is kept but not put back (one was named on the command line)
 };
 // Before engine_init.
 void session_configure(const SessionConfig& config);

@@ -61,7 +61,7 @@ constexpr u32 kMaxPending  = 256;  // commands, and events, in flight
 constexpr u32 kMaxStarved  = 16;   // sources told their bytes will not come, remembered
 constexpr f64 kWantNap     = 0.002; // how soon a decoder waiting for bytes, or a join, is looked at again
 
-enum class CmdKind : u8 { Add, Flush, Jump, Replace, Starve, Param, Quit };
+enum class CmdKind : u8 { Add, Flush, Jump, Replace, Starve, Param, Device, Quit };
 struct Cmd {
     CmdKind    kind = CmdKind::Add;
     HifiSource source;
@@ -70,6 +70,8 @@ struct Cmd {
     f64        value = 0.0;
     u64        sent_ns = 0;            // when the caller sent it
     char       reason[96] = "";
+    char       device[kHifiDeviceNameMax] = ""; // a Device command's name
+    void*      backend = nullptr;
 };
 
 constexpr u32 kAligned     = 0x80000000u; // a join request's id: an aligned recut's, not a caller's epoch
@@ -151,6 +153,9 @@ struct Hifi {
     Fifo<Cmd, kMaxPending>  cmds;
     Fifo<Note, kMaxPending> notes;
     HifiDevice*      device = nullptr; // opened and closed by the render thread, under the lock
+    char             device_name[kHifiDeviceNameMax] = ""; // what the open one is called (under the lock)
+    bool             lost = false;     // the device went: none is opened until one is named (under the lock)
+    u32              lost_delay = 0;   // its delay when it went: what it had and never played (under the lock)
     HifiDeviceFormat format;
     bool             shared = false;
     u32              device_bits = 0;  // the widest source so far in this device: for `exact`
@@ -225,6 +230,11 @@ struct Hifi {
     bool         cur_marked = false;   // its Started (or Seeked) mark is out
     bool         draining   = false;   // waiting for the lead to play out before the device changes
     u32          playout_waits = 0;    // looks, since there was work, for the device to have played out
+    u64          callbacks = 0;        // atomic, the callback's: how many there have been
+    u64          calls_seen = 0;       // the count as the render thread last saw it move, and when
+    f64          calls_seen_at = 0.0;
+    bool         held_seen = false;    // the device was held at the render thread's last look
+    char         dev_name[kHifiDeviceNameMax] = ""; // the device to open: HifiConfig::device, kept, or hifi_set_device's
     u32          render_epoch = 0;
     u32          wslot = 0;            // the slot this render writes
     u32          pending_epoch = 0;    // this render waits to be joined: its marks are its slot's frames
@@ -387,6 +397,7 @@ u32 crossfade(Hifi& h, u8* dst, u32 frames, u64* stream) {
 // ramp and the fade.
 void hifi_callback(void* user, void* out_v, u32 frames) {
     Hifi& h = *(Hifi*)user;
+    atomic_store(&h.callbacks, atomic_load(&h.callbacks, MO_RELAXED) + 1, MO_RELAXED);
     u8*   out = (u8*)out_v;
     const u32 fb = h.frame_bytes;
     const bool pause = atomic_load(&h.want_pause, MO_RELAXED) != 0;
@@ -631,6 +642,7 @@ void close_device(Hifi& h) {
     os_mutex_lock(&h.lock);
     HifiDevice* d = h.device;
     h.device = nullptr;
+    h.device_name[0] = 0;
     h.held   = false;
     os_mutex_unlock(&h.lock);
     if (d) hifi_device_close(d); // no callback runs after this
@@ -661,6 +673,7 @@ bool open_device(Hifi& h, const char** reason) {
     d.want     = HifiDeviceFormat{f.rate, f.channels, narrowest_for(f.bits)};
     d.callback = hifi_callback;
     d.user     = &h;
+    if (h.lost) { *reason = "the device went"; return false; }
     HifiDeviceOpened o = hifi_device_open(d);
     if (!o.device) { *reason = o.reason; return false; }
     if (o.format.rate != f.rate || o.format.channels != f.channels) {
@@ -717,6 +730,10 @@ bool open_device(Hifi& h, const char** reason) {
     h.req_id = 0;
     os_mutex_lock(&h.lock);
     h.device = o.device;
+    format(h.device_name, sizeof h.device_name, "%s", o.name);
+    h.lost_delay = 0;
+    h.calls_seen = atomic_load(&h.callbacks, MO_RELAXED); // a device opened has two seconds to call back
+    h.calls_seen_at = time_now();
     h.held   = false;
     h.format = o.format;
     h.shared = o.shared;
@@ -1081,10 +1098,55 @@ bool take_commands(Hifi& h) {
                 format(h.starved[h.nstarved].reason, sizeof h.starved[0].reason, "%s", c.reason);
                 ++h.nstarved;
             }
+        } else if (c.kind == CmdKind::Device) {
+            // Another device from now: this one closed, the next opened by name when there
+            // is something to play.
+            close_device(h);
+            os_mutex_lock(&h.lock);
+            format(h.dev_name, sizeof h.dev_name, "%s", c.device);
+            h.config.device = h.dev_name;
+            h.config.device_backend = c.backend;
+            h.lost = c.device[0] == 0; // none: nothing is opened until one is named
+            h.lost_delay = 0;
+            os_mutex_unlock(&h.lock);
+            h.draining = false;
         } else { // Flush or Jump: everything this render has goes, and a new one starts
             start_render(h, c.epoch, c.kind == CmdKind::Jump, c.sent_ns);
         }
     }
+}
+
+// The device gone, or stopped calling back while it should: it is closed, the caller told
+// (Lost), and none opened until one is named. A device held, or paused and so still
+// calling back with silence, is not expected to stall; one running should call back
+// within a period, and two seconds without one is a device that has stopped.
+void check_lost(Hifi& h) {
+    if (!h.device) return;
+    const char* why = hifi_device_lost(h.device);
+    u64 calls = atomic_load(&h.callbacks, MO_RELAXED);
+    f64 now = time_now();
+    os_mutex_lock(&h.lock);
+    bool held = h.held; // let go on the caller's thread (hifi_play), so read under the lock
+    os_mutex_unlock(&h.lock);
+    // A device held is not expected to call back, and one just let go has two seconds.
+    if (calls != h.calls_seen || held || h.held_seen) { h.calls_seen = calls; h.calls_seen_at = now; }
+    else if (!why && now - h.calls_seen_at > 2.0) why = "the device stopped calling back";
+    h.held_seen = held;
+    if (!why) return;
+    char reason[96];
+    format(reason, sizeof reason, "%s", why);
+    u32 delay = hifi_device_delay(h.device);
+    close_device(h);
+    // What it held goes, as at a flush: the rings were the device's, and whoever goes on
+    // jumps to what was heard (the sources are Released; the source ring is not carried).
+    start_render(h, h.render_epoch, false, 0);
+    os_mutex_lock(&h.lock);
+    h.lost = true;
+    h.lost_delay = delay;
+    os_mutex_unlock(&h.lock);
+    h.draining = false;
+    note(h, HifiEventKind::Lost, 0, reason); // about the device, not a source
+    KV_WARN("hifi", "the output device went: %s", reason);
 }
 
 // Waits up to `seconds`, or until a command comes or the caller wakes the thread
@@ -1166,6 +1228,7 @@ f64 render_step(Hifi& h) {
         h.draining = false;
     }
     if (!h.device) {
+        if (h.lost) return -1.0; // the device went: nothing is opened until one is named
         const char* why = "";
         if (!open_device(h, &why)) { fail_cur(h, why); return 0.0; }
     }
@@ -1257,6 +1320,7 @@ void render_thread(void* arg) {
     Hifi& h = *(Hifi*)arg;
     for (;;) {
         if (!take_commands(h)) break;
+        check_lost(h);
         // Every decoder call is inside this. The fence after the count orders this
         // thread's loads of the sources' maps after it (hifi_read_fence's other half).
         atomic_add_fetch(&h.readers, (u64)1, MO_SEQ_CST);
@@ -1278,7 +1342,7 @@ void render_thread(void* arg) {
             os_mutex_lock(&h.lock);
             // Play lets a held device go and wakes this thread: it may have more to play
             // out before it can be held again.
-            while (h.cmds.count == 0 && (!h.have_cur || atomic_load(&h.want_pause, MO_RELAXED)) && (h.held || !h.device))
+            while (h.cmds.count == 0 && (h.lost || !h.have_cur || atomic_load(&h.want_pause, MO_RELAXED)) && (h.held || !h.device))
                 os_cond_wait(&h.wake, &h.lock);
             os_mutex_unlock(&h.lock);
         }
@@ -1300,7 +1364,8 @@ void send(Hifi& h, const Cmd& c) {
 Hifi* hifi_create(const HifiConfig& config) {
     Hifi* h = new (mem_alloc(sizeof(Hifi))) Hifi();
     h->config = config;
-    if (!h->config.device) h->config.device = "default";
+    format(h->dev_name, sizeof h->dev_name, "%s", config.device && config.device[0] ? config.device : "default");
+    h->config.device = h->dev_name;
     os_mutex_init(&h->lock);
     os_cond_init(&h->wake);
     h->scratch = (i32*)mem_alloc((usize)kChunkFrames * 8 * sizeof(i32));
@@ -1346,6 +1411,13 @@ void hifi_play(Hifi* h) {
     h->woken = true;
     os_cond_signal(&h->wake); // the render thread may be waiting on a full lead
     os_mutex_unlock(&h->lock);
+}
+
+void hifi_set_device(Hifi* h, const char* name, void* backend) {
+    Cmd c; c.kind = CmdKind::Device;
+    format(c.device, sizeof c.device, "%s", name ? name : "");
+    c.backend = backend;
+    send(*h, c);
 }
 
 void hifi_wake(Hifi* h) {
@@ -1410,7 +1482,7 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
     u32 n = 0;
     // The render thread's notes: the timeless ones out at once, the marks kept until reached.
     os_mutex_lock(&h->lock);
-    u32 delay = h->device ? hifi_device_delay(h->device) : 0;
+    u32 delay = h->device ? hifi_device_delay(h->device) : h->lost_delay;
     while (h->notes.count) {
         Note& x = h->notes.at(0);
         bool mark = x.event.kind == HifiEventKind::Started || x.event.kind == HifiEventKind::Seeked || x.event.kind == HifiEventKind::Ended;
@@ -1488,6 +1560,8 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     s.shared = h->shared;
     s.exact  = s.device_open && !s.shared && h->device_bits <= hifi_sample_bits(h->format.sample);
     s.held   = h->held;
+    s.lost   = h->lost;
+    format(s.device, sizeof s.device, "%s", h->device_name);
     os_mutex_unlock(&h->lock);
     s.flushing = atomic_load(&h->flushes_done, MO_ACQUIRE) != h->epoch;
     s.paused  = atomic_load(&h->want_pause, MO_RELAXED) != 0;

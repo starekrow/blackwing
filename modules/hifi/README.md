@@ -204,15 +204,16 @@ Header `korvid/hifi/hifi.h`:
 | `HifiConfig` | record | `device`, `device_backend`, `lead_seconds` (5), `start_seconds` (0.25), `ramp_seconds` (0.005), `fade_seconds` (0.010), `join_seconds` (0.050) |
 | `HifiConfig::stages` | span | the chain, fixed for the path's life |
 | `HifiSource` | record | `id`, `decoder`, `file` (a `SparseSpan`), `start`, `seek` |
-| `HifiEventKind` | enum | `Started`, `Seeked`, `Ended`, `Failed`, `Released`, `Underrun`, `Want`, `ParamsHeard` |
+| `HifiEventKind` | enum | `Started`, `Seeked`, `Ended`, `Failed`, `Released`, `Underrun`, `Want`, `ParamsHeard`, `Lost` |
 | `HifiEvent` | record | `kind`, `source`, `info`, `status`, `frames`, `need`, `reason` |
-| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `flat`, `params_heard`, `recuts`, `recut_seconds`, `recut_render_seconds`, `jump_seconds`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position` |
+| `HifiStatus` | record | `device_open`, `format`, `shared`, `exact`, `paused`, `held`, `flushing`, `joining`, `flat`, `params_heard`, `recuts`, `recut_seconds`, `recut_render_seconds`, `jump_seconds`, `written`, `taken`, `heard`, `lead_frames`, `underruns`, `source`, `position`, `lost`, `device` |
 | `hifi_create(config)`, `hifi_destroy(h)` | functions | the path and its render thread |
 | `hifi_add_source(h, source)` | function | queue a source |
 | `hifi_pause(h)`, `hifi_play(h)`, `hifi_flush(h)` | functions | hold, let go, drop everything |
 | `hifi_jump(h, sources, n)` | function | everything replaced by these: the old fades out, the new fades in |
 | `hifi_replace_after(h, id, sources, n)` | function | what follows a source replaced: free before its end is rendered, a recut after |
 | `hifi_set_param(h, stage, param, value)` | function | a parameter of the chain, heard by a recut; returns its generation |
+| `hifi_set_device(h, name, backend)` | function | another device from now (empty: none, and nothing is opened); the caller jumps to what was heard |
 
 Header `korvid/hifi/stage.h`: `StageDesc` (`name`, `memory_bytes`, `params`, `presets`,
 `open`, `set`, `process`, `flat`, `run_in`, `reset`), `StageParam` (`name`, `initial`,
@@ -228,6 +229,13 @@ The module registers nothing with the engine yet: `blackwing_player` will hold a
 and publish what it says.
 
 ## Behaviour worth knowing
+
+- **A device that goes is Lost.** The render thread looks at each step: the backend's
+  word (`hifi_device_lost`), or two seconds with no callback from a device that is
+  neither held nor just let go. It closes the device, drops what it held as at a flush
+  (the sources are Released), stops counting heard what the device had and never played,
+  and opens nothing until `hifi_set_device` names one. Moving on is the caller's: name a
+  device and jump to the frame heard.
 
 - **A source's span is borrowed until `Released`**, which comes once for every time it
   was added, whatever happened to it, and usually long before it is heard: decoding runs

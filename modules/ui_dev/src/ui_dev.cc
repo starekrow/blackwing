@@ -344,7 +344,7 @@ constinit const HandlerDesc k_handlers[] = {
 };
 constinit const SystemDesc k_systems[] = {
     {.name = ".sync", .phase = Phase::PostSim, .fn = ui_dev_sync,
-     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets, library.roots, library.rows, library.scan",
+     .reads = "player.transport, player.output, player.queue, player.chain, player.params, player.presets, player.devices, library.roots, library.rows, library.scan",
      .emits = "LibraryQuery, LibraryPrioritize, LibraryPath, PlayerPlay, SessionKeep", .main_thread = true, .runs = RunWhen::Always},
     {.name = ".frame", .phase = Phase::Frame, .fn = ui_dev_frame, .main_thread = true},
 };

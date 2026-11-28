@@ -99,6 +99,9 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerSetParam` | event type | in: `stage`, `param`, `value`; volume is stage 0, param 0 (dB), mute param 1 |
 | `PlayerApplyPreset` | event type | in: `stage`, `preset` (a `player.presets` row's `index`); every parameter of the stage, in one recut |
 | `PlayerParamChanged` | event type | out: `stage`, `param`, `value`, `seq`; the value is what is heard |
+| `PlayerSelectDevice` | event type | in: `name` (a `player.devices` row's, or `default` to follow the system's); the music goes on there from the frame heard |
+| `PlayerDeviceChanged`, `PlayerDeviceChange` | event type, enum | out: `kind` (`Added`, `Gone`, `Back`, `Default`, `Lost`, `Moved`), `name`, `reason`, `seq` |
+| `PlayerDevice` | component | a row of `player.devices`: `name`, `label`, `backend`, `is_default`, `present`, `shared`, `can_exclusive`, `open`, `chosen`, `channels` |
 | `PlayerParam` | component | a row of `player.params`: `stage`, `index`, `value` (heard), `lo`, `hi`, `initial`, `step`, `name`, `unit` |
 | `PlayerPreset` | component | a row of `player.presets`: `stage`, `index`, `name` |
 | `PlayerStage` | component | `index`, `flat`, `params_len`, `name`, `param_names`, `params` (the values heard) |
@@ -110,8 +113,8 @@ Header `korvid/blackwing_player/player.h`:
 | `PlayerItem` | component | `id`, `pos`, `state`, `damaged`, `channels`, `bits`, `rate`, `frames`, `size`, `bytes_read`, `path`, `reason` |
 | `PlayerItemState`, `PlayerState` | enum | an item's state; the transport's |
 | `PlayerTransport` | record | `state`, `item`, `position`, `frames`, `rate`, `queued`, `left`, `place`, `place_pos`, `seek_item`, `seek_frame` |
-| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `bits`, `float_word`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts`, `recut_render_seconds`, `jump_seconds` |
-| `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `memory_bytes` and `piece_bytes`, before `engine_init` |
+| `PlayerOutput` | record | `open`, `shared`, `exact`, `sample`, `channels`, `bits`, `float_word`, `rate`, `lead_frames`, `underruns`, `joining`, `bytes_held`, `recut_seconds`, `recuts`, `recut_render_seconds`, `jump_seconds`; `device`, `chosen`, `following`, `standing_in`, `lost`, `none_why` |
+| `PlayerConfig`, `player_configure(config)` | record, function | the device, the lead, `wait_for_absent`, `memory_bytes` and `piece_bytes`, before `engine_init` |
 | `player_transport(e)`, `player_output(e)` | functions | the resources, for code outside the schedule |
 | `player_item_state_name(s)`, `player_state_name(s)` | functions | "idle", "playing"...; "stopped", "paused"... |
 
@@ -134,12 +137,27 @@ What the module registers with the engine, as module `player`:
 - the ktable `player.params` (component `PlayerParam`, cosmetic, a row per parameter of
   every stage: its range, step, unit and the value heard), and `player.presets`
   (`PlayerPreset`, a row per preset a stage carries);
-- the twenty event types above;
+- the ktable `player.devices` (component `PlayerDevice`, cosmetic, a row per output the
+  system offers, kept for the run once seen);
+- the twenty-two event types above;
 - the system `player.pump`, PreSim, main thread, every tick;
 - the commands `player add`, `play`, `pause`, `stop`, `next`, `previous`, `jump`, `seek`,
-  `seekby`, `volume`, `mute`, `set`, `eq`, `remove`, `move`, `insert`, `clear`, `status`.
+  `seekby`, `volume`, `mute`, `set`, `eq`, `remove`, `move`, `insert`, `devices`, `device`, `clear`, `status`.
 
 ## Behaviour worth knowing
+
+- **The devices are data, and the rules are the player's.** `hifi_platform` lists what
+  the system offers and says when one goes; the player decides. A device pulled while
+  playing (`Lost`) pauses the transport at the frame heard (what the device had and never
+  played is not counted), and nothing plays anywhere else until play is pressed. Pressed,
+  it plays on the device chosen if it is there, on the default if the default is chosen,
+  and, if the device chosen is not there, on the default standing in for it
+  (`standing_in`) or nowhere until it comes (`PlayerConfig::wait_for_absent`; Blackwing's
+  setting `absent_device`). Following the default, a new default (a DAC plugged in) is
+  moved to without a pause; a device chosen by name stays chosen, and one stood in for is
+  moved back to when it comes. Every move is a jump from the frame heard. With nothing
+  to play on, play waits (`Starting`, `none_why` says why) and the first device that
+  comes is used; no track fails for want of a device.
 
 - **A command acts in the tick after it was emitted**, when the pump reads it.
 - **It asks for its ticks.** While it plays or is about to, and while anything asked for

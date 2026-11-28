@@ -15,6 +15,15 @@ lets a device with nothing to play stop calling back, and go on again. `hifi_dev
 returns only when no callback is running. Sample formats are `S16`, `S24` (in an `i32`),
 `S32` and `F32`.
 
+**The devices there are** (`device.h`): `hifi_devices` lists every output the backends
+have (PipeWire's sinks, the capture device), each with the name `hifi_device_open` takes,
+what it is called, whether it is the default and whether it is there; a device that goes
+stays listed, not present. `hifi_devices_generation` moves on at every change, and
+`hifi_devices_watch` names one function called (on a backend's thread) after each.
+`hifi_device_lost` says when an open device has gone; it then never calls back again,
+and its delay is the one it had. `HifiDeviceOpened::name` is the device opened: `default`
+resolved to the one it is.
+
 **The capture device** (`capture.h`): the device named `"capture"`, playing into a
 `HifiCapture`. It grants any format, unshared, with the delay it was told to report.
 Its clock is either driven (`hifi_capture_pull` runs the callback on the calling thread
@@ -41,6 +50,9 @@ Header `korvid/hifi_platform/device.h`:
 | `HifiDeviceDesc` | record | `name`, `want`, `callback`, `user`, `backend` |
 | `HifiDeviceOpened` | record | `device`, `format`, `shared`, `reason` |
 | `hifi_device_open(desc)`, `hifi_device_start(d)`, `hifi_device_delay(d)`, `hifi_device_hold(d, hold)`, `hifi_device_close(d)` | functions | a device's life |
+| `hifi_device_lost(d)` | function | null while it plays; why, once it has gone |
+| `HifiDeviceInfo`, `kHifiMaxDevices`, `kHifiDeviceNameMax` | record, constants | a device as listed: `name`, `label`, `backend`, `is_default`, `present`, `shared`, `can_exclusive`, `channels` |
+| `hifi_devices(out, cap)`, `hifi_devices_generation()`, `hifi_devices_watch(fn, user)` | functions | the list; its change count; who is told of a change |
 | `hifi_sample_bytes(f)`, `hifi_sample_bits(f)`, `hifi_frame_bytes(f)`, `hifi_sample_format_name(f)` | functions | sizes and names |
 
 Header `korvid/hifi_platform/capture.h`:
@@ -53,10 +65,14 @@ Header `korvid/hifi_platform/capture.h`:
 | `hifi_capture_pull(c, frames)` | function | driven clock: take this many frames now |
 | `hifi_capture_segments(c, out, cap)`, `hifi_capture_data(c)`, `hifi_capture_dropped(c)`, `hifi_capture_opens(c)` | functions | what was captured |
 | `hifi_capture_held(c)`, `hifi_capture_holds(c)` | functions | whether the device is held, and how often it has been; a held capture device keeps its clock |
+| `hifi_capture_unplug(c)`, `hifi_capture_plug(c)` | functions | pulled out (a device on it Lost, none openable, not present) and plugged back |
 
 ## Tests
 
-`kormake test hifi_platform` checks the device names and, where PipeWire is running, the
+`kormake test hifi_platform` checks the capture device pulled and plugged; and, where
+PipeWire is running, lists the sinks, makes a null sink of its own (it plays nowhere),
+opens it by name, destroys it under the stream and checks the stream is lost, not moved,
+and its row gone. It also checks the device names and, where PipeWire is running, the
 backend: each sample format is granted as asked and shared; half a second of silence (so
 no sound) is taken at the wall's pace, on a thread marked realtime, with a delay under a
 second; held, it makes no callback, and let go it calls back within 100 ms (6 ms on the
@@ -71,6 +87,19 @@ Debian and Ubuntu). The module defines the external itself (`externals` in its
 installs it when it is missing.
 
 ## Platform notes
+
+- **The sinks come from PipeWire's registry**, and the default from its `default`
+  metadata (`default.audio.sink`). The registry is made at the first list or open and
+  waited for (a second at most) so the first list is whole. What the registry's own
+  properties do not carry is not known yet: `channels` is 0 and `can_exclusive` false
+  for every sink (the node's own properties have them; milestone 7 reads them).
+- **A stream is linked to the sink it names and never moved** (`target.object`,
+  `node.dont-reconnect`). Without that, WirePlumber moves a stream whose sink went to
+  another sink, which is the speakers when a headphone DAC is pulled. With it, the sink
+  going (its node removed from the registry) marks the device lost within milliseconds
+  (2.1 ms in the test), and no callback comes after.
+- **`default` is the default as it is when opened.** A default that changes later moves
+  nothing here; the player opens the new one.
 
 - **Linux: PipeWire only.** There is no ALSA `hw:` backend, so no real device is
   unshared and the bit-perfect state cannot read *identical* on Linux hardware yet.

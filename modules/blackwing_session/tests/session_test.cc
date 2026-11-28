@@ -134,6 +134,20 @@ u32 file_rows(const char* path) {
     return n;
 }
 
+// The output device a session file keeps; "" when it keeps none or does not parse.
+void file_device(const char* path, char* out, usize cap) {
+    out[0] = 0;
+    IoBytes file;
+    if (!io_read_file(path, &file)) return;
+    {
+        MemScope scope;
+        JsonDoc doc;
+        if (json_parse((const char*)file.data, file.size, &scope.arena->a, doc))
+            format(out, cap, "%s", json_string(json_get(doc, doc.root(), "device"), ""));
+    }
+    file.free();
+}
+
 } // namespace
 
 void test_session(kv::TestCtx& c) {
@@ -197,6 +211,44 @@ void test_session(kv::TestCtx& c) {
         // One press plays from where it was.
         b.say(PlayerPlay{});
         KV_CHECK(c, b.until([&] { return g_started == 1; }, 4.0) && g_started_item == b.row(500).id && b.t().position >= left_at);
+        b.stop();
+    }
+
+    // The output device chosen is kept, and put back before the queue.
+    c.begin("session device");
+    format(dir, sizeof dir, "%s/device", tmp);
+    session_file_in(dir, file, sizeof file);
+    {
+        Run a;
+        KV_CHECK(c, a.start(dir));
+        KV_CHECK(c, a.until([&] { return a.state().phase == (u8)SessionPhase::Ready; }));
+        a.add(tone);
+        KV_CHECK(c, a.until([&] { return a.t().queued == 1; }));
+        a.stop();
+    }
+    char kept[kPlayerDeviceNameMax];
+    file_device(file, kept, sizeof kept);
+    KV_CHECK(c, strcmp(kept, "capture") == 0);
+    {   // Kept as another device: chosen again at the next start.
+        IoBytes saved;
+        KV_CHECK(c, io_read_file(file, &saved));
+        Array<char> text{};
+        const char* body = (const char*)saved.data;
+        const char* at = strstr(body, "capture");
+        for (const char* q = body; q < body + saved.size; ++q) {
+            if (q == at) { for (const char* o = "a-dac-not-here"; *o; ++o) text.push(*o); q += strlen("capture") - 1; continue; }
+            text.push(*q);
+        }
+        io_write_file(file, text.data, text.len);
+        text.free();
+        saved.free();
+        file_device(file, kept, sizeof kept);
+        KV_CHECK(c, strcmp(kept, "a-dac-not-here") == 0);
+        Run b;
+        KV_CHECK(c, b.start(dir));
+        KV_CHECK(c, b.until([&] { return b.state().phase == (u8)SessionPhase::Ready; }));
+        b.step();
+        KV_CHECK(c, strcmp(player_output(b.e)->chosen, "a-dac-not-here") == 0);
         b.stop();
     }
 

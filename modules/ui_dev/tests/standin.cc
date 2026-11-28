@@ -10,7 +10,7 @@ namespace kv {
 
 namespace {
 
-constinit u32 g_standin_queue = 0, g_standin_chain = 0, g_standin_params = 0, g_standin_presets = 0;
+constinit u32 g_standin_queue = 0, g_standin_chain = 0, g_standin_params = 0, g_standin_presets = 0, g_standin_devices = 0;
 
 StandinCommand* put(StandinPlayer& s, const char* type, u64 a = 0, u64 b = 0, f64 value = 0.0, const char* text = "") {
     static StandinCommand spare;
@@ -52,11 +52,12 @@ constinit const KTableDesc k_standin_ktables[] = {
     {.name = ".chain", .components = "PlayerStage", .capacity = 8, .id = &g_standin_chain, .cosmetic = true},
     {.name = ".params", .components = "PlayerParam", .capacity = 192, .id = &g_standin_params, .cosmetic = true},
     {.name = ".presets", .components = "PlayerPreset", .capacity = 64, .id = &g_standin_presets, .cosmetic = true},
+    {.name = ".devices", .components = "PlayerDevice", .capacity = 128, .id = &g_standin_devices, .cosmetic = true},
 };
 constinit const SystemDesc k_standin_systems[] = {
     {.name = ".take", .phase = Phase::PreSim, .fn = standin_take,
      .reads = "PlayerEnqueue, PlayerPlay, PlayerPause, PlayerStop, PlayerNext, PlayerPrevious, PlayerJump, PlayerSeek, PlayerSeekBy, PlayerCue, PlayerSetParam, PlayerApplyPreset, PlayerQueueEdit",
-     .writes = ".queue, .chain, .params, .presets, .transport, .output", .main_thread = true, .runs = RunWhen::Always},
+     .writes = ".queue, .chain, .params, .presets, .devices, .transport, .output", .main_thread = true, .runs = RunWhen::Always},
 };
 
 void standin_shutdown(Engine& e, ModuleInstance&) {

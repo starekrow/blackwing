@@ -859,7 +859,7 @@ void test_face(kv::TestCtx& c) {
         for (const FieldDesc& fd : k_player_item_fields) named += on_screen(e, fd.name) >= 1;
         KV_CHECK(c, named == KV_COUNTOF(k_player_item_fields) && on_screen(e, "row 1 of 2") == 1 && on_screen(e, "row 2 of 2") == 1);
         KV_CHECK(c, on_screen(e, "\"/music/a/01 one.flac\"") == 1 && on_screen(e, "\"its header says 9 channels\"") == 1);
-        KV_CHECK(c, krome_press(e, scn, "xn_6")); // library.scan
+        KV_CHECK(c, krome_press(e, scn, "xn_7")); // library.scan (after player.devices)
         frames(e, 5);
         named = 0;
         for (const FieldDesc& fd : k_library_scan_fields) named += on_screen(e, fd.name) >= 1;

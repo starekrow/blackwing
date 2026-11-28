@@ -54,5 +54,12 @@ u32       hifi_capture_opens(HifiCapture* c);
 // been. A held capture device keeps its clock: it records the hold, so a test can see it.
 bool      hifi_capture_held(HifiCapture* c);
 u32       hifi_capture_holds(HifiCapture* c);
+// Pulls the capture device out, as a DAC is pulled: a device open on it is lost (it calls
+// back no more, hifi_device_lost says so, and its delay stops where it was), a device
+// cannot be opened on it, and its row in hifi_devices is not present. Plugging it back
+// makes it present again; a device lost stays lost, and a new one is opened. Between two
+// pulls of a driven clock, so a test knows exactly which frames were taken.
+void      hifi_capture_unplug(HifiCapture* c);
+void      hifi_capture_plug(HifiCapture* c);
 
 } // namespace kv

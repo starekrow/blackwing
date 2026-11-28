@@ -16,9 +16,11 @@ inline constexpr FieldDesc k_player_item_fields[] = {KV_FIELDS(PlayerItem, id, p
 inline constexpr FieldDesc k_player_stage_fields[] = {KV_FIELDS(PlayerStage, index, flat, params_len, name, param_names, params)};
 inline constexpr FieldDesc k_player_param_fields[] = {KV_FIELDS(PlayerParam, stage, index, value, lo, hi, initial, step, name, unit)};
 inline constexpr FieldDesc k_player_preset_fields[] = {KV_FIELDS(PlayerPreset, stage, index, name)};
+inline constexpr FieldDesc k_player_device_fields[] = {KV_FIELDS(PlayerDevice, name, label, backend, is_default, present, shared, can_exclusive, open, chosen, channels)};
 inline constexpr ComponentDesc k_player_components[] = {
     KV_COMPONENT(PlayerItem, k_player_item_fields, CompCosmetic), KV_COMPONENT(PlayerStage, k_player_stage_fields, CompCosmetic),
     KV_COMPONENT(PlayerParam, k_player_param_fields, CompCosmetic), KV_COMPONENT(PlayerPreset, k_player_preset_fields, CompCosmetic),
+    KV_COMPONENT(PlayerDevice, k_player_device_fields, CompCosmetic),
 };
 // Each event describes its fields, so --trace-events (and describe) print them.
 inline constexpr FieldDesc k_f_PlayerEnqueue[] = {KV_FIELDS(PlayerEnqueue, path, before)};
@@ -41,6 +43,8 @@ inline constexpr FieldDesc k_f_PlayerTrackEnded[] = {KV_FIELDS(PlayerTrackEnded,
 inline constexpr FieldDesc k_f_PlayerTrackFailed[] = {KV_FIELDS(PlayerTrackFailed, item, seq, reason)};
 inline constexpr FieldDesc k_f_PlayerQueueEnded[] = {KV_FIELDS(PlayerQueueEnded, seq)};
 inline constexpr FieldDesc k_f_HifiUnderrun[] = {KV_FIELDS(HifiUnderrun, count, seq)};
+inline constexpr FieldDesc k_f_PlayerSelectDevice[] = {KV_FIELDS(PlayerSelectDevice, name)};
+inline constexpr FieldDesc k_f_PlayerDeviceChanged[] = {KV_FIELDS(PlayerDeviceChanged, kind, name, reason, seq)};
 inline constexpr EventTypeDesc k_player_events[] = {
     KV_EVENT_EX(PlayerEnqueue, k_f_PlayerEnqueue, 0),
     KV_EVENT_EX(PlayerPlay, k_f_PlayerPlay, 0),
@@ -62,9 +66,12 @@ inline constexpr EventTypeDesc k_player_events[] = {
     KV_EVENT_EX(PlayerTrackFailed, k_f_PlayerTrackFailed, 0),
     KV_EVENT_EX(PlayerQueueEnded, k_f_PlayerQueueEnded, 0),
     KV_EVENT_EX(HifiUnderrun, k_f_HifiUnderrun, 0),
+    KV_EVENT_EX(PlayerSelectDevice, k_f_PlayerSelectDevice, 0),
+    KV_EVENT_EX(PlayerDeviceChanged, k_f_PlayerDeviceChanged, 0),
 };
 inline constexpr FieldDesc k_player_transport_fields[] = {KV_FIELDS(PlayerTransport, state, item, position, frames, rate, queued, left, place, place_pos, seek_item, seek_frame)};
-inline constexpr FieldDesc k_player_output_fields[] = {KV_FIELDS(PlayerOutput, open, shared, exact, sample, channels, bits, float_word, rate, lead_frames, underruns, joining, bytes_held, recut_seconds, recuts, recut_render_seconds, jump_seconds)};
+inline constexpr FieldDesc k_player_output_fields[] = {KV_FIELDS(PlayerOutput, open, shared, exact, sample, channels, bits, float_word, rate, lead_frames, underruns, joining, bytes_held, recut_seconds, recuts, recut_render_seconds, jump_seconds),
+                                                           KV_FIELDS(PlayerOutput, device, chosen, following, standing_in, lost, none_why)};
 // The two resources: described by their fields, never hashed (they follow a device's clock).
 inline constexpr ResourceDesc k_player_resources[] = {
     {.name = ".transport", .fields = k_player_transport_fields, .cosmetic = true},
@@ -76,22 +83,24 @@ inline constexpr ResourceDesc k_player_resources[] = {
 // by name, in order from 0; the tables and resources by name, with what describes them;
 // the constants. A host builds its binding from these and the tables above.
 
-inline constexpr const char* k_player_surface_version = "0.1.0";
+inline constexpr const char* k_player_surface_version = "0.2.0"; // 0.2: the devices
 inline constexpr const char* const k_player_commands[] = {
     "PlayerEnqueue", "PlayerQueueEdit", "PlayerPlay", "PlayerPause", "PlayerStop", "PlayerNext", "PlayerPrevious", "PlayerJump",
-    "PlayerSeek", "PlayerSeekBy", "PlayerCue", "PlayerSetParam", "PlayerApplyPreset",
+    "PlayerSeek", "PlayerSeekBy", "PlayerCue", "PlayerSetParam", "PlayerApplyPreset", "PlayerSelectDevice",
 };
 
 struct PlayerSurfaceEnum { const char* name; Span<const char* const> values; };
 inline constexpr const char* const k_PlayerEditOp_names[] = {"Remove", "Move", "Clear"};
 inline constexpr const char* const k_PlayerItemState_names[] = {"Idle", "Reading", "Ready", "Playing", "Failed"};
 inline constexpr const char* const k_PlayerState_names[] = {"Stopped", "Starting", "Playing", "Paused"};
+inline constexpr const char* const k_PlayerDeviceChange_names[] = {"Added", "Gone", "Back", "Default", "Lost", "Moved"};
 inline constexpr const char* const k_HifiSampleFormat_names[] = {"S16", "S24", "S32", "F32"}; // hifi_platform's; player.output's `sample` is one
-static_assert(KV_COUNTOF(k_PlayerItemState_names) == (usize)PlayerItemState::Count && KV_COUNTOF(k_PlayerState_names) == (usize)PlayerState::Count,
+static_assert(KV_COUNTOF(k_PlayerItemState_names) == (usize)PlayerItemState::Count && KV_COUNTOF(k_PlayerState_names) == (usize)PlayerState::Count &&
+              KV_COUNTOF(k_PlayerDeviceChange_names) == (usize)PlayerDeviceChange::Count,
               "an enum's names are its values, in order: one was added to player.h and not here");
 inline constexpr PlayerSurfaceEnum k_player_enums[] = {
     {"PlayerEditOp", k_PlayerEditOp_names}, {"PlayerItemState", k_PlayerItemState_names}, {"PlayerState", k_PlayerState_names},
-    {"HifiSampleFormat", k_HifiSampleFormat_names},
+    {"PlayerDeviceChange", k_PlayerDeviceChange_names}, {"HifiSampleFormat", k_HifiSampleFormat_names},
 };
 
 // A table (its one component's name and fields) or a resource (its fields), by full name.
@@ -99,10 +108,11 @@ struct PlayerSurfaceTable { const char* name; const char* component; Span<const 
 inline constexpr PlayerSurfaceTable k_player_tables[] = {
     {"player.queue", "PlayerItem", k_player_item_fields, false},   {"player.chain", "PlayerStage", k_player_stage_fields, false},
     {"player.params", "PlayerParam", k_player_param_fields, false}, {"player.presets", "PlayerPreset", k_player_preset_fields, false},
+    {"player.devices", "PlayerDevice", k_player_device_fields, false},
     {"player.transport", "", k_player_transport_fields, true},      {"player.output", "", k_player_output_fields, true},
 };
 
 struct PlayerSurfaceConstant { const char* name; i64 value; };
-inline constexpr PlayerSurfaceConstant k_player_constants[] = {{"kPlayerPathMax", kPlayerPathMax}};
+inline constexpr PlayerSurfaceConstant k_player_constants[] = {{"kPlayerPathMax", kPlayerPathMax}, {"kPlayerDeviceNameMax", kPlayerDeviceNameMax}};
 
 } // namespace kv

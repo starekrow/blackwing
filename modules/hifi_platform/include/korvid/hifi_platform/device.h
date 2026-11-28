@@ -55,7 +55,7 @@ typedef void (*HifiDeviceCallback)(void* user, void* out, u32 frames);
 struct HifiDevice;
 
 struct HifiDeviceDesc {
-    const char*        name     = "default"; // "capture", or a backend's device
+    const char*        name     = "default"; // "default" (the OS's default output, as it is now), "capture", or a name from hifi_devices
     HifiDeviceFormat   want;                 // what the caller would like
     HifiDeviceCallback callback = nullptr;
     void*              user     = nullptr;
@@ -68,6 +68,7 @@ struct HifiDeviceOpened {
     HifiDeviceFormat format;           // what was granted
     bool             shared = false;   // other streams are mixed into this device, or its format is converted on the way
     const char*      reason = "";      // when it failed: why, in words; a constant
+    char             name[192] = "";   // the device opened, by its name in hifi_devices: "default" resolved to the one it is now
 };
 
 // Opens a device. It does not call back until hifi_device_start. May allocate and block;
@@ -85,5 +86,38 @@ u32  hifi_device_delay(HifiDevice* d);
 void hifi_device_hold(HifiDevice* d, bool hold);
 // Stops the callbacks, waits for one that is running, and closes the device.
 void hifi_device_close(HifiDevice* d);
+// Null while the device plays; once it has gone (unplugged, its server gone, taken by
+// another program), why, in words, and it never calls back again. Its delay is then the
+// one it had when it went: frames given to it since were not heard. Any thread, not the
+// callback's.
+const char* hifi_device_lost(HifiDevice* d);
+
+// ---- the devices there are -------------------------------------------------------------
+
+constexpr u32 kHifiDeviceNameMax = 192;
+
+// An output the OS offers, as hifi_devices lists it.
+struct HifiDeviceInfo {
+    char name[kHifiDeviceNameMax] = ""; // what hifi_device_open takes: the backend's own, stable across runs where the OS has one (PipeWire's node.name)
+    char label[128]  = "";              // what it is called, for a person
+    char backend[16] = "";              // "pipewire", "capture"
+    bool is_default  = false;           // the OS's default output now
+    bool present     = true;            // false: it has gone; it stays listed for the process's life, so it can be said what went
+    bool shared      = true;            // opened, other programs' streams are mixed in
+    bool can_exclusive = false;         // it could be opened alone (slice 5, milestone 7)
+    u16  channels    = 0;               // as the OS says; 0 when it does not
+};
+
+constexpr u32 kHifiMaxDevices = 64;
+
+// Copies the list (up to `cap`) and returns how many there are. The first call starts the
+// backends' watches and waits (a second at most) for their first answer. Not for a
+// realtime thread.
+u32  hifi_devices(HifiDeviceInfo* out, u32 cap);
+// Moves on whenever the list, a device's presence or the default changes. Any thread.
+u64  hifi_devices_generation();
+// Called, on a backend's thread, after each change: one watcher for the process, which
+// should do no more than wake whoever reads the list. Null stops it.
+void hifi_devices_watch(void (*fn)(void* user), void* user);
 
 } // namespace kv

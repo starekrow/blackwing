@@ -15,7 +15,12 @@ struct HifiBackend {
     u32   (*delay)(void* impl);
     void  (*hold)(void* impl, bool hold); // may be null: the device goes on calling back
     void  (*close)(void* impl);
+    const char* (*lost)(void* impl);                       // hifi_device_lost
+    u32   (*list)(HifiDeviceInfo* out, u32 cap);           // may be null: the devices it has now, present or gone
 };
+
+// A backend's list changed: the generation moves on and the watcher is called. Any thread.
+void hifi_devices_changed();
 
 extern const HifiBackend k_capture_backend;
 #if defined(__linux__) && !defined(__ANDROID__)

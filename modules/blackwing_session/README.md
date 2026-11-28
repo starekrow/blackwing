@@ -90,6 +90,11 @@ What the module registers, as module `session`: the two event types; the resourc
 
 ## Behaviour worth knowing
 
+- **The output device chosen is kept**, as `player.output`'s `chosen` (`default` or a
+  name), and put back with `PlayerSelectDevice` before the queue, unless the command line
+  named one (`SessionConfig::restore_device`). A device not there at the next start is
+  the player's business: it plays on the default meanwhile, or waits, as configured.
+
 - **A row's id stands for its path** when the session looks for a change: a row never
   changes the file it is of, so the paths are read only when a save is written.
 - **The place is a position, not an id.** Ids count from 1 in each run; the third row is
