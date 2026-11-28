@@ -63,6 +63,7 @@ phones are written there and only partly checked (macOS and the iOS Simulator fo
 | KR28 to KR37 | Krome's slices 7 and 8: regions, strips, edges, fits, bitmap fonts, masks, computed looks, easing and timers, `dial`, `marquee` (KR36a to KR36c opened) | nothing yet: skin import is in no phase |
 | KR38 | not taken | nothing |
 | KR39 to KR42 | engine slice 13: shaped windows, several at once, placed and moved together | nothing yet, but KR42's place (above, KR44) |
+| KR49 | built by Blackwing's slice 5, on Korvid's branch `net-unix-sockets` (not merged): Unix-domain sockets by name, a socket pair, descriptors across, and an exact wait another thread ends | the `dbus` module's connection, its thread and its tests (slice 5, milestone 2) |
 
 Where Korvid's answer differs from what was asked:
 
@@ -1079,6 +1080,35 @@ as several, or not offered).
 **Done when** a playlist window dragged within 10 pixels of the main one snaps to it and
 then follows it, where the platform allows, and the note on each platform says what was
 done instead where it does not.
+
+## Found in building slice 5
+
+Nov 27, 2026. From [slice 5's notes](../design/slice-5-notes.md), as it is built. KR46 to
+KR48 are drafted in [slice 5's PRD](Blackwing-Slice-5-PRD.md) ("What the engine gets").
+
+| ID | Requirement | Where | Priority |
+|---|---|---|---|
+| KR49 | A Unix-domain socket can be reached by name and waited on by a thread of its own, exactly, with a wake from another thread; descriptors go across it | `platform` | P0 for slice 5 |
+
+### KR49: a local socket on a thread of its own
+
+**What was run into.** The `dbus` module is a client of the session and system buses,
+which are Unix-domain sockets: `unix:path=` or, on Linux, `unix:abstract=`. Its connection
+lives on a thread of its own that must sleep until the bus speaks or a customer posts,
+so that an idle bus costs no wakeups (BP28), and logind's `Inhibit` answers with a file
+descriptor. The engine's sockets were TCP to loopback, polled once per frame, and their
+waiting twins wait in quarter-second slices: four wakeups a second on an idle thread.
+
+**What is asked, and built** (the user asked that it go into the engine rather than
+around it). In `platform`'s `net.h`: `net_connect_unix_now` by path or abstract name;
+`net_socket_pair`; `NetSocket::read_with` and `write_now_with`, which carry descriptors
+as handles (`SCM_RIGHTS`); and `NetWaker` with `net_wait`, an exact wait on the socket and
+the waker. Linux and macOS; Windows says `EAFNOSUPPORT`, since nothing there needs it.
+
+**Done when** the platform tests pass with it (1,336 checks, clean under the address and
+undefined-behaviour sanitizers), and `dbus` runs on it against a private bus and the
+real one. Built on Linux only: the macOS lines are compiled when milestone 6 reaches the
+Mac.
 
 ## Not asked for, and worth knowing
 

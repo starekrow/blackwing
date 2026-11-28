@@ -504,6 +504,10 @@ the engine; what is a music player's stays in Blackwing's platform modules.
   the engine starts.
 - **KR7, checked** on the WASAPI thread and the HAL's: not a change, a use.
 
+- **KR49, Unix-domain sockets for a thread of its own**, which `dbus` stands on: found
+  in milestone 2 and built into the engine there, since the engine's sockets were TCP
+  only, polled per frame, and waited in slices.
+
 Not asked, and kept in Blackwing: D-Bus (core says it does not speak it, and it is
 Blackwing's own `dbus`, which the engine could take later if a game wants the portal); WASAPI, CoreAudio and audio hot-plug (`hifi_platform` exists so
 that Blackwing's output is not `platform_audio`'s); SMTC and Now Playing.
@@ -571,7 +575,9 @@ Each leaves the tree building and its tests passing, on every OS it has reached.
    registry and its default; a device by name; the loss, the return, the default
    followed; the capture device pulled on cue; the session's device. Through PipeWire,
    with the USB DAC pulled by hand.
-2. **D-Bus** (BP26 to BP28). `dbus`, whole, against a private bus: the wire format,
+2. **D-Bus** (BP26 to BP28). First, the engine's sockets (KR49, added Nov 27): a
+   Unix-domain socket by name, a socket pair, descriptors across, and an exact wait
+   another thread can end, built in Korvid's `platform`. Then `dbus`, whole, against a private bus: the wire format,
    the connection on both buses, calls, signals, names, properties, file descriptors,
    the fuzzing. Proved by its first customer's smallest piece, a name owned with
    MPRIS's identity on the real session bus and seen by `busctl`.

@@ -3,7 +3,7 @@
 Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 `hifi_platform`, `blackwing_player` and `blackwing` have code (slice 1), `hifi_eq`
 (slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev`,
-`blackwing_window`, `blackwing_glue`, `blackwing_session` and `blackwing_script` (slice 4); the rest are skeletons. The
+`blackwing_window`, `blackwing_glue`, `blackwing_session` and `blackwing_script` (slice 4), and `dbus` (slice 5); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
@@ -13,6 +13,7 @@ Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 | [hifi_eq](hifi_eq/README.md) | the chain's stages, on hifi's interface: volume, and the equalizer |
 | [hifi_platform](hifi_platform/README.md) | the output device, per OS |
 | [media_platform](media_platform/README.md) | media keys, now-playing, keep-awake, per OS |
+| [dbus](dbus/README.md) | a D-Bus client of our own, with no library under it: Linux's way to the desktop |
 | [blackwing_player](blackwing_player/README.md) | the player: queue, transport, and an API of events and tables |
 | [blackwing_tags](blackwing_tags/README.md) | tags from ranked sources, read-only, with sidecar overrides |
 | [blackwing_library](blackwing_library/README.md) | roots, the scanner, the index, queries |
@@ -39,6 +40,9 @@ blackwing_player            blackwing_library
       /   \
 hifi_codec  hifi_platform
 ```
+
+`dbus` sits beneath what talks to a Linux desktop: `media_platform`, and `hifi_platform`
+once it opens a device alone (slice 5's milestone 7). It depends on the engine only.
 
 A module that a script module can reach has a `SCRIPT.md` beside its README: what it
 shows a script, by name. They hang from

@@ -130,3 +130,50 @@ are owed (milestone 8), as is KR10's effect on them.
 | `blackwing_session` | 56 (47: the device kept and put back) |
 | `blackwing_script` | 42 (41: the walk chooses a device and hears it move) |
 | `ui_dev` | 284 (the Tables panel lists `player.devices`) |
+
+## Milestone 2, D-Bus
+
+Nov 27, 2026.
+
+**The engine first (KR49).** The engine's sockets were TCP to loopback, polled once per
+frame, and their waiting twins wait in quarter-second slices. A bus is a Unix-domain
+socket, the connection's thread must sleep until the bus speaks or a caller posts, and
+logind answers with a descriptor. Asked, the user said to build it into the engine rather
+than around it: Korvid's `platform` has `net_connect_unix_now`, `net_socket_pair`,
+`read_with` and `write_now_with` (`SCM_RIGHTS`), and `NetWaker` with `net_wait`, an exact
+wait. On Korvid's branch `net-unix-sockets`, not merged; its 1,336 platform checks pass,
+clean under the address and undefined-behaviour sanitizers. Windows says `EAFNOSUPPORT`;
+the macOS lines are compiled when milestone 6 reaches the Mac.
+
+**What was built.** `dbus`: the wire format, messages, addresses, `EXTERNAL` with
+descriptors, a thread per connection, calls matched to replies, names, matches, and
+objects of our own whose `Introspect`, `Peer` and `Properties` the thread answers from
+their description. About 2,600 lines with no library under it, and 1,100 of tests.
+
+**The spec held no surprises; two things were ours to get right.** A dict entry
+(`{sv}`) is a complete type only as an array's element, so measuring the type about to be
+opened needed its own rule, which the first build lacked and the tests found at once. And
+a connection that owns a name is sent the bus's own `NameAcquired`, which arrives in
+`dbus_next` before anything else: a customer skips the bus's signals it did not ask for.
+
+**Hostile input.** A message with sound framing and bad content is refused and the
+connection kept; one past our 4 MiB is read past; bytes that cannot be framed end the
+connection, since nothing after them can be found. All three tested over a stand-in bus.
+
+**Measured:**
+
+| what | |
+|---|---|
+| a round trip through a private `dbus-daemon` (`Peer.Ping`, one connection to another's thread and back), 200 | median 40 us, 99th 96 us, worst 129 us |
+| an idle connection's thread, for a second | 0 wakeups |
+| fuzzing under the address sanitizer, a million rounds | 1,000,000 made messages parsed and copied back byte for byte; 40,000,000 mutated, 4,570,308 parsed and read to their end, 35,449,692 refused in words, none read out of bounds; 90 s |
+| `busctl --user get-property` on a name with MPRIS's identity | `s "Blackwing (dbus test)"`: the milestone's proof |
+
+**Not done, and owed:** the system bus is opened by its address and not yet tested (logind
+is milestone 3's); nothing sends a descriptor but the tests; GNOME's view of the name is
+milestone 3's, when there is a player behind it.
+
+| suite | checks |
+|---|---|
+| `dbus` | 162 (new) |
+| Korvid `platform` | 1,336 (KR49's sockets, on its branch) |
