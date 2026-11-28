@@ -37,6 +37,7 @@ struct Hifi;
 struct HifiConfig {
     const char* device         = "default"; // hifi_platform's device name
     void*       device_backend = nullptr;   // for "capture": the HifiCapture*
+    bool        device_alone   = false;     // open it alone where it can be (hifi_platform's HifiDeviceDesc::alone)
     f64 lead_seconds  = 5.0;   // how far ahead of the playhead finished audio is kept
     f64 start_seconds = 0.25;  // how much lead there must be before playback starts, or restarts after an underrun
     f64 ramp_seconds  = 0.005; // the fade to and from silence on pause, resume, flush and underrun
@@ -108,6 +109,8 @@ struct HifiStatus {
     bool             lost        = false; // the device went, and none has been named since (hifi_set_device)
     char             device[kHifiDeviceNameMax] = ""; // the device open, by its name in hifi_devices; empty when none is
     u32              resampled_from = 0; // the device would not take the sources' rate: they are resampled from this one to its; 0 when they are not
+    bool             alone = false;      // the device is open alone
+    char             alone_why[96] = ""; // asked for alone and opened shared: why
 };
 
 // Starts the render thread. Not paused. Null only if the thread cannot start.
@@ -149,7 +152,7 @@ void hifi_starve(Hifi* h, u64 id, const char* reason);
 // over, so a caller that wants the music to go on follows this with a jump to what was
 // heard. Also how a device is named again after a Lost. An empty name is none: nothing is
 // opened (and no source fails for want of a device) until one is named.
-void hifi_set_device(Hifi* h, const char* name, void* backend);
+void hifi_set_device(Hifi* h, const char* name, void* backend, bool alone = false);
 // Bytes a source may have been waiting for have arrived: the render thread looks again
 // now rather than at its next nap. Cheap, and harmless when nothing was waiting. Not for
 // a realtime thread.

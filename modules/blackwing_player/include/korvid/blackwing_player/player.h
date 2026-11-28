@@ -77,7 +77,7 @@ struct PlayerApplyPreset { u32 stage; u32 preset; };
 // follow the OS's default wherever it goes. What is playing goes on there from the frame
 // heard, by a jump. A device named and not there now is waited for or stood in for by the
 // default, as PlayerConfig::wait_for_absent says; it is taken up when it comes.
-struct PlayerSelectDevice { char name[kPlayerDeviceNameMax]; };
+struct PlayerSelectDevice { char name[kPlayerDeviceNameMax]; u8 alone = 0; };
 
 // ---- notifications: events the player emits --------------------------------------------
 // Each carries `seq`, which counts up by one across all of them. Events of different types
@@ -252,15 +252,22 @@ struct PlayerOutput {
     u8   lost       = 0;  // the device playing went: paused, until asked to play (anywhere)
     u8   pad5       = 0;
     char none_why[96] = ""; // no device open while one is wanted: why
+    u8   alone      = 0;  // the device is open alone: no other program's sound on it
+    u8   alone_asked = 0; // alone was chosen
+    u8   released   = 0;  // paused alone past exclusive_hold: the device let go, opened again at the next play
+    u8   pad6       = 0;
+    char alone_why[96] = ""; // alone was chosen and the device is shared: why
 };
 
 // ---- setting up ----------------------------------------------------------------------------
 
 struct PlayerConfig {
     const char* device         = "default";  // hifi_platform's device name
+    bool        device_alone   = false;      // and alone
     void*       device_backend = nullptr;    // for "capture": the HifiCapture*; null: one of the player's own, on the wall clock, keeping nothing
     f64         lead_seconds   = 5.0;
     bool        wait_for_absent = false;     // a device chosen and not there: true waits for it; false plays on the default meanwhile
+    f64         exclusive_hold = 60.0;       // a device open alone and paused this long is let go, so other programs can sound; less than 0: never
     usize       memory_bytes   = 256u << 20; // the files' bytes held at once, across every item
     u32         piece_bytes    = 256u << 10; // what a file is read in: a power of two, a page or more
 };

@@ -76,9 +76,11 @@ struct Rig {
     HifiEvent    events[256];
     u32          nevents = 0;
 
-    void make(u32 delay = 0, f64 lead = 5.0, bool wall = false, Span<const StageDesc* const> stages = {}, u32 only_rate = 0) {
+    void make(u32 delay = 0, f64 lead = 5.0, bool wall = false, Span<const StageDesc* const> stages = {}, u32 only_rate = 0,
+              HifiSampleFormat only_sample = HifiSampleFormat::Count) {
         HifiCaptureDesc cd;
         cd.only_rate    = only_rate;
+        cd.only_sample  = only_sample;
         cd.delay_frames = delay;
         cd.wall_clock   = wall;
         cd.keep_bytes   = 16u << 20;
@@ -1373,6 +1375,35 @@ void test_hifi_resampled(TestCtx& c) {
     mem_free(in); mem_free(ref); mem_free(rm);
     r.free();
     drop(a); drop(b); drop(fa); drop(fb);
+}
+
+// A device whose word is narrower than the file's (16 bits under a 24-bit file): the file
+// dithered down to it (TPDF), each sample within a step of its own top 16 bits, and not
+// exact; the next file of 16 bits goes on on it (it was asked for 24 and gave 16).
+void test_hifi_narrower(TestCtx& c) {
+    c.begin("hifi narrower word");
+    File f24 = read_data("tone_24_2ch_48000.flac"), f16 = read_data("tone_16_2ch_48000.flac");
+    Pcm a = decode(f24), b = decode(f16);
+    Rig r; r.make(0, 5.0, false, {}, 0, HifiSampleFormat::S16);
+    hifi_add_source(r.h, {1, &k_flac_decoder, sparse_whole(f24.bytes())});
+    hifi_add_source(r.h, {2, &k_flac_decoder, sparse_whole(f16.bytes())});
+    KV_CHECK(c, r.wait_written(a.frames + b.frames));
+    u64 pulled = 0;
+    while (pulled < a.frames + b.frames + 1000) pulled += r.pull(1000);
+    HifiCaptureSegment seg[2];
+    KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 1 && seg[0].format.sample == HifiSampleFormat::S16);
+    const u8* data = hifi_capture_data(r.cap);
+    i64 worst = 0;
+    for (u64 k = 0; k < a.frames * 2; ++k) {
+        i64 d = (i64)sample_at(data, seg[0].format, k) - (i64)llround((f64)a.s[k] / 256.0);
+        if (d < 0) d = -d;
+        if (d > worst) worst = d;
+    }
+    KV_CHECK(c, worst <= 1);                                       // the dither's step, and nothing else
+    KV_CHECK(c, same(data, seg[0].format, a.frames, b, 0, b.frames)); // the 16-bit file after it, exact
+    KV_CHECK(c, r.has(HifiEventKind::Ended, 2) && r.status().underruns == 0);
+    r.free();
+    drop(a); drop(b); drop(f24); drop(f16);
 }
 
 // The device pulled out mid-stream: Lost, with what it had and never played not counted

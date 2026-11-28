@@ -60,6 +60,7 @@ struct HifiDeviceDesc {
     HifiDeviceCallback callback = nullptr;
     void*              user     = nullptr;
     void*              backend  = nullptr;   // for "capture": the HifiCapture* to play into
+    bool               alone    = false;     // open it alone, if it can be (can_exclusive): no other program's sound, the file's rate where the device has it, its word or the device's widest. Refused, it is opened shared, and `alone_why` says why
 };
 
 // hifi_device_open's answer.
@@ -69,6 +70,8 @@ struct HifiDeviceOpened {
     bool             shared = false;   // other streams are mixed into this device, or its format is converted on the way
     const char*      reason = "";      // when it failed: why, in words; a constant
     char             name[192] = "";   // the device opened, by its name in hifi_devices: "default" resolved to the one it is now
+    bool             alone = false;    // it is open alone
+    char             alone_why[96] = ""; // asked for alone and opened shared: why
 };
 
 // Opens a device. It does not call back until hifi_device_start. May allocate and block;
@@ -106,6 +109,8 @@ struct HifiDeviceInfo {
     bool shared      = true;            // opened, other programs' streams are mixed in
     bool can_exclusive = false;         // it could be opened alone (slice 5, milestone 7)
     u16  channels    = 0;               // as the OS says; 0 when it does not
+    i32  alsa_card   = -1;              // Linux: the kernel's card and device behind it, which alone opens; -1 when there is none
+    i32  alsa_device = -1;
 };
 
 constexpr u32 kHifiMaxDevices = 64;

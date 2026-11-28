@@ -119,15 +119,18 @@ struct Rig {
     HifiCapture* cap = nullptr;
     bool         up  = false;
 
-    bool start(u32 delay = 0, u32 piece = 256u << 10, usize memory = 256u << 20, f64 lead = 5.0, bool wait_for_absent = false) {
+    bool start(u32 delay = 0, u32 piece = 256u << 10, usize memory = 256u << 20, f64 lead = 5.0, bool wait_for_absent = false, bool alone = false, f64 hold = 60.0) {
         g_nlog = 0;
         g_nparam = 0;
         g_ndev = 0;
         HifiCaptureDesc cd;
         cd.delay_frames = delay;
         cd.keep_bytes = 16u << 20;
+        cd.can_alone = alone;
         cap = hifi_capture_create(cd);
         PlayerConfig pc;
+        pc.device_alone = alone;
+        pc.exclusive_hold = hold;
         pc.device = "capture";
         pc.device_backend = cap;
         pc.piece_bytes = piece;
@@ -980,6 +983,54 @@ void test_player(TestCtx& c) {
         g_nlog = 0;
         r.pull(2000); r.pull(2000);
         KV_CHECK(c, r.wait_log('K', 1) && ev('K', 1).frames >= at && ev('K', 1).frames < at + 200);
+        r.stop();
+    }
+
+    // Alone, paused past exclusive_hold: the device let go (closed, said, the transport
+    // still at what was heard), and play opens it alone again and goes on from there.
+    c.begin("player alone, let go when paused");
+    {
+        Rig r;
+        KV_CHECK(c, r.start(0, 256u << 10, 256u << 20, 5.0, false, true, 0.3));
+        r.add(data(A));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(kN));
+        r.pull(2000); r.pull(1000);
+        KV_CHECK(c, r.o().alone && r.o().alone_asked && !r.o().released && r.t().position == 3000);
+        r.say(PlayerPause{});
+        f64 until = time_now() + 1.0;
+        while (r.t().state != (u8)PlayerState::Paused && time_now() < until) { r.pull(64); time_sleep(0.001); }
+        u32 moved = dev_heard(PlayerDeviceChange::Moved);
+        until = time_now() + 2.0;
+        while ((!r.o().released || r.o().open) && time_now() < until) { r.step(); time_sleep(0.01); } // closed by hifi a tick or two after
+        u64 heard = r.t().position;
+        KV_CHECK(c, r.o().released && !r.o().open && !r.o().lost && strstr(r.o().none_why, "let go after") != nullptr);
+        KV_CHECK(c, dev_heard(PlayerDeviceChange::Moved) == moved + 1 && r.t().state == (u8)PlayerState::Paused && r.t().item == 1);
+        r.step(10);
+        KV_CHECK(c, hifi_capture_opens(r.cap) == 1); // nothing opened again while paused
+        g_nlog = 0;
+        r.say(PlayerPlay{});
+        until = time_now() + 2.0;
+        while (hifi_capture_opens(r.cap) < 2 && time_now() < until) { r.step(); time_sleep(0.001); }
+        KV_CHECK(c, hifi_capture_opens(r.cap) == 2);
+        KV_CHECK(c, r.wait_lead(12000));
+        r.pull(2000); r.pull(2000);
+        KV_CHECK(c, r.wait_log('K', 1) && ev('K', 1).frames == heard);
+        KV_CHECK(c, r.o().alone && !r.o().released && r.t().state == (u8)PlayerState::Playing && r.t().position > heard);
+        r.stop();
+    }
+    // Asked alone of a device that cannot be: shared, and why.
+    {
+        Rig r;
+        KV_CHECK(c, r.start());
+        PlayerSelectDevice sd{};
+        format(sd.name, sizeof sd.name, "capture");
+        sd.alone = 1;
+        r.say(sd);
+        r.add(data(A));
+        r.say(PlayerPlay{});
+        KV_CHECK(c, r.wait_lead(kN));
+        KV_CHECK(c, r.o().open && r.o().alone_asked && !r.o().alone && r.o().alone_why[0]);
         r.stop();
     }
 

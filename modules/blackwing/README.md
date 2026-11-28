@@ -41,10 +41,21 @@ at exit, so a kill loses seconds. `play` and `run` are commands, not sittings: t
 neither restore nor save.
 
 **The settings** are the engine's store (`settings.json` in the user's settings directory,
-or in `--data`'s directory). One is read so far: `absent_device`, `"default"` (a device
-chosen and not there: the system's default plays meanwhile, and the music moves back
-when it comes) or `"wait"` (nothing plays until it comes). A device pulled while
-playing pauses whichever is set.
+or in `--data`'s directory), whose values are under `"values"`:
+`{"values": {"absent_device": "wait", "exclusive_hold": 60}}`. Two are read:
+
+- `absent_device`: `"default"` (a device chosen and not there: the system's default plays
+  meanwhile, and the music moves back when it comes) or `"wait"` (nothing plays until it
+  comes). A device pulled while playing pauses whichever is set.
+- `exclusive_hold`: seconds a device open alone may stay paused before it is let go, so
+  other programs can sound on it (60; less than 0, never). The next play opens it alone
+  again, from what was heard.
+
+`--alone` (with `--device`, or on the default) opens the device alone: on Linux the
+kernel's device, PipeWire asked to let go of the card; the file's rate where the device
+has it (else resampled), its word where it has it (else the widest, padded, or a
+narrower one, dithered). Refused, it plays shared and `player status` says why. The
+session keeps it with the device.
 
 `run` loads one Lua script ([blackwing_script](../blackwing_script/README.md)): every
 command, notification, table and resource of the player and the library by the name

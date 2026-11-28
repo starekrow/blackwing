@@ -6,7 +6,7 @@
 -- Linux plays through PipeWire (src/linux/pipewire.cc), an external this module defines,
 -- since the engine does not use it.
 module "hifi_platform" {
-  deps      = { "core" },
+  deps      = { "core", "dbus" },
   external  = { pipewire = { ">=0.3.48", platforms = { "linux" } } },
   externals = {
     linux = {

@@ -43,7 +43,7 @@ inline constexpr FieldDesc k_f_PlayerTrackEnded[] = {KV_FIELDS(PlayerTrackEnded,
 inline constexpr FieldDesc k_f_PlayerTrackFailed[] = {KV_FIELDS(PlayerTrackFailed, item, seq, reason)};
 inline constexpr FieldDesc k_f_PlayerQueueEnded[] = {KV_FIELDS(PlayerQueueEnded, seq)};
 inline constexpr FieldDesc k_f_HifiUnderrun[] = {KV_FIELDS(HifiUnderrun, count, seq)};
-inline constexpr FieldDesc k_f_PlayerSelectDevice[] = {KV_FIELDS(PlayerSelectDevice, name)};
+inline constexpr FieldDesc k_f_PlayerSelectDevice[] = {KV_FIELDS(PlayerSelectDevice, name, alone)};
 inline constexpr FieldDesc k_f_PlayerDeviceChanged[] = {KV_FIELDS(PlayerDeviceChanged, kind, name, reason, seq)};
 inline constexpr EventTypeDesc k_player_events[] = {
     KV_EVENT_EX(PlayerEnqueue, k_f_PlayerEnqueue, 0),
@@ -71,7 +71,7 @@ inline constexpr EventTypeDesc k_player_events[] = {
 };
 inline constexpr FieldDesc k_player_transport_fields[] = {KV_FIELDS(PlayerTransport, state, item, position, frames, rate, queued, left, place, place_pos, seek_item, seek_frame)};
 inline constexpr FieldDesc k_player_output_fields[] = {KV_FIELDS(PlayerOutput, open, shared, exact, sample, channels, bits, float_word, rate, lead_frames, underruns, joining, bytes_held, recut_seconds, recuts, recut_render_seconds, jump_seconds),
-                                                           KV_FIELDS(PlayerOutput, device, chosen, following, standing_in, lost, none_why, resampled_from)};
+                                                           KV_FIELDS(PlayerOutput, device, chosen, following, standing_in, lost, none_why, resampled_from, alone, alone_asked, released, alone_why)};
 // The two resources: described by their fields, never hashed (they follow a device's clock).
 inline constexpr ResourceDesc k_player_resources[] = {
     {.name = ".transport", .fields = k_player_transport_fields, .cosmetic = true},
@@ -83,7 +83,7 @@ inline constexpr ResourceDesc k_player_resources[] = {
 // by name, in order from 0; the tables and resources by name, with what describes them;
 // the constants. A host builds its binding from these and the tables above.
 
-inline constexpr const char* k_player_surface_version = "0.3.0"; // 0.2: the devices; 0.3: player.output's resampled_from
+inline constexpr const char* k_player_surface_version = "0.4.0"; // 0.2: the devices; 0.3: player.output's resampled_from; 0.4: alone
 inline constexpr const char* const k_player_commands[] = {
     "PlayerEnqueue", "PlayerQueueEdit", "PlayerPlay", "PlayerPause", "PlayerStop", "PlayerNext", "PlayerPrevious", "PlayerJump",
     "PlayerSeek", "PlayerSeekBy", "PlayerCue", "PlayerSetParam", "PlayerApplyPreset", "PlayerSelectDevice",

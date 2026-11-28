@@ -85,7 +85,13 @@ u64 mono_ns() {
 // A sink, as the registry says it (under the loop's lock).
 struct PwSink {
     u32            id = 0;      // the registry's: 0 when it has gone
-    HifiDeviceInfo info;
+    HifiDeviceInfo info;        // its name the node's without WirePlumber's ".<n>": the same across re-makes
+    char           node_name[kHifiDeviceNameMax] = ""; // the node's own name now, which a stream targets
+    // The node, bound to hear its whole properties: the registry's announcement has no
+    // alsa.card or alsa.device, which alone needs.
+    pw_proxy*      node = nullptr;
+    spa_hook       node_listener{};
+    pw_node_events node_events{};
 };
 
 struct PwDevice;
@@ -245,6 +251,45 @@ int on_meta_property(void*, u32 subject, const char* key, const char*, const cha
     return 0;
 }
 
+// A node's name as Blackwing names the device: without the ".<n>" WirePlumber adds when it
+// makes a card's sink again (after a program had the card alone, after a suspend) while
+// the name is still remembered, so "alsa_output.usb-X.analog-stereo" stays that through
+// ".3", ".4". Two identical cards with no serial number between them would share it.
+void stable_name(const char* node, char* out, usize cap) {
+    usize n = strlen(node), e = n;
+    while (e > 0 && node[e - 1] >= '0' && node[e - 1] <= '9') --e;
+    if (e < n && e > 1 && node[e - 1] == '.') n = e - 1;
+    snprintf(out, cap, "%.*s", (int)n, node);
+}
+
+// The sink whose node is the default now; null when none is.
+const PwSink* default_of() {
+    for (u32 i = 0; i < g_pw.nsinks; ++i) if (g_pw.sinks[i].id && strcmp(g_pw.sinks[i].node_name, g_pw.default_sink) == 0) return &g_pw.sinks[i];
+    return nullptr;
+}
+
+// A sink's node's info: its ALSA card and device, when it has them.
+void on_node_info(void* data, const pw_node_info* info) {
+    PwSink& s = *(PwSink*)data;
+    if (!info || !info->props) return;
+    const char* card = spa_dict_lookup(info->props, "alsa.card");
+    const char* dev = spa_dict_lookup(info->props, "alsa.device");
+    if (!card) return;
+    i32 c = atoi(card), d = dev ? atoi(dev) : 0;
+    if (c == s.info.alsa_card && d == s.info.alsa_device && s.info.can_exclusive) return;
+    s.info.alsa_card = c;
+    s.info.alsa_device = d;
+    s.info.can_exclusive = c >= 0;
+    hifi_devices_changed();
+}
+
+void unbind_node(PwSink& s, bool destroy) {
+    if (!s.node) return;
+    spa_hook_remove(&s.node_listener);
+    if (destroy) pw_proxy_destroy(s.node);
+    s.node = nullptr;
+}
+
 void on_global(void*, u32 id, u32, const char* type, u32, const spa_dict* props) {
     if (!props) return;
     if (strcmp(type, PW_TYPE_INTERFACE_Metadata) == 0) {
@@ -264,8 +309,10 @@ void on_global(void*, u32 id, u32, const char* type, u32, const spa_dict* props)
     const char* cls = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
     const char* name = spa_dict_lookup(props, PW_KEY_NODE_NAME);
     if (!cls || strcmp(cls, "Audio/Sink") != 0 || !name || !name[0]) return;
+    char stable[kHifiDeviceNameMax];
+    stable_name(name, stable, sizeof stable);
     PwSink* s = nullptr;
-    for (u32 i = 0; i < g_pw.nsinks; ++i) if (strcmp(g_pw.sinks[i].info.name, name) == 0) s = &g_pw.sinks[i];
+    for (u32 i = 0; i < g_pw.nsinks; ++i) if (strcmp(g_pw.sinks[i].info.name, stable) == 0) s = &g_pw.sinks[i];
     if (!s) {
         if (g_pw.nsinks == kHifiMaxDevices) { // full: a gone row makes room
             for (u32 i = 0; i < g_pw.nsinks && !s; ++i) if (!g_pw.sinks[i].id) s = &g_pw.sinks[i];
@@ -274,10 +321,12 @@ void on_global(void*, u32 id, u32, const char* type, u32, const spa_dict* props)
             s = &g_pw.sinks[g_pw.nsinks++];
         }
     }
+    unbind_node(*s, true);
     *s = PwSink{};
     s->id = id;
+    snprintf(s->node_name, sizeof s->node_name, "%s", name);
     HifiDeviceInfo& d = s->info;
-    snprintf(d.name, sizeof d.name, "%s", name);
+    snprintf(d.name, sizeof d.name, "%s", stable);
     const char* label = spa_dict_lookup(props, PW_KEY_NODE_DESCRIPTION);
     if (!label) label = spa_dict_lookup(props, PW_KEY_NODE_NICK);
     snprintf(d.label, sizeof d.label, "%s", label ? label : name);
@@ -287,7 +336,18 @@ void on_global(void*, u32 id, u32, const char* type, u32, const spa_dict* props)
     const char* ch = spa_dict_lookup(props, "audio.channels");
     d.channels = ch ? (u16)atoi(ch) : 0;
     const char* api = spa_dict_lookup(props, PW_KEY_DEVICE_API);
-    d.can_exclusive = api && strcmp(api, "alsa") == 0 && spa_dict_lookup(props, "api.alsa.path");
+    const char* card = spa_dict_lookup(props, "alsa.card");
+    const char* dev = spa_dict_lookup(props, "alsa.device");
+    d.alsa_card = card ? atoi(card) : -1;
+    d.alsa_device = dev ? atoi(dev) : 0;
+    d.can_exclusive = d.alsa_card >= 0;
+    (void)api;
+    s->node = (pw_proxy*)pw_registry_bind(g_pw.registry, id, PW_TYPE_INTERFACE_Node, PW_VERSION_NODE, 0);
+    if (s->node) {
+        s->node_events.version = PW_VERSION_NODE_EVENTS;
+        s->node_events.info = on_node_info;
+        pw_node_add_listener((pw_node*)s->node, &s->node_listener, &s->node_events, s);
+    }
     hifi_devices_changed();
 }
 
@@ -304,9 +364,10 @@ void on_global_remove(void*, u32 id) {
     for (u32 i = 0; i < g_pw.nsinks; ++i) {
         PwSink& s = g_pw.sinks[i];
         if (s.id != id) continue;
+        unbind_node(s, true);
         s.id = 0;
         s.info.present = false;
-        for (PwDevice* d : g_pw.open) if (d && strcmp(d->target, s.info.name) == 0) mark_lost(*d, "the device went away");
+        for (PwDevice* d : g_pw.open) if (d && strcmp(d->target, s.node_name) == 0) mark_lost(*d, "the device went away");
         hifi_devices_changed();
         return;
     }
@@ -344,7 +405,7 @@ void ensure_registry() {
 void forget_registry() {
     if (g_pw.meta) { spa_hook_remove(&g_pw.meta_listener); g_pw.meta = nullptr; g_pw.meta_id = 0; }
     if (g_pw.registry) { spa_hook_remove(&g_pw.registry_listener); g_pw.registry = nullptr; }
-    for (u32 i = 0; i < g_pw.nsinks; ++i) { g_pw.sinks[i].id = 0; g_pw.sinks[i].info.present = false; }
+    for (u32 i = 0; i < g_pw.nsinks; ++i) { unbind_node(g_pw.sinks[i], false); g_pw.sinks[i].id = 0; g_pw.sinks[i].info.present = false; }
     g_pw.default_sink[0] = 0;
     for (PwDevice* d : g_pw.open) if (d) mark_lost(*d, "the connection to PipeWire was lost");
     hifi_devices_changed();
@@ -419,8 +480,10 @@ bool pw_has(const char* name) {
     if (strcmp(name, "default") == 0 || strcmp(name, "pipewire") == 0) return true;
     const char* why = "";
     if (!session_lock(&why)) return false;
+    char stable[kHifiDeviceNameMax];
+    stable_name(name, stable, sizeof stable);
     bool found = false;
-    for (u32 i = 0; i < g_pw.nsinks && !found; ++i) found = strcmp(g_pw.sinks[i].info.name, name) == 0;
+    for (u32 i = 0; i < g_pw.nsinks && !found; ++i) found = strcmp(g_pw.sinks[i].info.name, stable) == 0;
     pw_thread_loop_unlock(g_pw.loop);
     return found;
 }
@@ -500,11 +563,20 @@ void* pw_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
     if (!session_lock(&why)) { out.reason = why; return nullptr; }
     // The loop is locked from here.
     const char* want = desc.name ? desc.name : "default";
-    char target[kHifiDeviceNameMax] = "";
+    char target[kHifiDeviceNameMax] = "";  // the node's own name
+    char called[kHifiDeviceNameMax] = "";  // the device's, as hifi_devices lists it
     if (strcmp(want, "default") == 0 || strcmp(want, "pipewire") == 0) {
         snprintf(target, sizeof target, "%s", g_pw.default_sink);
+        if (const PwSink* ds = default_of()) snprintf(called, sizeof called, "%s", ds->info.name);
+        else stable_name(target, called, sizeof called);
     } else {
-        for (u32 i = 0; i < g_pw.nsinks; ++i) if (g_pw.sinks[i].id && strcmp(g_pw.sinks[i].info.name, want) == 0) snprintf(target, sizeof target, "%s", want);
+        char stable[kHifiDeviceNameMax];
+        stable_name(want, stable, sizeof stable);
+        for (u32 i = 0; i < g_pw.nsinks; ++i)
+            if (g_pw.sinks[i].id && strcmp(g_pw.sinks[i].info.name, stable) == 0) {
+                snprintf(target, sizeof target, "%s", g_pw.sinks[i].node_name);
+                snprintf(called, sizeof called, "%s", stable);
+            }
         if (!target[0]) { pw_thread_loop_unlock(g_pw.loop); out.reason = "that output device is not there"; return nullptr; }
     }
     if (!target[0]) {
@@ -572,7 +644,7 @@ void* pw_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
 
     out.format = desc.want;
     out.shared = true;
-    snprintf(out.name, sizeof out.name, "%s", target[0] ? target : "default");
+    snprintf(out.name, sizeof out.name, "%s", called[0] ? called : "default");
     return d;
 }
 
@@ -650,18 +722,34 @@ u32 pw_list(HifiDeviceInfo* out, u32 cap) {
     u32 n = 0;
     for (u32 i = 0; i < g_pw.nsinks && n < cap; ++i) {
         out[n] = g_pw.sinks[i].info;
-        out[n].is_default = out[n].present && strcmp(out[n].name, g_pw.default_sink) == 0;
+        out[n].is_default = out[n].present && strcmp(g_pw.sinks[i].node_name, g_pw.default_sink) == 0;
         ++n;
     }
     pw_thread_loop_unlock(g_pw.loop);
     return n;
 }
 
+bool pw_alone_target(const char* name, i32* card, i32* device) {
+    const char* why = "";
+    if (!session_lock(&why)) return false;
+    bool found = false;
+    bool dflt = strcmp(name, "default") == 0 || strcmp(name, "pipewire") == 0;
+    char stable[kHifiDeviceNameMax];
+    stable_name(name, stable, sizeof stable);
+    for (u32 i = 0; i < g_pw.nsinks && !found; ++i) {
+        const HifiDeviceInfo& d = g_pw.sinks[i].info;
+        bool match = dflt ? strcmp(g_pw.sinks[i].node_name, g_pw.default_sink) == 0 : strcmp(d.name, stable) == 0;
+        if ((g_pw.sinks[i].id || !dflt) && match && d.can_exclusive) { *card = d.alsa_card; *device = d.alsa_device; found = true; } // a sink being made again has the same card
+    }
+    pw_thread_loop_unlock(g_pw.loop);
+    return found;
+}
+
 } // namespace
 
 constinit const HifiBackend k_pipewire_backend = {
     .name = "pipewire", .has = pw_has, .open = pw_open, .start = pw_start, .delay = pw_delay, .hold = pw_hold,
-    .close = pw_close, .lost = pw_lost, .list = pw_list,
+    .close = pw_close, .lost = pw_lost, .list = pw_list, .alone_target = pw_alone_target,
 };
 
 } // namespace kv

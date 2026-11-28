@@ -1,6 +1,6 @@
 # blackwing_player — the script surface
 
-Surface `player`, version 0.3.0 (0.2: the devices; 0.3: `player.output`'s `resampled_from`) · with [the spec](../../docs/specs/script-modules.md)
+Surface `player`, version 0.4.0 (0.2: the devices; 0.3: `player.output`'s `resampled_from`; 0.4: alone) · with [the spec](../../docs/specs/script-modules.md)
 
 **Proven by slice 4** ([blackwing_script](../blackwing_script/README.md)'s walk): every name,
 field and enum value on this page is reached from Lua as written. **Still a draft:** the

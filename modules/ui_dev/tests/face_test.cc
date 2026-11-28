@@ -861,6 +861,10 @@ void test_face(kv::TestCtx& c) {
         frames(e, 3);
         chose = standin_last(e, "PlayerSelectDevice");
         KV_CHECK(c, chose && strcmp(chose->text, "default") == 0 && standin_count(e, "PlayerSelectDevice") == 2);
+        KV_CHECK(c, krome_press(e, scn, "oa_0"));
+        frames(e, 3);
+        chose = standin_last(e, "PlayerSelectDevice");
+        KV_CHECK(c, chose && strcmp(chose->text, "alsa_output.usb-dac") == 0 && chose->a == 1); // alone
         // Media: with the module off, the panel says why.
         KV_CHECK(c, krome_press(e, scn, "tab_media"));
         frames(e, 4);

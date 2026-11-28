@@ -69,6 +69,7 @@ void output_sync(TickContext& ctx, Face& f) {
     // The devices, and which is chosen.
     if (!strcmp(o->chosen, "default") || !o->chosen[0]) format(text, sizeof text, "following the default%s", o->lost ? "; the one playing went" : "");
     else format(text, sizeof text, "%s%s%s", o->chosen, o->standing_in ? ", absent: the default stands in" : "", o->lost ? "; it went while playing" : "");
+    if (o->alone_asked) format(text + strlen(text), sizeof text - strlen(text), o->alone ? ", alone" : o->released ? ", alone (let go while paused)" : ", alone chosen, shared: %s", o->alone_why);
     if (!o->open && o->none_why[0]) format(text + strlen(text), sizeof text - strlen(text), " (%s)", o->none_why);
     face_set(f, "o_chosen", text);
     const KTable* devs = ctx.read_ktable("player.devices");
@@ -89,7 +90,8 @@ void output_sync(TickContext& ctx, Face& f) {
             b.set(row, "label", b.string(d.label[0] ? d.label : d.name));
             b.set(row, "backend", b.string(d.backend));
             char flags[96];
-            format(flags, sizeof flags, "%s%s%s%s", d.open ? "playing " : "", d.is_default ? "default " : "", d.chosen ? "chosen " : "", d.present ? "" : "gone");
+            format(flags, sizeof flags, "%s%s%s%s%s", d.open ? "playing " : "", d.is_default ? "default " : "", d.chosen ? "chosen " : "", d.present ? "" : "gone ",
+                   d.can_exclusive ? "" : "(shared only)");
             b.set(row, "flags", b.string(flags));
             b.set(row, "ink", b.string(!d.present ? "#8b95a7" : d.open ? "#7aa7ff" : "#e6e9ef")); // std's dark theme, as the queue's
             b.push(list, row);
@@ -103,7 +105,7 @@ void output_sync(TickContext& ctx, Face& f) {
 }
 
 bool output_event(TickContext& ctx, Face& f, const KromeEvent& ev) {
-    static const Name use = name_intern("o_use"), follow = name_intern("o_follow");
+    static const Name use = name_intern("o_use"), follow = name_intern("o_follow"), alone = name_intern("o_alone");
     Name event{ev.event}, node{ev.node};
     u64 k = 0;
     if (event == follow) {
@@ -112,10 +114,12 @@ bool output_event(TickContext& ctx, Face& f, const KromeEvent& ev) {
         ctx.emit(s);
         return true;
     }
-    if (event == use && face_id(node, "od_", &k)) {
+    bool by_alone = event == alone && face_id(node, "oa_", &k);
+    if ((event == use && face_id(node, "od_", &k)) || by_alone) {
         if (k >= f.ndev) return true;
         PlayerSelectDevice s{};
         format(s.name, sizeof s.name, "%s", f.dev_names[k]);
+        s.alone = by_alone;
         ctx.emit(s);
         return true;
     }

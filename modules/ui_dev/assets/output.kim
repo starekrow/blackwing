@@ -31,6 +31,7 @@ def output-panel {
                     dev-text "{dev.backend}" w=64
                     dev-text "{dev.flags}" w=120
                     hit [dev-btn] id="od_{dev.k}" -> o_use { text "use" size=11 }
+                    hit [dev-btn] id="oa_{dev.k}" -> o_alone { text "alone" size=11 }
                 }
                 placeholder {
                     row [dev-row] middle {

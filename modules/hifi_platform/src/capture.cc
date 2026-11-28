@@ -4,6 +4,7 @@
 // thread marked realtime, so a dev build aborts if what it calls allocates.
 #include "korvid/hifi_platform/capture.h"
 #include "korvid/core/atomic.h"
+#include "korvid/core/format.h"
 #include "korvid/core/memory.h"
 #include "korvid/core/os_thread.h"
 #include "korvid/core/thread.h"
@@ -100,6 +101,7 @@ void* capture_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
     c->started  = false;
     c->format   = desc.want;
     if (c->desc.only_rate) c->format.rate = c->desc.only_rate;
+    if (c->desc.only_sample != HifiSampleFormat::Count) c->format.sample = c->desc.only_sample;
     c->callback = desc.callback;
     c->user     = desc.user;
     c->quit     = 0;
@@ -113,6 +115,8 @@ void* capture_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
     os_mutex_unlock(&c->lock);
     out.format = c->format; // anything asked, as asked, but the rate when it has only one
     out.shared = false;
+    out.alone = desc.alone && c->desc.can_alone;
+    if (desc.alone && !out.alone) format(out.alone_why, sizeof out.alone_why, "this capture device is not one that is opened alone");
     return c;
 }
 
@@ -178,7 +182,7 @@ void capture_close(void* impl) {
 
 constinit const HifiBackend k_capture_backend = {
     .name = "capture", .has = capture_has, .open = capture_open, .start = capture_start, .delay = capture_delay,
-    .hold = capture_hold, .close = capture_close, .lost = capture_lost, .list = capture_list,
+    .hold = capture_hold, .close = capture_close, .lost = capture_lost, .list = capture_list, .alone_target = nullptr,
 };
 
 HifiCapture* hifi_capture_create(const HifiCaptureDesc& desc) {

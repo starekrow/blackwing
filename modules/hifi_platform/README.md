@@ -59,13 +59,35 @@ Header `korvid/hifi_platform/capture.h`:
 
 | name | kind | what |
 |---|---|---|
-| `HifiCaptureDesc` | record | `keep_bytes`, `delay_frames`, `period_frames`, `wall_clock` |
+| `HifiCaptureDesc` | record | `keep_bytes`, `delay_frames`, `period_frames`, `wall_clock`; `only_rate`, `only_sample` (a device that takes only these), `can_alone` (asked alone, it says it is) |
 | `HifiCaptureSegment` | record | `format`, `offset`, `bytes` |
 | `hifi_capture_create(desc)`, `hifi_capture_destroy(c)` | functions | the place captured frames go |
 | `hifi_capture_pull(c, frames)` | function | driven clock: take this many frames now |
 | `hifi_capture_segments(c, out, cap)`, `hifi_capture_data(c)`, `hifi_capture_dropped(c)`, `hifi_capture_opens(c)` | functions | what was captured |
 | `hifi_capture_held(c)`, `hifi_capture_holds(c)` | functions | whether the device is held, and how often it has been; a held capture device keeps its clock |
 | `hifi_capture_unplug(c)`, `hifi_capture_plug(c)` | functions | pulled out (a device on it Lost, none openable, not present) and plugged back |
+
+**Alone on Linux** (`src/linux/alsa.cc`, `src/linux/reserve.cc`; slice 5, milestone 7).
+`HifiDeviceDesc::alone` opens a PipeWire sink's card itself: the kernel's PCM device
+(`/dev/snd/pcmC<card>D<device>p`), spoken to through its own ioctls with no library under
+it (alsa-lib is LGPL). The card is asked of WirePlumber first through its reservation
+(`org.freedesktop.ReserveDevice1.Audio<card>` on the session bus, through `dbus`), and
+given back on close. The format is chosen for the file (BR22): its rate if the device
+has it, else the nearest of its family, else any (hifi resamples); the narrowest word
+that holds its depth, else the widest the device has (padded), else a narrower one (hifi
+dithers); packed 24-bit (`S24_3LE`, common on USB DACs) is packed from `S24` on the way.
+About 10 ms periods and up to 200 ms buffered: hifi keeps seconds of its own. A thread of
+its own writes a period when the kernel has room; an underrun is prepared and played on.
+The card unplugged is lost; another program asking for it at a higher priority than
+Blackwing's (WirePlumber's, 0) is told yes, and the device is lost, which the player
+takes as a pull. WirePlumber asking it back at its own priority is told no. Refused
+(another program has the card, no reservation), the sink is opened shared and
+`HifiDeviceOpened::alone_why` says why.
+
+**Names that last.** WirePlumber makes a card's sink again when it has the card back, and
+names the new node with a `.<n>` after the old name (`...analog-stereo.3`). A sink is
+listed, chosen and kept by its name without that suffix; the node's name now is what a
+stream targets. Two identical cards with no serial number between them share a name.
 
 ## Tests
 
@@ -78,6 +100,13 @@ no sound) is taken at the wall's pace, on a thread marked realtime, with a delay
 second; held, it makes no callback, and let go it calls back within 100 ms (6 ms on the
 Linux laptop); no callback runs after close. Without PipeWire those checks are skipped with a
 line in the log. The capture device is tested through `hifi`.
+
+**Alone, on a real card**, only when asked, since it takes the card from PipeWire for a few
+seconds: `BLACKWING_ALONE_SINK=<a sink's name> hifi_platform_tests`. Silence: the card's
+reservation changes hands and comes back; 16-bit 44.1 kHz is granted the device's
+nearest; frames go at the device's rate; a hold stops them; another program asking for
+the card is a loss within milliseconds; 24-bit opened again at once, while WirePlumber is
+still making the sink again, is the word that holds it (packed where the device packs).
 
 ## Building
 

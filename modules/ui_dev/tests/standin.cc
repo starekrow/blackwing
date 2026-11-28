@@ -37,7 +37,7 @@ void standin_take(TickContext& ctx) {
     for (const PlayerCue& e : ctx.received<PlayerCue>()) put(s, "PlayerCue", e.item, e.frame, (f64)e.rate);
     for (const PlayerSetParam& e : ctx.received<PlayerSetParam>()) put(s, "PlayerSetParam", e.stage, e.param, e.value);
     for (const PlayerApplyPreset& e : ctx.received<PlayerApplyPreset>()) put(s, "PlayerApplyPreset", e.stage, e.preset);
-    for (const PlayerSelectDevice& e : ctx.received<PlayerSelectDevice>()) put(s, "PlayerSelectDevice", 0, 0, 0.0, e.name);
+    for (const PlayerSelectDevice& e : ctx.received<PlayerSelectDevice>()) put(s, "PlayerSelectDevice", e.alone, 0, 0.0, e.name);
 }
 
 bool standin_startup(Engine& e, ModuleInstance& self) {

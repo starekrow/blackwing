@@ -61,7 +61,9 @@ struct Session {
     u64     frame = 0, frames = 0, rate = 0;
     bool    said_kept = false, set_params = false, cued = false, set_device = false;
     char    device[kPlayerDeviceNameMax] = "";     // the output device chosen, as the file had it
+    bool    alone = false;                         // and alone
     char    chosen_now[kPlayerDeviceNameMax] = ""; // as player.output says it now: what is written
+    u8      alone_now = 0;
     // Saving.
     u64     saved_sig = 0;     // what was last written, as a hash of it
     u64     seen_sig = 0;      // what was last seen
@@ -118,6 +120,7 @@ bool parse(Session& s, const char* text, usize size) {
     s.frames = json_u64(json_get(doc, root, "frames"), 0);
     s.rate = json_u64(json_get(doc, root, "rate"), 0);
     format(s.device, sizeof s.device, "%s", json_string(json_get(doc, root, "device"), ""));
+    s.alone = json_bool(json_get(doc, root, "alone"), false);
     if (s.place > s.queue.len) s.place = 0;
     if (const JsonValue* list = json_get(doc, root, "params"))
         if (list->is_array())
@@ -201,8 +204,9 @@ void look(TickContext& ctx, Session& s, Snapshot& snap) {
         for (u32 i = 0; i < rows.len; ++i)
             if (params->is_alive(i)) { sig = mix(sig, &rows[i].stage, sizeof(u32) * 2); sig = mix(sig, &rows[i].value, sizeof(f64)); }
     }
-    if (const PlayerOutput* o = ctx.resource<const PlayerOutput>("player.output")) format(s.chosen_now, sizeof s.chosen_now, "%s", o->chosen);
+    if (const PlayerOutput* o = ctx.resource<const PlayerOutput>("player.output")) { format(s.chosen_now, sizeof s.chosen_now, "%s", o->chosen); s.alone_now = o->alone_asked; }
     sig = mix(sig, s.chosen_now, strlen(s.chosen_now));
+    sig = mix(sig, &s.alone_now, 1);
     for (const Kept& k : s.kept) sig = mix(sig, &k, sizeof k);
     snap.sig = sig ? sig : 1;
 }
@@ -223,6 +227,7 @@ void write_text(Session& s, Span<const PlayerItem* const> rows, u32 place, u64 f
     b.set(root, "frames", b.unsigned_integer(frames));
     b.set(root, "rate", b.unsigned_integer(rate));
     if (s.chosen_now[0]) b.set(root, "device", b.string(s.chosen_now));
+    if (s.alone_now) b.set(root, "alone", b.boolean(true));
     JsonRef params = b.array();
     if (chain && table) {
         Span<const PlayerStage> stages = chain->rows_of<PlayerStage>();
@@ -368,9 +373,10 @@ void session_tick(TickContext& ctx) {
         if (!s.set_device) {
             s.set_device = true;
             const PlayerOutput* o = ctx.resource<const PlayerOutput>("player.output");
-            if (s.device[0] && g_session_config.restore_device && o && strcmp(o->chosen, s.device) != 0) {
+            if (s.device[0] && g_session_config.restore_device && o && (strcmp(o->chosen, s.device) != 0 || o->alone_asked != (u8)s.alone)) {
                 PlayerSelectDevice d{};
                 format(d.name, sizeof d.name, "%s", s.device);
+                d.alone = s.alone;
                 ctx.emit(d);
             }
         }

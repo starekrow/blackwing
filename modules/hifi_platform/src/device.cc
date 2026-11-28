@@ -76,8 +76,30 @@ HifiDeviceOpened hifi_device_open(const HifiDeviceDesc& desc) {
     if (!desc.callback) { out.reason = "a device needs a callback"; return out; }
     if (desc.want.rate == 0 || desc.want.channels == 0) { out.reason = "a device needs a rate and a channel count"; return out; }
     for (const HifiBackend* b : k_backends) {
-        if (!b->has(desc.name ? desc.name : "default")) continue;
+        const char* name = desc.name ? desc.name : "default";
+        if (!b->has(name)) continue;
+#if defined(__linux__) && !defined(__ANDROID__)
+        // Alone: the kernel's device behind it, if it has one; else, or refused, shared.
+        if (desc.alone) {
+            i32 card = -1, dev = -1;
+            char why[96] = "";
+            if (b->alone_target && b->alone_target(name, &card, &dev)) {
+                void* impl = alsa_open_alone(card, dev, desc, out, why, sizeof why);
+                if (impl) {
+                    if (!out.name[0]) format(out.name, sizeof out.name, "%s", name);
+                    HifiDevice* d = (HifiDevice*)mem_alloc(sizeof(HifiDevice));
+                    d->backend = &k_alsa_backend;
+                    d->impl    = impl;
+                    out.device = d;
+                    out.alone  = true;
+                    return out;
+                }
+                format(out.alone_why, sizeof out.alone_why, "%s", why);
+            }
+        }
+#endif
         void* impl = b->open(desc, out);
+        if (desc.alone && !out.alone && !out.alone_why[0]) format(out.alone_why, sizeof out.alone_why, "this device cannot be opened alone");
         if (!impl) { if (!out.reason[0]) out.reason = "the device could not be opened"; return out; }
         if (!out.name[0]) format(out.name, sizeof out.name, "%s", desc.name ? desc.name : "default");
         HifiDevice* d = (HifiDevice*)mem_alloc(sizeof(HifiDevice));

@@ -81,6 +81,7 @@ struct Cmd {
     char       reason[96] = "";
     char       device[kHifiDeviceNameMax] = ""; // a Device command's name
     void*      backend = nullptr;
+    bool       alone = false;
 };
 
 constexpr u32 kAligned     = 0x80000000u; // a join request's id: an aligned recut's, not a caller's epoch
@@ -89,7 +90,7 @@ constexpr u64 kDitherSeed  = 0x6A09E667F3BCC909ull;
 
 // Where a source begins in the programme: the source ring's frames from `p` on are its,
 // starting at its frame `first`, at its depth.
-struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; u64 source = 0; bool resampled = false; };
+struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; u64 source = 0; bool floated = false; }; // floated: through the float path, dithered: resampled, or wider than the device's word
 constexpr u32 kResampledBits = 31; // a resampled frame in the source ring: a bit of headroom for what the filter's ringing puts past full scale
 
 // A render's chain: its stages' states, the parameters they were opened with.
@@ -171,6 +172,9 @@ struct Hifi {
     bool             shared = false;
     u32              device_bits = 0;  // the widest source so far in this device: for `exact`
     u32              asked_rate = 0;   // the rate the open device was asked for: a source at it goes on, resampled if the device chose another
+    u32              asked_bits = 0;   // the word it was asked for: a source no wider goes on, dithered down if the device chose a narrower one
+    bool             alone = false;    // it is open alone (under the lock)
+    char             alone_why[96] = ""; // asked alone and opened shared: why (under the lock)
     bool             resampling = false; // the device's rate is not its sources': they are resampled (under the lock)
 
     // ---- the caller's alone ----
@@ -666,6 +670,7 @@ void close_device(Hifi& h) {
     HifiDevice* d = h.device;
     h.device = nullptr;
     h.device_name[0] = 0;
+    h.alone  = false;
     h.held   = false;
     os_mutex_unlock(&h.lock);
     if (d) hifi_device_close(d); // no callback runs after this
@@ -681,7 +686,14 @@ HifiSampleFormat narrowest_for(u32 bits) {
 
 // Whether the open device can go straight on with a source of this format.
 bool device_fits(const Hifi& h, const AudioFormat& f) {
-    return h.device && h.asked_rate == f.rate && h.format.channels == f.channels && (h.rs || f.bits <= hifi_sample_bits(h.format.sample));
+    return h.device && h.asked_rate == f.rate && h.format.channels == f.channels &&
+           (h.rs || f.bits <= hifi_sample_bits(h.format.sample) || f.bits <= h.asked_bits);
+}
+
+// Whether a source of `bits` goes through the float path into this device: resampled, or
+// wider than its word (dithered down).
+bool floated(const Hifi& h, u32 bits) {
+    return h.rs || (h.format.sample != HifiSampleFormat::F32 && bits > hifi_sample_bits(h.format.sample));
 }
 
 // A fresh resampler's output starts at programme frame p.
@@ -702,6 +714,7 @@ bool open_device(Hifi& h, const char** reason) {
     d.want     = HifiDeviceFormat{f.rate, f.channels, narrowest_for(f.bits)};
     d.callback = hifi_callback;
     d.user     = &h;
+    d.alone    = h.config.device_alone;
     if (h.lost) { *reason = "the device went"; return false; }
     HifiDeviceOpened o = hifi_device_open(d);
     if (!o.device) { *reason = o.reason; return false; }
@@ -723,11 +736,6 @@ bool open_device(Hifi& h, const char** reason) {
         }
         h.rs_mem = (u8*)mem_alloc(bytes);
         h.rs = resample_open(f.rate, o.format.rate, f.channels, Span<u8>(h.rs_mem, bytes));
-    }
-    if (!h.rs && f.bits > hifi_sample_bits(o.format.sample) && o.format.sample != HifiSampleFormat::F32) {
-        hifi_device_close(o.device);
-        *reason = "the device's samples are narrower than the file's, and there is no dither yet";
-        return false;
     }
     // No callback is running: the rings and what describes them can change. What was in
     // them and never taken is gone with them, and the stream goes on from where it was;
@@ -783,7 +791,10 @@ bool open_device(Hifi& h, const char** reason) {
     h.shared = o.shared;
     h.device_bits = f.bits;
     h.asked_rate = f.rate;
+    h.asked_bits = hifi_sample_bits(d.want.sample);
     h.resampling = h.rs != nullptr;
+    h.alone = o.alone;
+    format(h.alone_why, sizeof h.alone_why, "%s", o.alone_why);
     os_mutex_unlock(&h.lock);
     hifi_device_start(o.device);
     return true;
@@ -823,7 +834,7 @@ u32 segment_of(const Hifi& h, u64 p) {
 
 // A source begins at programme frame p. Segments wholly behind what the source ring
 // keeps are let go.
-void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source, bool resampled = false) {
+void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source, bool floated = false) {
     const Slot& hs = h.slot[atomic_load(&h.heard_slot, MO_ACQUIRE)];
     u64 heard_p = h.p0[atomic_load(&h.heard_slot, MO_ACQUIRE)] + atomic_load(&hs.read, MO_ACQUIRE);
     u64 oldest = heard_p > h.keep_behind ? heard_p - h.keep_behind : 0;
@@ -832,7 +843,7 @@ void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source, bool resampl
         --h.nsegs;
     }
     if (h.nsegs && h.segs[h.nsegs - 1].p == p) --h.nsegs; // a source that gave nothing: replaced
-    h.segs[h.nsegs++] = Segment{p, first, bits, source, resampled};
+    h.segs[h.nsegs++] = Segment{p, first, bits, source, floated};
 }
 
 // Decoded samples into the source ring at programme frame p.
@@ -874,7 +885,7 @@ void render_frames(Hifi& h, u32 b, u64 p, u64 n, u64 w, bool discard = false) {
         u64 m64 = seg_end - p < n ? seg_end - p : n;
         u32 m = m64 < kChunkFrames ? (u32)m64 : kChunkFrames;
         if (p == sg.p) for (u32 i = 0; i < h.stages.len; ++i) h.stages[i]->reset(c.state[i]);
-        if (c.flat && !sg.resampled) {
+        if (c.flat && !sg.floated) {
             if (!discard)
                 for (u32 i = 0; i < m; ++i) {
                     const i32* sv = h.src + (usize)((p + i) % h.src_frames) * ch;
@@ -1157,6 +1168,7 @@ bool take_commands(Hifi& h) {
             format(h.dev_name, sizeof h.dev_name, "%s", c.device);
             h.config.device = h.dev_name;
             h.config.device_backend = c.backend;
+            h.config.device_alone = c.alone;
             h.lost = c.device[0] == 0; // none: nothing is opened until one is named
             h.lost_delay = 0;
             os_mutex_unlock(&h.lock);
@@ -1412,7 +1424,7 @@ f64 render_step(Hifi& h) {
         }
         if (!h.cur_marked) {
             mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
-            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits, h.cur.src.id);
+            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits, h.cur.src.id, floated(h, h.cur.info.format.bits));
             h.cur_marked = true;
         }
         u64 p = h.p0[h.wslot] + w;
@@ -1428,7 +1440,7 @@ f64 render_step(Hifi& h) {
     if (h.cur_done && h.scratch_at == h.scratch_frames) {
         if (!h.cur_marked) { // a source with no frames at all
             mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, w);
-            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits, h.cur.src.id);
+            begin_segment(h, h.p0[h.wslot] + w, h.cur.src.start, h.cur.info.format.bits, h.cur.src.id, floated(h, h.cur.info.format.bits));
             h.cur_marked = true;
         }
         mark(h, HifiEventKind::Ended, w, h.cur_reason);
@@ -1541,8 +1553,9 @@ void hifi_play(Hifi* h) {
     os_mutex_unlock(&h->lock);
 }
 
-void hifi_set_device(Hifi* h, const char* name, void* backend) {
+void hifi_set_device(Hifi* h, const char* name, void* backend, bool alone) {
     Cmd c; c.kind = CmdKind::Device;
+    c.alone = alone;
     format(c.device, sizeof c.device, "%s", name ? name : "");
     c.backend = backend;
     send(*h, c);
@@ -1688,6 +1701,8 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     s.shared = h->shared;
     s.exact  = s.device_open && !s.shared && !h->resampling && h->device_bits <= hifi_sample_bits(h->format.sample);
     s.resampled_from = h->resampling ? h->asked_rate : 0;
+    s.alone = h->alone && s.device_open;
+    format(s.alone_why, sizeof s.alone_why, "%s", h->alone_why);
     s.held   = h->held;
     s.lost   = h->lost;
     format(s.device, sizeof s.device, "%s", h->device_name);

@@ -10,6 +10,7 @@
 //   --face NAME          which face is up: dev, or none (no window). Without a command it is
 //                        dev; with one it is none unless said
 //   --device NAME        the output device: "default", or "capture" (no hardware)
+//   --alone              that device alone: no other program's sound on it, the file's rate and word where it has them
 //   --capture-to FILE    with the capture device: what reached it, as raw PCM, written at exit (no face)
 //   --lead SECONDS       how far ahead of the playhead audio is kept (5)
 //   --verbose            the engine's INFO lines
@@ -267,7 +268,7 @@ void usage() {
           "       blackwing [options] library [DIR...]\n"
           "       blackwing [options] run FILE.lua [ARG...]\n"
           "       blackwing help\n"
-          "options: --face dev|none, --device NAME, --capture-to FILE, --lead SECONDS, --data DIR, --verbose, --trace-events,\n"
+          "options: --face dev|none, --device NAME, --alone, --capture-to FILE, --lead SECONDS, --data DIR, --verbose, --trace-events,\n"
           "         --run-seconds N, --cli-port N; with a face: --size WxH, --renderer auto|gpu|cpu, --screenshot FILE,\n"
           "         --borderless, --hitch-ms N, --goldberg PORT, --no-goldberg\n", stderr);
 }
@@ -348,6 +349,7 @@ constinit const FrameLoopConfig k_window = {
 int run(int argc, char** argv, bool* engine_owns_exit) {
     const char* device = "default";
     bool device_named = false;
+    bool alone = false;
     const char* capture_to = nullptr;
     const char* data_dir = nullptr;
     const char* face = nullptr;
@@ -368,6 +370,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
             if (loop_argc + 2 < (int)KV_COUNTOF(loop_argv)) { loop_argv[loop_argc++] = argv[first]; if (pass->value) loop_argv[loop_argc++] = argv[++first]; }
         }
         else if (strcmp(argv[first], "--device") == 0 && first + 1 < argc) { device = argv[++first]; device_named = true; }
+        else if (strcmp(argv[first], "--alone") == 0) { alone = true; device_named = true; }
         else if (strcmp(argv[first], "--capture-to") == 0 && first + 1 < argc) capture_to = argv[++first];
         else if (strcmp(argv[first], "--lead") == 0 && first + 1 < argc) lead = atof(argv[++first]);
         else if (strcmp(argv[first], "--data") == 0 && first + 1 < argc) data_dir = argv[++first];
@@ -438,6 +441,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
     }
     PlayerConfig pc;
     pc.device = device;
+    pc.device_alone = alone;
     pc.device_backend = capture; // none: the capture device, asked for by name, is the player's own
     pc.lead_seconds = lead;
     // The settings, read before the engine starts: `absent_device` is "default" (a device
@@ -447,6 +451,7 @@ int run(int argc, char** argv, bool* engine_owns_exit) {
         char settings_at[4200];
         if (session_dir(data_dir, settings_at, sizeof settings_at)) {
             if (SettingsStore* st = settings_open_dir(settings_at)) {
+                pc.exclusive_hold = settings_number(st, "exclusive_hold", 60.0); // seconds paused alone before the device is let go
                 const char* absent = settings_string(st, "absent_device", "default");
                 pc.wait_for_absent = strcmp(absent, "wait") == 0;
                 if (strcmp(absent, "wait") != 0 && strcmp(absent, "default") != 0)

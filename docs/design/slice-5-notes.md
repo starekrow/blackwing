@@ -297,3 +297,64 @@ milliseconds), since the stream ends where it failed.
 | `hifi_resample` | 40 (new) |
 | `hifi` | 369 (356: resampled, gapless and sought) |
 | `blackwing_script` | 42 (the surface's version) |
+
+## Milestone 7, part 2: alone on Linux
+
+Nov 27, 2026.
+
+**What was built.** A device can be opened alone (`--alone`, `PlayerSelectDevice::alone`,
+`player device NAME alone`, a button on the face's Output panel), kept in the session.
+On Linux that is the card's kernel PCM device, spoken to through its own ioctls
+(`sound/asound.h`) with no library under it: alsa-lib is LGPL, and the rule that made
+`dbus` ours makes this ours. PipeWire lets go through WirePlumber's device reservation,
+asked over `dbus`, and has the card back on close. The format follows the file (BR22),
+`hifi` resampling where the device has not the rate and dithering down where it has not
+the word. Paused alone past `exclusive_hold` (the second setting read, 60 s), the device
+is let go and the next play opens it alone again from what was heard. Refused, it plays
+shared and says why.
+
+**On this machine's USB DAC**, which takes only 48 kHz, 16-bit or packed 24-bit
+(`S24_3LE`), with silence (a FLAC of zeros made for it):
+
+| what | |
+|---|---|
+| 16-bit 44.1 kHz asked | 48 kHz S16 granted, resampled; 240-frame periods, 9,600 buffered (200 ms) |
+| 24-bit asked | packed `S24_3LE`, from `S24` |
+| another program asking for the card (priority 100) | lost 5.1 to 5.8 ms after it asked |
+| `blackwing --alone play` | `player status`: alone, resampled; the reservation Blackwing's |
+| paused past `exclusive_hold` (2 s, for the run) | the device let go, the reservation WirePlumber's again, the transport paused at what was heard |
+| played again | opened alone again, going on from there |
+| the default output, before and after | the USB DAC |
+
+**Found:**
+
+- **WirePlumber asks for the card back at once.** The moment it has let go, it calls our
+  `RequestRelease` at its own priority. The first build answered yes to anyone and lost
+  the device in under a millisecond. The protocol says a holder lets go to a higher
+  priority: now it does, and only then.
+- **WirePlumber renames the sink it makes again**: `...analog-stereo`, then `.3`, `.4`,
+  `.6`, each time it has the card back. A device chosen by name (and kept in the session)
+  would have looked gone. `hifi_platform` names sinks without the suffix, and targets the
+  node's name now; alone uses the card it knew while the sink is being made again, so a
+  reopen at once (a rate change between tracks) works.
+- **The registry's announcement of a node has no card.** `alsa.card` and `alsa.device`
+  are only in the node's info: each sink's node is bound to hear it.
+- **The settings file's values are under `"values"`.** A hand-made `settings.json` of
+  `{"exclusive_hold": 2}` is read as empty, silently; the page says the shape now. (Slice
+  5's milestone 1 read `absent_device` the same way, and its test never wrote a file.)
+- **Not realtime.** The device's thread asks for the realtime class and this session's
+  limit refuses it (`RLIMIT_RTPRIO` 0): a desktop grants it through rtkit, over D-Bus,
+  which the engine's core does not speak and Blackwing now does. Owed; no underrun was
+  seen in these runs.
+
+**Not done, and owed:** realtime through rtkit; a refusal while another program has the
+card, seen by hand (JACK, or a second Blackwing); BR22's padding on a device whose
+widest word is wider than the file's (this DAC's is not); exclusive output on Windows and
+macOS (milestones 5 and 6 first); the reopen's cost on a DAC (a relock, a click) by ear.
+
+| suite | checks |
+|---|---|
+| `hifi` | 374 (369: a narrower word dithered down) |
+| `blackwing_player` | 227 (214: alone let go when paused and taken again; refused, shared and why) |
+| `ui_dev` | 294 (292: the alone button) |
+| `hifi_platform` | 44, and 13 more on a real card when asked |

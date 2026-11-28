@@ -25,6 +25,8 @@ struct HifiCaptureDesc {
     u32   period_frames = 512;       // wall clock: frames per callback
     bool  wall_clock    = false;     // false: driven by hifi_capture_pull
     u32   only_rate     = 0;         // grants this rate whatever is asked, as a device that takes no other does: 0, any
+    HifiSampleFormat only_sample = HifiSampleFormat::Count; // grants this word whatever is asked: Count, any
+    bool  can_alone     = false;     // asked alone, it says it is (as a kernel device would); else shared, with why
 };
 
 // One device's worth of captured frames.
