@@ -36,11 +36,20 @@
 //                       decoder call is made. A caller that clears a piece's byte in a
 //                       source's map waits for it to move on before the piece goes.
 //
+// A file at a rate the device will not take is resampled as it is decoded, before the
+// source ring: from there on everything (the ring, the chain, recuts, the stream) counts
+// the device's frames, as it would at the file's own rate. The resampler runs on across a
+// gapless join of two sources at one rate, is drained with silence where the stream ends,
+// and starts afresh with a render (a jump, a flush) or a device. A source's place in the
+// stream is where its first frame falls in the resampler's output, and its position is the
+// stream frames since then at the ratio of the rates.
+//
 // Stream frames are the frames the device has taken, counted from zero and never reset.
 // A slot counts its own frames from zero; the stream frame of one is the slot's `base`
 // plus it. A mark (a source starts here, ends here) is a stream frame. A change of device
 // format keeps counting.
 #include "korvid/hifi/hifi.h"
+#include "korvid/hifi_resample/resample.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/format.h"
 #include "korvid/core/log.h"
@@ -80,7 +89,8 @@ constexpr u64 kDitherSeed  = 0x6A09E667F3BCC909ull;
 
 // Where a source begins in the programme: the source ring's frames from `p` on are its,
 // starting at its frame `first`, at its depth.
-struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; u64 source = 0; };
+struct Segment { u64 p = 0; u64 first = 0; u32 bits = 16; u64 source = 0; bool resampled = false; };
+constexpr u32 kResampledBits = 31; // a resampled frame in the source ring: a bit of headroom for what the filter's ringing puts past full scale
 
 // A render's chain: its stages' states, the parameters they were opened with.
 struct Chain {
@@ -103,6 +113,7 @@ struct Note {
     bool      relative = false;
     u32       slot = 0;
     bool      cut = false; // not an event: marks at or after `frame` are void, but `event.source`'s
+    u32       in_rate = 0, out_rate = 0; // a mark of a resampled source: its rate and the device's, for its position
 };
 
 template <class T, u32 N> struct Fifo {
@@ -159,6 +170,8 @@ struct Hifi {
     HifiDeviceFormat format;
     bool             shared = false;
     u32              device_bits = 0;  // the widest source so far in this device: for `exact`
+    u32              asked_rate = 0;   // the rate the open device was asked for: a source at it goes on, resampled if the device chose another
+    bool             resampling = false; // the device's rate is not its sources': they are resampled (under the lock)
 
     // ---- the caller's alone ----
     Fifo<Note, kMaxPending> pending;   // marks not yet reached
@@ -168,6 +181,7 @@ struct Hifi {
     u64 cur_source    = 0;
     u64 cur_frame     = 0;             // the stream frame the source being heard started at
     u64 cur_first     = 0;             // the frame of it heard there
+    u32 cur_in = 0, cur_out = 0;       // its rate and the device's, when it is resampled
     u32 param_gen     = 0;             // the last parameter change's generation
     u32 gen_said      = 0;             // the last ParamsHeard given out
     OsThread thread;
@@ -260,6 +274,14 @@ struct Hifi {
     u32          req_id = 0;           // the join request outstanding: a jump's epoch, or an aligned recut's id
     u32          recut_seq = 0;
     f64*         fbuf = nullptr;       // kChunkFrames * 8
+    // The resampler, while the device's rate is not the sources': its output frame 0 is
+    // programme frame rs_p0.
+    Resampler*   rs = nullptr;
+    u8*          rs_mem = nullptr;
+    u64          rs_p0 = 0;
+    f64*         rs_in = nullptr;      // kChunkFrames * 8
+    f64*         rs_out = nullptr;     // kChunkFrames * 8
+    i32*         scratch_rs = nullptr; // kChunkFrames * 8: its output, as the source ring keeps it
 };
 
 namespace {
@@ -520,6 +542,7 @@ void mark(Hifi& h, HifiEventKind kind, u64 at, const char* reason = "") {
     format(n.event.reason, sizeof n.event.reason, "%s", reason);
     if (kind == HifiEventKind::Ended) { n.event.status = h.cur_status; n.event.frames = h.cur_frames; }
     else                              n.event.frames = h.cur.src.start;
+    if (h.rs) { n.in_rate = h.cur.info.format.rate; n.out_rate = h.format.rate; }
     check_joined(h); // joined since the step began: its place is known
     if (h.pending_epoch) {
         n.frame = at;
@@ -658,7 +681,13 @@ HifiSampleFormat narrowest_for(u32 bits) {
 
 // Whether the open device can go straight on with a source of this format.
 bool device_fits(const Hifi& h, const AudioFormat& f) {
-    return h.device && h.format.rate == f.rate && h.format.channels == f.channels && f.bits <= hifi_sample_bits(h.format.sample);
+    return h.device && h.asked_rate == f.rate && h.format.channels == f.channels && (h.rs || f.bits <= hifi_sample_bits(h.format.sample));
+}
+
+// A fresh resampler's output starts at programme frame p.
+void restart_resampler(Hifi& h, u64 p) {
+    if (h.rs) resample_reset(h.rs);
+    h.rs_p0 = p;
 }
 
 void setup_chain(Hifi& h, u32 b, const HifiDeviceFormat& df);
@@ -676,12 +705,26 @@ bool open_device(Hifi& h, const char** reason) {
     if (h.lost) { *reason = "the device went"; return false; }
     HifiDeviceOpened o = hifi_device_open(d);
     if (!o.device) { *reason = o.reason; return false; }
-    if (o.format.rate != f.rate || o.format.channels != f.channels) {
+    if (o.format.channels != f.channels) {
         hifi_device_close(o.device);
-        *reason = "the device will not play at this rate and channel count, and there is no resampler yet";
+        *reason = "the device will not play this many channels";
         return false;
     }
-    if (f.bits > hifi_sample_bits(o.format.sample) && o.format.sample != HifiSampleFormat::F32) {
+    // Another rate: the resampler, from the file's to the device's.
+    mem_free(h.rs_mem);
+    h.rs_mem = nullptr;
+    h.rs = nullptr;
+    if (o.format.rate != f.rate) {
+        usize bytes = resample_memory_bytes(f.rate, o.format.rate, f.channels);
+        if (!bytes) {
+            hifi_device_close(o.device);
+            *reason = "the device will not play at this rate, and the resampler does not take these two";
+            return false;
+        }
+        h.rs_mem = (u8*)mem_alloc(bytes);
+        h.rs = resample_open(f.rate, o.format.rate, f.channels, Span<u8>(h.rs_mem, bytes));
+    }
+    if (!h.rs && f.bits > hifi_sample_bits(o.format.sample) && o.format.sample != HifiSampleFormat::F32) {
         hifi_device_close(o.device);
         *reason = "the device's samples are narrower than the file's, and there is no dither yet";
         return false;
@@ -718,6 +761,7 @@ bool open_device(Hifi& h, const char** reason) {
     h.src = (i32*)mem_alloc((usize)h.src_frames * o.format.channels * 4);
     h.p_valid = h.p0[h.wslot] + w;
     setup_chain(h, h.wslot, o.format);
+    restart_resampler(h, h.p0[h.wslot] + w);
     if (h.req_id && h.req_id != h.pending_epoch) h.req_id = 0; // an aligned recut has no callback to join it: the new chain is the heard one
     atomic_store(&h.silent_run, (u64)0, MO_RELEASE);
     check_joined(h);
@@ -738,6 +782,8 @@ bool open_device(Hifi& h, const char** reason) {
     h.format = o.format;
     h.shared = o.shared;
     h.device_bits = f.bits;
+    h.asked_rate = f.rate;
+    h.resampling = h.rs != nullptr;
     os_mutex_unlock(&h.lock);
     hifi_device_start(o.device);
     return true;
@@ -777,7 +823,7 @@ u32 segment_of(const Hifi& h, u64 p) {
 
 // A source begins at programme frame p. Segments wholly behind what the source ring
 // keeps are let go.
-void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source) {
+void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source, bool resampled = false) {
     const Slot& hs = h.slot[atomic_load(&h.heard_slot, MO_ACQUIRE)];
     u64 heard_p = h.p0[atomic_load(&h.heard_slot, MO_ACQUIRE)] + atomic_load(&hs.read, MO_ACQUIRE);
     u64 oldest = heard_p > h.keep_behind ? heard_p - h.keep_behind : 0;
@@ -786,7 +832,7 @@ void begin_segment(Hifi& h, u64 p, u64 first, u32 bits, u64 source) {
         --h.nsegs;
     }
     if (h.nsegs && h.segs[h.nsegs - 1].p == p) --h.nsegs; // a source that gave nothing: replaced
-    h.segs[h.nsegs++] = Segment{p, first, bits, source};
+    h.segs[h.nsegs++] = Segment{p, first, bits, source, resampled};
 }
 
 // Decoded samples into the source ring at programme frame p.
@@ -828,7 +874,7 @@ void render_frames(Hifi& h, u32 b, u64 p, u64 n, u64 w, bool discard = false) {
         u64 m64 = seg_end - p < n ? seg_end - p : n;
         u32 m = m64 < kChunkFrames ? (u32)m64 : kChunkFrames;
         if (p == sg.p) for (u32 i = 0; i < h.stages.len; ++i) h.stages[i]->reset(c.state[i]);
-        if (c.flat) {
+        if (c.flat && !sg.resampled) {
             if (!discard)
                 for (u32 i = 0; i < m; ++i) {
                     const i32* sv = h.src + (usize)((p + i) % h.src_frames) * ch;
@@ -876,7 +922,10 @@ void fail_cur(Hifi& h, const char* why) {
     note(h, HifiEventKind::Failed, h.cur.src.id, why);
     release_cur(h);
     Slot& s = h.slot[h.wslot];
-    if (h.queue.count == 0 && !h.have_nxt) atomic_store(&s.end, atomic_load(&s.write, MO_RELAXED), MO_RELEASE);
+    if (h.queue.count == 0 && !h.have_nxt) {
+        atomic_store(&s.end, atomic_load(&s.write, MO_RELAXED), MO_RELEASE);
+        restart_resampler(h, h.p0[h.wslot] + atomic_load(&s.write, MO_RELAXED));
+    }
 }
 
 // A flush or a jump: everything this render has goes, and a new one starts, empty, in a
@@ -901,6 +950,7 @@ void start_render(Hifi& h, u32 epoch, bool fade, u64 sent_ns) {
         h.p0[h.wslot] = front;
         h.pending_epoch = 0;
         h.req_id = 0;
+        restart_resampler(h, front);
     } else {
         u32 b = h.wslot ^ 1u;  // the heard slot is this render's: the other is free
         if (h.req_id) {
@@ -920,6 +970,7 @@ void start_render(Hifi& h, u32 epoch, bool fade, u64 sent_ns) {
         atomic_store(&w.end, (u64)0, MO_RELEASE);   // nothing yet, and nothing expected until a source says
         setup_chain(h, b, h.format);
         h.p0[b] = front;
+        restart_resampler(h, front);
         atomic_store(&h.join_slot, b, MO_RELAXED);
         atomic_store(&h.join_fade, fade ? 1u : 0u, MO_RELAXED);
         atomic_store(&h.join_kind, 0u, MO_RELAXED);
@@ -1194,6 +1245,75 @@ bool try_hold(Hifi& h) {
 
 // One step of work. Returns how long to sleep before the next: 0 to go straight on, a
 // negative number to wait for a command.
+// render_step's second half when the device's rate is not the source's: what was decoded,
+// through the resampler, into the lead. Its output lags its input by half its filter, so a
+// source's marks are placed where its frames fall in the output (resample_output_at), and
+// once its input is all in, the stream either goes on into the next source through the same
+// resampler or is drained to its end.
+f64 step_resampled(Hifi& h, Slot& s) {
+    const u32 ch = h.format.channels;
+    u64 w = atomic_load(&s.write, MO_RELAXED);
+    auto boundary = [&] { return h.rs_p0 + resample_output_at(h.rs, resample_taken(h.rs)) - h.p0[h.wslot]; };
+    if (!h.cur_marked) {
+        u64 at = boundary();
+        mark(h, h.cur.src.seek ? HifiEventKind::Seeked : HifiEventKind::Started, at);
+        begin_segment(h, h.p0[h.wslot] + at, h.cur.src.start, kResampledBits, h.cur.src.id, true);
+        h.cur_marked = true;
+    }
+    u64 used_ring = w - atomic_load(&s.read, MO_ACQUIRE);
+    u32 room = h.ring_frames - (u32)used_ring;
+    if (room == 0) return atomic_load(&h.want_pause, MO_RELAXED) ? -1.0 : 0.005; // the lead is full
+    u32 cap = room < kChunkFrames ? room : kChunkFrames;
+    u32 left = h.scratch_frames - h.scratch_at;
+    u32 made = 0;
+    bool ends = false;   // these are the stream's last frames for now
+    if (left) {
+        u32 n = left < kChunkFrames ? left : kChunkFrames;
+        const f64 scale = 1.0 / (f64)((u64)1 << (h.cur.info.format.bits - 1));
+        const i32* in = h.scratch + (usize)h.scratch_at * ch;
+        for (u32 i = 0; i < n * ch; ++i) h.rs_in[i] = (f64)in[i] * scale;
+        u32 used = 0;
+        resample_process(h.rs, h.rs_in, n, &used, h.rs_out, cap, &made);
+        h.scratch_at += used;
+    } else if (h.cur_done) {
+        // Its input is all in. Commands first (a flush may have come), and the next
+        // source looked at: if it is ready and this device takes it, it goes on through
+        // the same resampler, joined without a seam; if it is still opening, the lead is
+        // let run down a little first; else the resampler is drained and the stream ends.
+        if (!take_commands(h)) return -2.0;
+        if (!h.have_cur) return 0.0;
+        prepare_next(h);
+        if (h.have_nxt && h.nxt.opening && used_ring > h.start_frames && !atomic_load(&h.want_pause, MO_RELAXED)) return kWantNap;
+        bool goes_on = h.have_nxt && !h.nxt.opening && device_fits(h, h.nxt.info.format);
+        if (goes_on) {
+            mark(h, HifiEventKind::Ended, boundary(), h.cur_reason);
+            release_cur(h);
+            return 0.0;
+        }
+        ends = resample_drain(h.rs, h.rs_out, cap, &made);
+    }
+    if (made) {
+        // Into the source ring as integers with a bit of headroom, then through the chain.
+        const f64 full = (f64)((u64)1 << (kResampledBits - 1));
+        i32* q = h.scratch_rs;
+        for (u32 i = 0; i < made * ch; ++i) {
+            f64 v = floor(h.rs_out[i] * full + 0.5);
+            q[i] = v > 2147483647.0 ? 2147483647 : v < -2147483648.0 ? (i32)-2147483647 - 1 : (i32)v;
+        }
+        u64 p = h.p0[h.wslot] + w;
+        put_source(h, q, p, made);
+        render_frames(h, h.wslot, p, made, w);
+    }
+    atomic_store(&s.end, ends ? w + made : kNever, MO_RELEASE);
+    atomic_store(&s.write, w + made, MO_RELEASE);
+    if (ends) {
+        mark(h, HifiEventKind::Ended, w + made, h.cur_reason);
+        release_cur(h);
+        restart_resampler(h, h.p0[h.wslot] + w + made);
+    }
+    return 0.0;
+}
+
 f64 render_step(Hifi& h) {
     check_joined(h);
     if (wants_recut(h)) start_recut(h);
@@ -1268,6 +1388,7 @@ f64 render_step(Hifi& h) {
         }
     }
 
+    if (h.rs) return step_resampled(h, s);
     u64 w = atomic_load(&s.write, MO_RELAXED);
     u32 left = h.scratch_frames - h.scratch_at;
     if (left) {
@@ -1370,6 +1491,9 @@ Hifi* hifi_create(const HifiConfig& config) {
     os_cond_init(&h->wake);
     h->scratch = (i32*)mem_alloc((usize)kChunkFrames * 8 * sizeof(i32));
     h->fbuf = (f64*)mem_alloc((usize)kChunkFrames * 8 * sizeof(f64));
+    h->rs_in = (f64*)mem_alloc((usize)kChunkFrames * 8 * sizeof(f64));
+    h->rs_out = (f64*)mem_alloc((usize)kChunkFrames * 8 * sizeof(f64));
+    h->scratch_rs = (i32*)mem_alloc((usize)kChunkFrames * 8 * sizeof(i32));
     h->stages = config.stages;
     if (h->stages.len > kHifiMaxStages) h->stages.len = kHifiMaxStages;
     for (u32 i = 0; i < h->stages.len; ++i)
@@ -1394,6 +1518,10 @@ void hifi_destroy(Hifi* h) {
     mem_free(h->src);
     mem_free(h->fbuf);
     mem_free(h->scratch);
+    mem_free(h->rs_in);
+    mem_free(h->rs_out);
+    mem_free(h->scratch_rs);
+    mem_free(h->rs_mem);
     mem_free(h);
 }
 
@@ -1528,7 +1656,7 @@ u32 hifi_poll(Hifi* h, HifiEvent* out, u32 cap) {
         bool start = x.event.kind != HifiEventKind::Ended;
         bool reached = start ? h->heard > x.frame : h->heard >= x.frame;
         if (!reached) break;
-        if (start) { h->cur_source = x.event.source; h->cur_frame = x.frame; h->cur_first = x.event.frames; }
+        if (start) { h->cur_source = x.event.source; h->cur_frame = x.frame; h->cur_first = x.event.frames; h->cur_in = x.in_rate; h->cur_out = x.out_rate; }
         else if (h->cur_source == x.event.source) h->cur_source = 0;
         out[n++] = x.event;
         h->pending.remove(0);
@@ -1558,7 +1686,8 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     s.device_open = h->device != nullptr;
     s.format = h->format;
     s.shared = h->shared;
-    s.exact  = s.device_open && !s.shared && h->device_bits <= hifi_sample_bits(h->format.sample);
+    s.exact  = s.device_open && !s.shared && !h->resampling && h->device_bits <= hifi_sample_bits(h->format.sample);
+    s.resampled_from = h->resampling ? h->asked_rate : 0;
     s.held   = h->held;
     s.lost   = h->lost;
     format(s.device, sizeof s.device, "%s", h->device_name);
@@ -1586,7 +1715,9 @@ void hifi_status(Hifi* h, HifiStatus* out) {
     s.exact = s.exact && s.flat && !s.joining;
     s.heard    = h->heard;
     s.source   = h->cur_source;
-    s.position = h->cur_source && h->heard > h->cur_frame ? h->cur_first + (h->heard - h->cur_frame) : 0;
+    u64 since = h->cur_source && h->heard > h->cur_frame ? h->heard - h->cur_frame : 0;
+    if (h->cur_out && h->cur_in) since = since * h->cur_in / h->cur_out; // stream frames at the device's rate, as the source's
+    s.position = h->cur_source ? h->cur_first + since : 0;
     *out = s;
 }
 

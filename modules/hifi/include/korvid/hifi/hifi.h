@@ -107,6 +107,7 @@ struct HifiStatus {
     u64              position    = 0; // the frame of it being heard: its start, and the frames heard since
     bool             lost        = false; // the device went, and none has been named since (hifi_set_device)
     char             device[kHifiDeviceNameMax] = ""; // the device open, by its name in hifi_devices; empty when none is
+    u32              resampled_from = 0; // the device would not take the sources' rate: they are resampled from this one to its; 0 when they are not
 };
 
 // Starts the render thread. Not paused. Null only if the thread cannot start.

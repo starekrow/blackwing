@@ -251,3 +251,49 @@ the tests showed the old Output panel.
 | suite | checks |
 |---|---|
 | `ui_dev` | 292 (284: the devices shown and chosen, the Media panel with no surface) |
+
+## Milestones 5 and 6: waiting for their machines
+
+The engine's Windows toolchain is MSVC, found on Windows itself, so nothing is
+cross-compiled from Linux; macOS is the M3's. Both wait for a session on those machines.
+Milestone 7's resampler went first instead: it needs neither.
+
+## Milestone 7, part 1: the resampler
+
+Nov 27, 2026.
+
+**Its own module**, `hifi_resample`: polyphase windowed sinc at the exact ratio of the two
+rates, a Kaiser window for 160 dB, passband to 0.4535 of the lower rate, in f64 over
+memory it is handed. Measured over eight pairs of rates: the passband within 8.2e-8 dB,
+the phase within 3.1e-12 rad, everything that is not the sine at -170.4 dB, a stopband
+sine's alias at -166.2 dB. Cost, stereo: 44.1 to 48 kHz 35 times real time, 96 to 48 17
+times, 192 to 44.1 9 times (about an eighth of a core while the lead fills).
+
+**Where it runs, kept simple** (the user's word): between the decoder and the source
+ring. The PRD called it a stage, but a stage changes frames in place, one in and one out,
+and a resampler does not. Before the source ring, everything after it (the ring, the
+chain, recuts, the stream frames, the callback) counts the device's frames as it would
+at the file's rate, and none of it changed. What did: where a source's marks fall (where
+its first frame lands in the resampler's output), its position (stream frames at the
+ratio of the rates), the resampler running on across a gapless join of two sources at
+one rate and drained where the stream ends, and a device asked for one rate that grants
+another going on with the next source at the rate it was asked for. Resampled frames
+take the float path, dithered to the device's word.
+
+**Proved** through a capture device that takes only 48 kHz (`HifiCaptureDesc::only_rate`),
+under three 44.1 kHz MP3s played gaplessly: what reached it was the three run through a
+resampler of the test's own as one stream, to within 2 LSB of 24 bits (the dither), with no
+seam at the joins; a seek while resampled was heard at its frame. `player.output` has
+`resampled_from` (the player's surface is 0.3.0) and is not `exact` while it is.
+
+**Not yet**: nothing on Linux asks for it, since PipeWire takes any rate (shared) and
+resamples itself. It is for alone (ALSA `hw:`, WASAPI exclusive, hog mode), which is the
+rest of milestone 7; BR22 with it. Also owed: a source that fails to open just after a
+gapless join leaves the last half filter of the one before undrained (a few
+milliseconds), since the stream ends where it failed.
+
+| suite | checks |
+|---|---|
+| `hifi_resample` | 40 (new) |
+| `hifi` | 369 (356: resampled, gapless and sought) |
+| `blackwing_script` | 42 (the surface's version) |

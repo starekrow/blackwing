@@ -6,6 +6,7 @@
 // again, now at the device's side of the path, and a direct comparison with what the
 // decoder gives.
 #include "korvid/hifi/hifi.h"
+#include "korvid/hifi_resample/resample.h"
 #include "korvid/hifi_codec/flac.h"
 #include "korvid/hifi_codec/mp3.h"
 #include "korvid/hifi_platform/capture.h"
@@ -75,8 +76,9 @@ struct Rig {
     HifiEvent    events[256];
     u32          nevents = 0;
 
-    void make(u32 delay = 0, f64 lead = 5.0, bool wall = false, Span<const StageDesc* const> stages = {}) {
+    void make(u32 delay = 0, f64 lead = 5.0, bool wall = false, Span<const StageDesc* const> stages = {}, u32 only_rate = 0) {
         HifiCaptureDesc cd;
+        cd.only_rate    = only_rate;
         cd.delay_frames = delay;
         cd.wall_clock   = wall;
         cd.keep_bytes   = 16u << 20;
@@ -1284,6 +1286,91 @@ void test_hifi_gapless(TestCtx& c) {
     KV_CHECK(c, s1 && s1->info.frames == na && s1->info.format.bits == 24);
     KV_CHECK(c, e1 && e1->status == DecodeStatus::End && e1->frames == na);
     KV_CHECK(c, e3 && e3->status == DecodeStatus::End && e3->frames == na - 5000);
+    r.free();
+    drop(a); drop(b); drop(fa); drop(fb);
+}
+
+// A device that takes only 48 kHz, and three 44.1 kHz sources gaplessly (the third from
+// its frame 5000): resampled as one stream, what reaches the device is the music run
+// through a resampler of its own to within the dither, with no seam at the joins; the
+// position heard is the source's frames; the device says it is resampling, so not exact.
+void test_hifi_resampled(TestCtx& c) {
+    c.begin("hifi resampled");
+    File fa = read_data("mp3/cbr128_44100_2ch.mp3"), fb = read_data("mp3/vbr_44100_2ch.mp3");
+    Pcm a = decode(fa, k_mp3_decoder), b = decode(fb, k_mp3_decoder);
+    u8* mem = (u8*)mem_alloc(k_mp3_decoder.memory_bytes);
+    DecoderInfo ia = k_mp3_decoder.open(sparse_whole(fa.bytes()), Span<u8>(mem, k_mp3_decoder.memory_bytes)).info;
+    DecoderInfo ib = k_mp3_decoder.open(sparse_whole(fb.bytes()), Span<u8>(mem, k_mp3_decoder.memory_bytes)).info;
+    mem_free(mem);
+    const u64 na = ia.frames - ia.delay - ia.padding, nb = ib.frames - ib.delay - ib.padding;
+    const u64 total_in = na + nb + (na - 5000);
+    const u64 total = (total_in * 48000 + 44099) / 44100;
+
+    Rig r; r.make(0, 5.0, false, {}, 48000);
+    hifi_add_source(r.h, {1, &k_mp3_decoder, sparse_whole(fa.bytes())});
+    hifi_add_source(r.h, {2, &k_mp3_decoder, sparse_whole(fb.bytes())});
+    hifi_add_source(r.h, {3, &k_mp3_decoder, sparse_whole(fa.bytes()), 5000});
+    KV_CHECK(c, r.wait_written(total));
+    // Part way into the first: the position is its frames, at the rates' ratio.
+    u64 pulled = r.pull(12000);
+    HifiStatus st = r.status();
+    KV_CHECK(c, st.resampled_from == 44100 && st.format.rate == 48000 && !st.exact && st.source == 1);
+    KV_CHECK(c, st.position + 1 >= 12000ull * 44100 / 48000 && st.position <= 12000ull * 44100 / 48000 + 1);
+    while (pulled < total + 2000) pulled += r.pull(1000);
+    HifiCaptureSegment seg[2];
+    KV_CHECK(c, hifi_capture_segments(r.cap, seg, 2) == 1 && seg[0].format.rate == 48000 && seg[0].format.sample == HifiSampleFormat::S24);
+    const u8* data = hifi_capture_data(r.cap);
+    const HifiDeviceFormat& f = seg[0].format;
+
+    // The reference: the music of all three, one after another, through a resampler.
+    f64* in = (f64*)mem_alloc((usize)total_in * 2 * sizeof(f64));
+    const f64 k24 = 1.0 / 8388608.0;
+    u64 n = 0;
+    for (u64 i = 0; i < na; ++i, ++n) for (u32 q = 0; q < 2; ++q) in[n * 2 + q] = a.s[(ia.delay + i) * 2 + q] * k24;
+    for (u64 i = 0; i < nb; ++i, ++n) for (u32 q = 0; q < 2; ++q) in[n * 2 + q] = b.s[(ib.delay + i) * 2 + q] * k24;
+    for (u64 i = 5000; i < na; ++i, ++n) for (u32 q = 0; q < 2; ++q) in[n * 2 + q] = a.s[(ia.delay + i) * 2 + q] * k24;
+    usize rb = resample_memory_bytes(44100, 48000, 2);
+    u8* rm = (u8*)mem_alloc(rb);
+    Resampler* rs = resample_open(44100, 48000, 2, Span<u8>(rm, rb));
+    f64* ref = (f64*)mem_alloc((usize)(total + 16) * 2 * sizeof(f64));
+    u64 made = 0, at = 0;
+    while (at < total_in) {
+        u32 used, m;
+        resample_process(rs, in + at * 2, (u32)(total_in - at < 4096 ? total_in - at : 4096), &used, ref + made * 2, 4096, &m);
+        at += used; made += m;
+    }
+    for (;;) { u32 m; bool done = resample_drain(rs, ref + made * 2, 4096, &m); made += m; if (done) break; }
+    KV_CHECK(c, made == total);
+    i64 worst = 0;
+    for (u64 k = 0; k < total; ++k)
+        for (u32 q = 0; q < 2; ++q) {
+            f64 want = ref[k * 2 + q] * 8388608.0;
+            if (want > 8388607.0) want = 8388607.0;
+            if (want < -8388608.0) want = -8388608.0;
+            i64 d = (i64)sample_at(data, f, k * 2 + q) - (i64)llround(want);
+            if (d < 0) d = -d;
+            if (d > worst) worst = d;
+        }
+    KV_CHECK(c, worst <= 2); // the dither, and nothing else
+    if (worst > 2) KV_WARN("test", "resampled: %lld from the reference at worst", (long long)worst);
+    KV_CHECK(c, silent(data, f, total, pulled - total));
+    KV_CHECK(c, r.status().underruns == 0 && r.status().taken == total);
+    const HifiEvent* e1 = r.find(HifiEventKind::Ended, 1);
+    const HifiEvent* e3 = r.find(HifiEventKind::Ended, 3);
+    KV_CHECK(c, r.has(HifiEventKind::Started, 2) && r.has(HifiEventKind::Started, 3));
+    KV_CHECK(c, e1 && e1->frames == na && e3 && e3->status == DecodeStatus::End && e3->frames == na - 5000);
+    // A seek while resampled: the resampler starts afresh at the target, which is heard
+    // Seeked at its frame, and the position counts on from it at the ratio.
+    HifiSource sk{1, &k_mp3_decoder, sparse_whole(fa.bytes()), 10000, true};
+    hifi_jump(r.h, &sk, 1);
+    KV_CHECK(c, r.wait_flushed() && r.wait_lead(8000));
+    u64 more = 0;
+    while (more < 9600) more += r.pull(480);
+    st = r.status();
+    const HifiEvent* sought = r.find(HifiEventKind::Seeked, 1);
+    KV_CHECK(c, sought && sought->frames == 10000 && st.source == 1 && st.resampled_from == 44100);
+    KV_CHECK(c, st.position > 10000 + 7000 && st.position < 10000 + 9600 * 44100 / 48000 + 1);
+    mem_free(in); mem_free(ref); mem_free(rm);
     r.free();
     drop(a); drop(b); drop(fa); drop(fb);
 }

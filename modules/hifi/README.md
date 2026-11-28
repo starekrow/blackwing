@@ -274,8 +274,19 @@ and publish what it says.
 - **A format change is a gap**: the device's delay, and the time it takes to open.
 - **The next source's decoder is open while the current one finishes**, so two decoders'
   memory are held at a join.
-- **No resampler and no dither.** A device that will not grant the source's rate, or
-  whose word is narrower than the source, fails the source in words.
+- **Another rate is resampled; a narrower word, at the source's rate, is not.** A device
+  that grants another rate than the source's is played at it: the source goes through
+  [`hifi_resample`](../hifi_resample/README.md) as it is decoded, before the source
+  ring, so the ring, the chain, recuts and the stream all count the device's frames as
+  they would at the source's own. The resampler runs on across a gapless join of two
+  sources at one rate (no seam: the stream is resampled as one), is drained with silence
+  where the stream ends, and starts afresh at a jump or a new device. A source's marks
+  fall where its first frame lands in the output; its position is the stream frames
+  heard since, at the ratio of the rates; `HifiStatus::resampled_from` says the rate,
+  and the output is not `exact`. Resampled frames go through the float path, dithered
+  (TPDF) to the device's word. A device whose word is narrower than the source at the
+  source's own rate still fails the source in words (BR22 is the player's choice of
+  format, not this).
 - **Sources of more than 24 bits are not exact into a float device.**
 - **256 commands and 256 events in flight.** Past that a command is dropped with an
   error in the log; a player that polls each tick is nowhere near it.
@@ -305,7 +316,11 @@ delay to its padding, joined with nothing between, the third from its music's fr
 and the events' lengths the music's. A replacement after the
 source playing, before its end is rendered (no recut) and after (a recut at the
 boundary), and with nothing: the source exact, then the new one exact, the old next
-never Started. A jump's marks still placed after a recut joined behind it.
+never Started. A jump's marks still placed after a recut joined behind it. A capture
+device that takes only 48 kHz under those three MP3s at 44.1: what reaches it is the
+three run through a resampler of the test's own as one stream, to within the dither (2
+LSB of 24 bits), with no seam at the joins; the position is the source's frames; a seek
+while resampled is heard at its frame.
 
 ## Not in this module
 

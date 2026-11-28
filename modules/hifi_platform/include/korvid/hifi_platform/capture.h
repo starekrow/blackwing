@@ -24,6 +24,7 @@ struct HifiCaptureDesc {
     u32   delay_frames  = 0;         // what hifi_device_delay reports
     u32   period_frames = 512;       // wall clock: frames per callback
     bool  wall_clock    = false;     // false: driven by hifi_capture_pull
+    u32   only_rate     = 0;         // grants this rate whatever is asked, as a device that takes no other does: 0, any
 };
 
 // One device's worth of captured frames.

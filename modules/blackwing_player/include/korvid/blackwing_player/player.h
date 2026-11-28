@@ -242,7 +242,7 @@ struct PlayerOutput {
     u64  bytes_held = 0;
     f64  recut_seconds = 0.0; // the last recut: from the change reaching hifi to the join's first frame leaving the callback
     u32  recuts    = 0;   // ever
-    u32  pad4      = 0;
+    u32  resampled_from = 0; // the device would not take the file's rate: it is resampled from this one to `rate`; 0 when it is not
     f64  recut_render_seconds = 0.0; // the last recut's rendering of the whole lead
     f64  jump_seconds = 0.0;         // the last seek or skip: from reaching hifi to its first frame leaving the callback  // of the files, in memory now across every item: at most PlayerConfig::memory_bytes
     char device[kPlayerDeviceNameMax] = ""; // the device open, by player.devices' name; empty when none is

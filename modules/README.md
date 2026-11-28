@@ -3,7 +3,7 @@
 Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 `hifi_platform`, `blackwing_player` and `blackwing` have code (slice 1), `hifi_eq`
 (slice 2), `blackwing_tags` and `blackwing_library` (slice 3), and `ui_dev`,
-`blackwing_window`, `blackwing_glue`, `blackwing_session` and `blackwing_script` (slice 4), and `dbus`, `media_platform` and `blackwing_media` (slice 5); the rest are skeletons. The
+`blackwing_window`, `blackwing_glue`, `blackwing_session` and `blackwing_script` (slice 4), and `dbus`, `media_platform`, `blackwing_media` and `hifi_resample` (slice 5); the rest are skeletons. The
 [master PRD](../docs/PRDs/Blackwing-Master-PRD.md) says what each is for and when.
 
 | module | what |
@@ -11,6 +11,7 @@ Blackwing's modules, each a directory with a `module.lua`. `hifi`, `hifi_codec`,
 | [hifi](hifi/README.md) | the hard-realtime audio path and its interfaces |
 | [hifi_codec](hifi_codec/README.md) | the decoder contract and the decoders |
 | [hifi_eq](hifi_eq/README.md) | the chain's stages, on hifi's interface: volume, and the equalizer |
+| [hifi_resample](hifi_resample/README.md) | one rate made another: polyphase windowed sinc at the exact ratio, in f64, measured |
 | [hifi_platform](hifi_platform/README.md) | the output device, per OS |
 | [media_platform](media_platform/README.md) | media keys, now-playing, keep-awake, per OS |
 | [dbus](dbus/README.md) | a D-Bus client of our own, with no library under it: Linux's way to the desktop |
@@ -38,8 +39,9 @@ blackwing_player            blackwing_library
         |       hifi_eq       blackwing_tags
         |        /
       hifi
-      /   \
-hifi_codec  hifi_platform
+      /   |    \
+hifi_codec  |  hifi_platform
+       hifi_resample
 ```
 
 `dbus` sits beneath what talks to a Linux desktop: `media_platform`, and `hifi_platform`

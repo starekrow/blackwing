@@ -1288,6 +1288,7 @@ void publish(TickContext& ctx, Player& p, KTable* queue) {
     o.recut_render_seconds = s.recut_render_seconds;
     o.jump_seconds = s.jump_seconds;
     o.recuts = s.recuts;
+    o.resampled_from = s.resampled_from;
 }
 
 // Phase PreSim, main thread, every tick, paused or not.
@@ -1576,7 +1577,7 @@ void cmd_status(CliContext& ctx, Span<const char* const> args) {
     ctx.print("%s; item %llu at %.1f of %.1f s; %u queued, %u left", player_state_name((PlayerState)t.state),
               (unsigned long long)t.item, secs, of, t.queued, t.left);
     if (o.open) ctx.print("device: %s%s, %u Hz, %u ch, %s, %s%s; lead %.2f s; %u underruns", o.device, o.following ? " (the default)" : o.standing_in ? " (standing in)" : "", o.rate, o.channels,
-                          hifi_sample_format_name((HifiSampleFormat)o.sample), o.shared ? "shared" : "unshared", o.exact ? ", exact" : "",
+                          hifi_sample_format_name((HifiSampleFormat)o.sample), o.shared ? "shared" : "unshared", o.exact ? ", exact" : o.resampled_from ? ", resampled" : "",
                           o.rate ? (f64)o.lead_frames / o.rate : 0.0, o.underruns);
     else        ctx.print("device: none open%s%s", o.none_why[0] ? ": " : "", o.none_why);
     ctx.print("files: %.1f MB held of %.1f", (f64)o.bytes_held / (1 << 20), (f64)g_config.memory_bytes / (1 << 20));

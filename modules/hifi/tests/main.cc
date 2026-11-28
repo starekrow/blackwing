@@ -21,6 +21,7 @@ void test_hifi_replace(kv::TestCtx&);
 void test_hifi_marks_across_joins(kv::TestCtx&);
 void test_hifi_gapless(kv::TestCtx&);
 void test_hifi_lost(kv::TestCtx&);
+void test_hifi_resampled(kv::TestCtx&);
 
 int main() {
     kv::TestCtx c;
@@ -44,6 +45,7 @@ int main() {
     test_hifi_marks_across_joins(c);
     test_hifi_gapless(c);
     test_hifi_lost(c);
+    test_hifi_resampled(c);
     int rc = kv::test_report(c, "hifi_tests");
     kv::mem_shutdown();
     return rc;

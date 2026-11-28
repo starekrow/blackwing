@@ -1,6 +1,6 @@
 # blackwing_player — the script surface
 
-Surface `player`, version 0.2.0 (0.2: the devices) · with [the spec](../../docs/specs/script-modules.md)
+Surface `player`, version 0.3.0 (0.2: the devices; 0.3: `player.output`'s `resampled_from`) · with [the spec](../../docs/specs/script-modules.md)
 
 **Proven by slice 4** ([blackwing_script](../blackwing_script/README.md)'s walk): every name,
 field and enum value on this page is reached from Lua as written. **Still a draft:** the
@@ -202,6 +202,7 @@ A script's snapshot of it is as of its slice: `position` is where the playhead w
 | `chosen` | string | what was chosen: `"default"`, or a name |
 | `following`, `standing_in`, `lost` | integers, 0 or 1 | the default is followed; the default stands in for a device chosen and not there; the device playing went, and the transport is paused until play is pressed |
 | `none_why` | string | why no device is open while one is wanted |
+| `resampled_from` | number | the device would not take the file's rate: what it is resampled from, to `rate`; 0 when it is not |
 
 A guest stage that is not flat makes `exact` 0, as a built-in one does.
 

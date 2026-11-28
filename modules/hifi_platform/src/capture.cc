@@ -99,18 +99,19 @@ void* capture_open(const HifiDeviceDesc& desc, HifiDeviceOpened& out) {
     c->open     = true;
     c->started  = false;
     c->format   = desc.want;
+    if (c->desc.only_rate) c->format.rate = c->desc.only_rate;
     c->callback = desc.callback;
     c->user     = desc.user;
     c->quit     = 0;
     ++c->opens;
     if (c->nsegments < 64) {
         HifiCaptureSegment& s = c->segments[c->nsegments++];
-        s.format = desc.want;
+        s.format = c->format;
         s.offset = c->len;
         s.bytes  = 0;
     }
     os_mutex_unlock(&c->lock);
-    out.format = desc.want; // anything asked, as asked
+    out.format = c->format; // anything asked, as asked, but the rate when it has only one
     out.shared = false;
     return c;
 }
