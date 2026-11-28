@@ -531,6 +531,7 @@ void refresh_devices(TickContext* cx, Player& p, KTable* queue, KTable* table, b
     // pauses where it was. The rules for a device not there are for a start, a choice and
     // a press of play, never for one pulled from under the music.
     if (s.device[0] && !device_present(p, s.device)) return;
+    if (s.alone) return; // alone is the device it opened: its sink is gone while it has it, and the default moves for others' sake, not ours
     if (p.standing_in && !standing && target[0]) { put_on(ctx, p, queue, target, false, "the device chosen came back"); return; }
     // Following the default: a new default (a DAC plugged in, a headset connected, the
     // user's choice in the system's settings) is moved to.

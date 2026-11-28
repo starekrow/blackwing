@@ -87,6 +87,9 @@ void test_alone(TestCtx& c) {
     u64 got = atomic_load(&q.frames, MO_RELAXED);
     f64 took = time_now() - t0;
     u32 delay = hifi_device_delay(o.device);
+    const char* rt = hifi_device_realtime(o.device);
+    KV_INFO("test", "alone: its thread: %s", rt ? (rt[0] ? rt : "not realtime") : "not said");
+    KV_CHECK(c, rt && strstr(rt, "rtkit") != nullptr);
     KV_INFO("test", "alone: %u Hz %s, %llu frames in %.2f s (%.0f a second), delay %u frames", o.format.rate, hifi_sample_format_name(o.format.sample),
             (unsigned long long)got, took, (f64)got / took, delay);
     KV_CHECK(c, (f64)got > 1.2 * o.format.rate && (f64)got < 1.8 * o.format.rate && delay > 0 && delay < o.format.rate / 2);
@@ -137,6 +140,27 @@ void test_alone(TestCtx& c) {
         time_sleep(0.5);
         KV_CHECK(c, atomic_load(&q24.frames, MO_RELAXED) > o24.format.rate / 4 && !hifi_device_lost(o24.device));
         hifi_device_close(o24.device);
+    }
+    // "default" alone, when the sink is the default: opened as the device it is, so a
+    // reopen at once (its own sink gone, the default moved to another card for a moment)
+    // takes the same card, and never another.
+    if (d->is_default) {
+        // The sink back, and the default again, first: "default" means whatever it is now.
+        end = time_now() + 5.0;
+        for (bool back = false; !back && time_now() < end; time_sleep(0.05)) {
+            n = hifi_devices(list, kHifiMaxDevices);
+            for (u32 i = 0; i < n; ++i) back = back || (strcmp(list[i].name, sink) == 0 && list[i].present && list[i].is_default);
+        }
+        char named[kHifiDeviceNameMax] = "default";
+        for (u32 k = 0; k < 2; ++k) {
+            Quiet qd;
+            dd.name = named;
+            dd.want = {44100, 2, HifiSampleFormat::S16};
+            dd.user = &qd;
+            HifiDeviceOpened od = hifi_device_open(dd);
+            KV_CHECK(c, od.device && od.alone && strcmp(od.name, sink) == 0);
+            if (od.device) { format(named, sizeof named, "%s", od.name); qd.bytes = hifi_frame_bytes(od.format); hifi_device_start(od.device); time_sleep(0.2); hifi_device_close(od.device); }
+        }
     }
     end = time_now() + 3.0;
     do { owner_of(bus, rname, after, sizeof after); if (strcmp(after, holder) == 0) break; time_sleep(0.05); } while (time_now() < end);

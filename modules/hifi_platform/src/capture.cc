@@ -182,7 +182,7 @@ void capture_close(void* impl) {
 
 constinit const HifiBackend k_capture_backend = {
     .name = "capture", .has = capture_has, .open = capture_open, .start = capture_start, .delay = capture_delay,
-    .hold = capture_hold, .close = capture_close, .lost = capture_lost, .list = capture_list, .alone_target = nullptr,
+    .hold = capture_hold, .close = capture_close, .lost = capture_lost, .list = capture_list, .alone_target = nullptr, .realtime = nullptr,
 };
 
 HifiCapture* hifi_capture_create(const HifiCaptureDesc& desc) {

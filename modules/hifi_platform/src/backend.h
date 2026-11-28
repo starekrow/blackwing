@@ -19,7 +19,9 @@ struct HifiBackend {
     u32   (*list)(HifiDeviceInfo* out, u32 cap);           // may be null: the devices it has now, present or gone
     // May be null. The device to open alone for `name` ("default" resolved): its kernel
     // card and device on Linux. False when it has none.
-    bool  (*alone_target)(const char* name, i32* card, i32* device);
+    bool  (*alone_target)(const char* name, i32* card, i32* device, char* resolved, u32 resolved_cap);
+    // May be null: how its callback's thread is scheduled (hifi_device_realtime).
+    const char* (*realtime)(void* impl);
 };
 
 // A backend's list changed: the generation moves on and the watcher is called. Any thread.

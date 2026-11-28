@@ -83,10 +83,11 @@ HifiDeviceOpened hifi_device_open(const HifiDeviceDesc& desc) {
         if (desc.alone) {
             i32 card = -1, dev = -1;
             char why[96] = "";
-            if (b->alone_target && b->alone_target(name, &card, &dev)) {
+            char resolved[kHifiDeviceNameMax] = "";
+            if (b->alone_target && b->alone_target(name, &card, &dev, resolved, sizeof resolved)) {
                 void* impl = alsa_open_alone(card, dev, desc, out, why, sizeof why);
                 if (impl) {
-                    if (!out.name[0]) format(out.name, sizeof out.name, "%s", name);
+                    format(out.name, sizeof out.name, "%s", resolved[0] ? resolved : name);
                     HifiDevice* d = (HifiDevice*)mem_alloc(sizeof(HifiDevice));
                     d->backend = &k_alsa_backend;
                     d->impl    = impl;
@@ -115,6 +116,7 @@ HifiDeviceOpened hifi_device_open(const HifiDeviceDesc& desc) {
 void hifi_device_start(HifiDevice* d) { if (d) d->backend->start(d->impl); }
 u32  hifi_device_delay(HifiDevice* d) { return d ? d->backend->delay(d->impl) : 0; }
 void hifi_device_hold(HifiDevice* d, bool hold) { if (d && d->backend->hold) d->backend->hold(d->impl, hold); }
+const char* hifi_device_realtime(HifiDevice* d) { return d && d->backend->realtime ? d->backend->realtime(d->impl) : nullptr; }
 const char* hifi_device_lost(HifiDevice* d) { return d && d->backend->lost ? d->backend->lost(d->impl) : nullptr; }
 void hifi_device_close(HifiDevice* d) {
     if (!d) return;

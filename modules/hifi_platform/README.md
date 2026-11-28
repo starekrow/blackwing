@@ -78,6 +78,14 @@ that holds its depth, else the widest the device has (padded), else a narrower o
 dithers); packed 24-bit (`S24_3LE`, common on USB DACs) is packed from `S24` on the way.
 About 10 ms periods and up to 200 ms buffered: hifi keeps seconds of its own. A thread of
 its own writes a period when the kernel has room; an underrun is prepared and played on.
+That thread is made realtime through rtkit (`src/linux/rtkit.cc`: the system bus's
+`org.freedesktop.RealtimeKit1`, through `dbus`), as a desktop grants it to a program whose
+`RLIMIT_RTPRIO` is 0: rtkit's class is `SCHED_RR`, at its highest priority (20), with the
+process's `RLIMIT_RTTIME` set to its ceiling first, as it requires. Where rtkit says no,
+the thread asks for the realtime class itself (`os_thread_enter_audio_class`).
+`hifi_device_realtime` says which it got. Opened as `"default"`, the device is named
+as the one it is: while Blackwing has the card, its sink is gone and the system's
+default is another card's, so a reopen (a rate change) must not look "default" up again.
 The card unplugged is lost; another program asking for it at a higher priority than
 Blackwing's (WirePlumber's, 0) is told yes, and the device is lost, which the player
 takes as a pull. WirePlumber asking it back at its own priority is told no. Refused

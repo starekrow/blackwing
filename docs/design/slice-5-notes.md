@@ -358,3 +358,44 @@ macOS (milestones 5 and 6 first); the reopen's cost on a DAC (a relock, a click)
 | `blackwing_player` | 227 (214: alone let go when paused and taken again; refused, shared and why) |
 | `ui_dev` | 294 (292: the alone button) |
 | `hifi_platform` | 44, and 13 more on a real card when asked |
+
+## Milestone 7, part 3: realtime through rtkit
+
+Nov 27, 2026.
+
+**What was built.** The ALSA device's thread is made realtime through rtkit, over the
+system bus, through `dbus`: the thread that opens the device asks
+`MakeThreadRealtimeWithPID` for the device thread's kernel id (that thread allocates
+nothing, and a D-Bus call does), after setting the process's `RLIMIT_RTTIME` to rtkit's
+ceiling (200 ms here), as rtkit requires. `hifi_device_realtime` says what the thread got.
+
+| what | |
+|---|---|
+| a test thread made realtime | `SCHED_RR` 20, with `SCHED_RESET_ON_FORK`, in 3.9 to 5.9 ms |
+| the device's thread, alone on the USB DAC | `SCHED_RR 20, from rtkit` |
+| PipeWire's own thread, shared, for comparison | `SCHED_RR` 20 (PipeWire asks rtkit itself) |
+
+**Found:**
+
+- **rtkit's class is round-robin.** `SCHED_RR`, not FIFO; the first check was wrong, the
+  grant was not. What a thread got is read back and said as it is.
+- **Alone on "default" took other cards.** Played alone on the default with a rate change
+  between two files, the second opened card 1 (the laptop's own output) alone, and then
+  card 0 (HDMI). A device opened alone as "default" was reported as "default"; its own
+  sink is gone while Blackwing has the card, so the system's default had moved to another
+  card, the player followed the "new" default, and each card it took moved the default
+  again. Nothing was heard (the files were silence), but each card was taken from
+  PipeWire for a moment; a run with music would have played it on the laptop's speakers.
+  Fixed both ways: a device opened alone is named as the device it is, and `hifi` keeps
+  that name for its reopens; and the player follows no default while it plays alone.
+  The same two files now play on card 2 both times, and the hardware test opens
+  "default" alone and then again by the name it was given, on the same card. Card 1 was
+  opened alone for 0.2 s once more, with silence, by a check I had written wrong (it
+  opened "default" in the moment the default was the laptop's own output).
+- **Other programs, while Blackwing has the card**, play on whatever the default is then:
+  the card's sink is gone, so a notification comes out of the laptop. That is alone on
+  Linux, not a bug, and worth knowing.
+
+| suite | checks |
+|---|---|
+| `hifi_platform` | 48 (44: rtkit), and 16 more on a real card when asked |

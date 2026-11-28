@@ -13,6 +13,7 @@
 // is prepared and played on; the card unplugged, or another program asking for it, is lost.
 #include "../backend.h"
 #include "reserve.h"
+#include "rtkit.h"
 #include "korvid/core/atomic.h"
 #include "korvid/core/format.h"
 #include "korvid/core/log.h"
@@ -26,6 +27,7 @@
 #include <limits.h>
 #include <new>
 #include <poll.h>
+#include <sched.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -104,6 +106,11 @@ struct Alsa {
     char  lost[96] = "";
     u64   xruns = 0;              // atomic
     i64   last_delay = 0;         // atomic: the delay when it went
+    i64   tid = 0;                // atomic: the thread's kernel id, once it runs
+    u32   rt_decided = 0;         // atomic: the opening thread has asked rtkit
+    u32   rt_rtkit = 0;           // atomic: and rtkit said yes
+    char  realtime[48] = "";      // how the thread runs, for hifi_device_realtime (written before rt_done)
+    u32   rt_done = 0;            // atomic: `realtime` is written
     char  path[48] = "";
 };
 
@@ -151,7 +158,18 @@ bool write_period(Alsa& a) {
 
 void alsa_run(void* arg) {
     Alsa& a = *(Alsa*)arg;
-    os_thread_enter_audio_class();
+    // Realtime: asked of rtkit by the thread that opened the device (this one allocates
+    // nothing, and a D-Bus call does), for this thread's id; while it asks, this waits.
+    atomic_store(&a.tid, rtkit_thread_id(), MO_RELEASE);
+    for (u32 k = 0; k < 2000 && !atomic_load(&a.rt_decided, MO_ACQUIRE); ++k) time_sleep(0.001);
+    if (atomic_load(&a.rt_rtkit, MO_ACQUIRE)) {
+        thread_set_realtime(true); // the scheduler's class is rtkit's doing; the allocator's mark is ours
+    } else if (os_thread_enter_audio_class()) {
+        format(a.realtime, sizeof a.realtime, "SCHED_FIFO, from the process's own limit");
+    } else {
+        a.realtime[0] = 0;
+    }
+    atomic_store(&a.rt_done, 1u, MO_RELEASE);
     while (!atomic_load(&a.quit, MO_ACQUIRE)) {
         if (reserve_asked(a.reserve)) { alsa_lose(a, "another program asked for the device"); break; }
         if (atomic_load(&a.hold, MO_ACQUIRE)) {
@@ -301,7 +319,24 @@ void alsa_start(void* impl) {
     Alsa& a = *(Alsa*)impl;
     if (a.started) return;
     a.started = os_thread_start(&a.thread, alsa_run, &a);
-    if (!a.started) alsa_lose(a, "no thread for the device");
+    if (!a.started) { alsa_lose(a, "no thread for the device"); return; }
+    i64 tid = 0;
+    for (u32 k = 0; k < 2000 && !(tid = atomic_load(&a.tid, MO_ACQUIRE)); ++k) time_sleep(0.0005);
+    char why[160] = "";
+    u32 prio = 0;
+    if (tid && rtkit_make_realtime(tid, why, sizeof why, &prio)) {
+        int pol = sched_getscheduler((pid_t)tid) & ~SCHED_RESET_ON_FORK;
+        format(a.realtime, sizeof a.realtime, "%s %u, from rtkit", pol == SCHED_RR ? "SCHED_RR" : pol == SCHED_FIFO ? "SCHED_FIFO" : "realtime", prio);
+        atomic_store(&a.rt_rtkit, 1u, MO_RELEASE);
+    } else {
+        KV_INFO("hifi", "%s: not realtime through rtkit: %s", a.path, why);
+    }
+    atomic_store(&a.rt_decided, 1u, MO_RELEASE);
+}
+
+const char* alsa_realtime(void* impl) {
+    Alsa& a = *(Alsa*)impl;
+    return atomic_load(&a.rt_done, MO_ACQUIRE) ? a.realtime : nullptr;
 }
 
 u32 alsa_delay(void* impl) {
@@ -345,7 +380,7 @@ void* alsa_open(const HifiDeviceDesc&, HifiDeviceOpened& out) { out.reason = "th
 
 constinit const HifiBackend k_alsa_backend = {
     .name = "alsa", .has = alsa_has, .open = alsa_open, .start = alsa_start, .delay = alsa_delay, .hold = alsa_hold,
-    .close = alsa_close, .lost = alsa_lost, .list = nullptr, .alone_target = nullptr,
+    .close = alsa_close, .lost = alsa_lost, .list = nullptr, .alone_target = nullptr, .realtime = alsa_realtime,
 };
 
 } // namespace kv

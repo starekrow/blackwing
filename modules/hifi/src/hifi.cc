@@ -795,6 +795,9 @@ bool open_device(Hifi& h, const char** reason) {
     h.resampling = h.rs != nullptr;
     h.alone = o.alone;
     format(h.alone_why, sizeof h.alone_why, "%s", o.alone_why);
+    // Alone, the device opened is the one: "default" is not looked up again at a reopen
+    // (a rate change), when the card's own sink is gone and the default is another's.
+    if (o.alone && o.name[0]) { format(h.dev_name, sizeof h.dev_name, "%s", o.name); h.config.device = h.dev_name; }
     os_mutex_unlock(&h.lock);
     hifi_device_start(o.device);
     return true;

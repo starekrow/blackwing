@@ -94,6 +94,10 @@ void hifi_device_close(HifiDevice* d);
 // one it had when it went: frames given to it since were not heard. Any thread, not the
 // callback's.
 const char* hifi_device_lost(HifiDevice* d);
+// How the callback's thread is scheduled, in words ("SCHED_FIFO 20, from rtkit"); "" when it
+// is not realtime; null when the backend does not say (PipeWire's own thread, the capture
+// device's) or has not decided yet. Any thread.
+const char* hifi_device_realtime(HifiDevice* d);
 
 // ---- the devices there are -------------------------------------------------------------
 

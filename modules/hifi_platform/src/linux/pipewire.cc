@@ -729,7 +729,7 @@ u32 pw_list(HifiDeviceInfo* out, u32 cap) {
     return n;
 }
 
-bool pw_alone_target(const char* name, i32* card, i32* device) {
+bool pw_alone_target(const char* name, i32* card, i32* device, char* resolved, u32 resolved_cap) {
     const char* why = "";
     if (!session_lock(&why)) return false;
     bool found = false;
@@ -739,7 +739,12 @@ bool pw_alone_target(const char* name, i32* card, i32* device) {
     for (u32 i = 0; i < g_pw.nsinks && !found; ++i) {
         const HifiDeviceInfo& d = g_pw.sinks[i].info;
         bool match = dflt ? strcmp(g_pw.sinks[i].node_name, g_pw.default_sink) == 0 : strcmp(d.name, stable) == 0;
-        if ((g_pw.sinks[i].id || !dflt) && match && d.can_exclusive) { *card = d.alsa_card; *device = d.alsa_device; found = true; } // a sink being made again has the same card
+        if ((g_pw.sinks[i].id || !dflt) && match && d.can_exclusive) { // a sink being made again has the same card
+            *card = d.alsa_card;
+            *device = d.alsa_device;
+            snprintf(resolved, resolved_cap, "%s", d.name); // "default" as the device it is
+            found = true;
+        }
     }
     pw_thread_loop_unlock(g_pw.loop);
     return found;
@@ -749,7 +754,7 @@ bool pw_alone_target(const char* name, i32* card, i32* device) {
 
 constinit const HifiBackend k_pipewire_backend = {
     .name = "pipewire", .has = pw_has, .open = pw_open, .start = pw_start, .delay = pw_delay, .hold = pw_hold,
-    .close = pw_close, .lost = pw_lost, .list = pw_list, .alone_target = pw_alone_target,
+    .close = pw_close, .lost = pw_lost, .list = pw_list, .alone_target = pw_alone_target, .realtime = nullptr,
 };
 
 } // namespace kv
